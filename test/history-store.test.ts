@@ -13,7 +13,7 @@ const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex'
 const LOCK_FILE = path.join(home, 'Shared.md')
 
 const s = await import('../src/core/history/store')
-const { putObject, getObject, objectPath, indexPath, readIndex, writeIndex, withLock, writeAtomic, isExcluded, historyKey, listHistoryPaths } = s
+const { putObject, getObject, objectPath, indexPath, readIndex, writeIndex, withLock, writeAtomic, isExcluded, historyKey, listHistoryPaths, lockHooks } = s
 const filesDir = path.dirname(indexPath('x'))
 
 const ver = (n: number) => ({ n, firstAt: n, at: n, hash: 'h', size: 1, mtime: 1, authors: [], summary: '' })
@@ -83,6 +83,30 @@ test('locks: a stale lock (dead pid or older than 30 s) is taken over', async ()
   fs.writeFileSync(old, JSON.stringify({ pid: process.pid, at: Date.now() - 31_000 }))
   assert.equal(await withLock('old', async () => 'ok'), 'ok')
   assert.ok(!fs.existsSync(lock) && !fs.existsSync(old))
+})
+
+test('locks: a fresh lock appearing during takeover is never stolen', async () => {
+  const lock = path.join(filesDir, 'race.lock')
+  fs.writeFileSync(lock, JSON.stringify({ pid: 999999, at: Date.now() })) // stale
+  let otherHolds = false
+  let overlapped = false
+  lockHooks.beforeTakeover = () => {
+    lockHooks.beforeTakeover = undefined
+    // the other acquirer took over the stale lock and made a fresh one just before our rename
+    fs.rmSync(lock)
+    fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now(), id: 'other' }))
+    otherHolds = true
+    setTimeout(() => {
+      otherHolds = false
+      fs.rmSync(lock, { force: true })
+    }, 300)
+  }
+  await withLock('race', async () => {
+    overlapped = otherHolds
+  })
+  assert.equal(overlapped, false)
+  assert.ok(!fs.existsSync(lock))
+  assert.deepEqual(fs.readdirSync(filesDir).filter(f => f.startsWith('race.lock.')), [])
 })
 
 test('an index for another path is refused', () => {

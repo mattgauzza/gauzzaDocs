@@ -180,20 +180,60 @@ const alive = (pid: number) => {
     return (e as NodeJS.ErrnoException).code === 'EPERM' // exists, just not ours
   }
 }
-function lockIsStale(file: string): boolean {
+/** The lock's content when it is stale (dead pid, over 30 s old, or unreadable and old), else null. */
+function staleContent(file: string): string | null {
+  let raw: string
   try {
-    const raw = fs.readFileSync(file, 'utf8')
-    const l = JSON.parse(raw) as { pid?: number; at?: number }
-    if (typeof l.pid !== 'number' || typeof l.at !== 'number') return true
-    return Date.now() - l.at > LOCK_STALE_MS || !alive(l.pid)
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false
-    try {
-      return Date.now() - fs.statSync(file).mtimeMs > LOCK_STALE_MS // unreadable content: go by age
-    } catch {
-      return false
-    }
+    raw = fs.readFileSync(file, 'utf8')
+  } catch {
+    return null
   }
+  try {
+    const l = JSON.parse(raw) as { pid?: number; at?: number }
+    if (typeof l.pid === 'number' && typeof l.at === 'number') return Date.now() - l.at > LOCK_STALE_MS || !alive(l.pid) ? raw : null
+  } catch {
+    /* half-written or garbage: go by age */
+  }
+  try {
+    return Date.now() - fs.statSync(file).mtimeMs > LOCK_STALE_MS ? raw : null
+  } catch {
+    return null
+  }
+}
+
+/** Test seam: runs between judging a lock stale and moving it aside. */
+export const lockHooks: { beforeTakeover?: () => void } = {}
+
+/**
+ * Compare-and-swap takeover. Moves the lock aside under a unique name and reads it back: only if it is
+ * exactly what was judged stale is it deleted. Otherwise a fresh lock was moved by mistake and is put back.
+ * Returns true when the lock path is now free to try.
+ */
+function takeOver(file: string, judged: string): boolean {
+  lockHooks.beforeTakeover?.()
+  const aside = `${file}.stale-${process.pid}-${threadId}-${crypto.randomBytes(4).toString('hex')}`
+  try {
+    fs.renameSync(file, aside)
+  } catch {
+    return false // gone or taken by someone else
+  }
+  let moved: string | null = null
+  try {
+    moved = fs.readFileSync(aside, 'utf8')
+  } catch {
+    /* unreadable: treat as different */
+  }
+  if (moved === judged) {
+    fs.rmSync(aside, { force: true })
+    return true
+  }
+  try {
+    fs.linkSync(aside, file) // put it back only if the lock path is still free
+  } catch {
+    /* occupied: leave it to the new holder */
+  }
+  fs.rmSync(aside, { force: true })
+  return false
 }
 
 /** One writer at a time per file history, across processes. */
@@ -201,27 +241,20 @@ export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   const file = lockPath(key)
   fs.mkdirSync(FILES_DIR, { recursive: true })
   const until = Date.now() + LOCK_WAIT_MS
+  const mine = JSON.stringify({ pid: process.pid, at: Date.now(), id: crypto.randomBytes(4).toString('hex') })
   for (;;) {
     try {
       const fd = fs.openSync(file, 'wx')
       try {
-        fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
+        fs.writeSync(fd, mine)
       } finally {
         fs.closeSync(fd)
       }
       break
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
-      if (lockIsStale(file)) {
-        const aside = `${file}.stale-${process.pid}-${crypto.randomBytes(3).toString('hex')}`
-        try {
-          fs.renameSync(file, aside) // only one taker wins the rename
-          fs.rmSync(aside, { force: true })
-        } catch {
-          /* someone else took it over */
-        }
-        continue
-      }
+      const judged = staleContent(file)
+      if (judged !== null && takeOver(file, judged)) continue
       if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock (${key})`)
       await sleep(LOCK_RETRY_MS)
     }
@@ -229,7 +262,11 @@ export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   try {
     return await fn()
   } finally {
-    fs.rmSync(file, { force: true })
+    try {
+      if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }) // never delete a lock that is no longer ours
+    } catch {
+      /* already gone */
+    }
   }
 }
 
@@ -257,5 +294,5 @@ export function listHistoryPaths(): string[] {
     const idx = parseIndex(indexPath(k)) || parseIndex(bakPath(k)) // a set-aside index still has its backup
     if (idx) out.push(idx.path)
   }
-  return out
+  return [...new Set(out)]
 }
