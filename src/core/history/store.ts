@@ -94,13 +94,15 @@ export async function writeAtomic(file: string, bytes: Uint8Array): Promise<{ si
 export async function putObject(bytes: Uint8Array, ext: string): Promise<string> {
   const hash = sha256(bytes)
   const dest = objectPath(hash)
-  try {
-    const now = new Date()
-    await fs.promises.utimes(dest, now, now) // already stored: keep it fresh so cleanup leaves it alone
-    return hash
-  } catch {
-    /* not stored yet */
-  }
+  if (await getObject(hash)) {
+    try {
+      const now = new Date()
+      await fs.promises.utimes(dest, now, now) // already stored and good: keep it fresh so cleanup leaves it alone
+      return hash
+    } catch {
+      /* fall through and store it again */
+    }
+  } // missing or corrupt: (re)write it below
   await fs.promises.mkdir(path.dirname(dest), { recursive: true })
   const stored = STORED_AS_IS.has(ext.replace(/^\./, '').toLowerCase()) ? bytes : zlib.gzipSync(bytes)
   await writeAtomic(dest, stored)
@@ -131,8 +133,9 @@ const parseIndex = (file: string): HistoryIndex | null | undefined => {
   let text: string
   try {
     text = fs.readFileSync(file, 'utf8')
-  } catch {
-    return undefined // missing
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined // missing
+    throw e // unreadable right now: never mistake it for a missing index
   }
   try {
     const x = JSON.parse(text)
@@ -142,15 +145,20 @@ const parseIndex = (file: string): HistoryIndex | null | undefined => {
   }
 }
 
+/** Moves a corrupt index out of the way (with rename retries). Throws if it cannot, rather than letting it be overwritten. */
+const setAsideCorrupt = (file: string) => {
+  try {
+    renameRetrySync(file, `${file}.corrupt-${Date.now()}`)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+  }
+}
+
 /** The saved index, or null. A corrupt index is set aside (never overwritten) and the .bak is used instead. */
 export function readIndex(key: string, expectedPath?: string): HistoryIndex | null {
   let idx = parseIndex(indexPath(key))
   if (idx === null) {
-    try {
-      fs.renameSync(indexPath(key), `${indexPath(key)}.corrupt-${Date.now()}`)
-    } catch {
-      /* keep going with the backup */
-    }
+    setAsideCorrupt(indexPath(key))
   }
   if (!idx) idx = parseIndex(bakPath(key)) ?? null
   if (!idx) return null
@@ -161,7 +169,9 @@ export function readIndex(key: string, expectedPath?: string): HistoryIndex | nu
 export function writeIndex(key: string, index: HistoryIndex): void {
   const file = indexPath(key)
   fs.mkdirSync(FILES_DIR, { recursive: true })
-  if (parseIndex(file)) fs.copyFileSync(file, bakPath(key)) // keep the last good one
+  const current = parseIndex(file)
+  if (current === null) setAsideCorrupt(file) // never write over a corrupt index
+  else if (current) fs.copyFileSync(file, bakPath(key)) // keep the last good one
   const tmp = tmpName(file)
   try {
     fs.writeFileSync(tmp, JSON.stringify(index))
@@ -241,9 +251,10 @@ export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   const file = lockPath(key)
   fs.mkdirSync(FILES_DIR, { recursive: true })
   const until = Date.now() + LOCK_WAIT_MS
-  const mine = JSON.stringify({ pid: process.pid, at: Date.now(), id: crypto.randomBytes(4).toString('hex') })
+  let mine = ''
   for (;;) {
     try {
+      mine = JSON.stringify({ pid: process.pid, at: Date.now(), id: crypto.randomBytes(4).toString('hex') }) // stamped when taken, not when we started waiting
       const fd = fs.openSync(file, 'wx')
       try {
         fs.writeSync(fd, mine)
@@ -291,8 +302,12 @@ export function listHistoryPaths(): string[] {
   const keys = new Set(names.filter(n => n.endsWith('.json') || n.endsWith('.json.bak')).map(n => n.replace(/\.json(\.bak)?$/, '')))
   const out: string[] = []
   for (const k of keys) {
-    const idx = parseIndex(indexPath(k)) || parseIndex(bakPath(k)) // a set-aside index still has its backup
-    if (idx) out.push(idx.path)
+    try {
+      const idx = parseIndex(indexPath(k)) || parseIndex(bakPath(k)) // a set-aside index still has its backup
+      if (idx) out.push(idx.path)
+    } catch {
+      /* unreadable right now: leave it out of this listing */
+    }
   }
   return [...new Set(out)]
 }

@@ -44,6 +44,48 @@ test('objects: stored once by hash, verified on read', async () => {
   fs.writeFileSync(objectPath(h), 'garbage') // corrupted object
   assert.equal(await getObject(h), null)
   assert.equal(await getObject(sha256('missing')), null)
+  assert.equal(await putObject(Buffer.from('hello'), 'md'), h) // saved again: the bad object is rewritten
+  assert.deepEqual(Buffer.from((await getObject(h))!), Buffer.from('hello'))
+})
+
+test('index: writeIndex straight onto a corrupt index sets it aside', () => {
+  const k = 'c'.repeat(64)
+  fs.mkdirSync(filesDir, { recursive: true })
+  fs.writeFileSync(indexPath(k), '{ broken')
+  writeIndex(k, { path: 'C:/c.md', versions: [ver(1)] })
+  const aside = fs.readdirSync(filesDir).filter(f => f.startsWith(`${k}.json.corrupt-`))
+  assert.equal(aside.length, 1)
+  assert.equal(fs.readFileSync(path.join(filesDir, aside[0]), 'utf8'), '{ broken')
+  assert.equal(readIndex(k)!.versions.length, 1)
+})
+
+test('index: a read error other than "missing" throws instead of falling back', () => {
+  const k = 'd'.repeat(64)
+  writeIndex(k, { path: 'C:/d.md', versions: [ver(1)] })
+  writeIndex(k, { path: 'C:/d.md', versions: [ver(1), ver(2)] }) // .bak exists
+  const real = fs.readFileSync
+  fs.readFileSync = ((f: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (String(f) === indexPath(k)) throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+    return (real as (...a: unknown[]) => unknown)(f, ...rest)
+  }) as typeof fs.readFileSync
+  try {
+    assert.throws(() => readIndex(k), /busy/)
+  } finally {
+    fs.readFileSync = real
+  }
+  assert.equal(readIndex(k)!.versions.length, 2)
+})
+
+test('locks: the timestamp is taken when the lock is acquired, not when waiting began', async () => {
+  const lock = path.join(filesDir, 'stamp.lock')
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now(), id: 'other' }))
+  setTimeout(() => fs.rmSync(lock, { force: true }), 300)
+  const began = Date.now()
+  let at = 0
+  await withLock('stamp', async () => {
+    at = JSON.parse(fs.readFileSync(lock, 'utf8')).at
+  })
+  assert.ok(at >= began + 250, `lock stamped ${at - began} ms after waiting began`)
 })
 
 test('index: .bak kept; a corrupt index is set aside, never overwritten', () => {
