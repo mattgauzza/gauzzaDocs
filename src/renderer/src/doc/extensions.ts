@@ -138,14 +138,15 @@ export const AgentFlash = Extension.create({
 export const commentKey = new PluginKey<{ threads: { id: string; quote: string; color?: string }[]; deco: DecorationSet }>('commentMarks')
 
 /** Ranges for each quote: its first match in the document (the first line of a multi-line quote). */
-function commentDecos(doc: Parameters<typeof searchDoc>[0], threads: { id: string; quote: string; color?: string }[]) {
+function commentDecos(doc: Parameters<typeof searchDoc>[0], threads: { id: string; quote: string; color?: string; needsYou?: boolean }[]) {
   const decos: Decoration[] = []
   for (const t of threads) {
     const q = t.quote.split('\n').map(s => s.trim()).find(Boolean)
     if (!q) continue
     const hit = searchDoc(doc, q.slice(0, 300))[0]
     // An agent's thread highlights in that agent's color; the person's own comments stay Google Docs yellow.
-    if (hit) decos.push(Decoration.inline(hit[0], hit[1], { class: 'comment-mark', 'data-thread': t.id, ...(t.color ? { style: `--cmc: ${t.color}` } : {}) }))
+    // A thread where an agent asked the person something glows until they answer it.
+    if (hit) decos.push(Decoration.inline(hit[0], hit[1], { class: t.needsYou ? 'comment-mark needs-you' : 'comment-mark', 'data-thread': t.id, ...(t.color ? { style: `--cmc: ${t.color}` } : {}) }))
   }
   return DecorationSet.create(doc, decos)
 }

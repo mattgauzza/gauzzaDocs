@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { HOME, norm, samePath } from './paths'
+import { askPerson } from './person'
 
 /**
  * Agents subscribed to a document. The app (src/main/agents.ts) wakes a subscribed agent's own CLI in the background
@@ -223,7 +224,8 @@ ${file}
 
 ${ROLE_TEXT[sub.role]}
 ${sub.brief ? `\nBrief from the person:\n${sub.brief}\n` : ''}
-${team.length ? `Others working on it: ${team.map(o => `${o.name} (${o.role})`).join(', ')}. Mention one with @Name in a comment to ask them something.\n` : ''}
+${team.length ? `Others working on it: ${team.map(o => `${o.name} (${o.role})`).join(', ')}. Mention one with @Name in a comment to ask them something.\n` : ''}${askPerson()}
+
 What happened since your last turn:
 ${activity}
 

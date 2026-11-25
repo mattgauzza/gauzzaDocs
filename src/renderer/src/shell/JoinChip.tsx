@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { docId } from '../../../shared/docId'
+import { personName } from './needsYou'
 
 /**
  * What an agent you already have open (Claude Code, Codex... in a terminal) needs to join a document: the listen
@@ -11,6 +12,7 @@ export function joinPrompt(path: string) {
     `Join me in gauzzaDocs on ${id} ("${path}"). First run \`gdocs instructions ${id}\` and follow it. ` +
     `Then loop: run \`gdocs listen ${id} --once --agent <your name>\`, do what my comment or edit asks with small edits, ` +
     `reply in the thread with \`gdocs reply ${id} <thread id> "what you did" --resolve\`, and listen again. ` +
+    `If you need my answer, ask in the thread and write @${personName() || 'my name'} so it lights up for me. ` +
     `Stop when I say so, or if I disconnect you.`
   )
 }

@@ -184,6 +184,9 @@ Several agents can work on one document. To take part:
   of replacing it, unless the person or they asked you to change it. Fix only small things like typos directly.
 - Answer in the thread and resolve it when done. Don't reply just to acknowledge, and don't keep a back-and-forth going
   with another agent: if two rounds don't settle it, leave it for the person.
+- When you need the person's answer or a decision, ask in a comment and @mention them by the name their comments are
+  signed with (\`gdocs instructions <file>\` says it, e.g. @Matt). gauzzaDocs makes that thread glow for them. Don't
+  @mention them just to report progress.
 - The person can also subscribe agents to a document (\`gdocs subscribe <file> codex --role writer --brief "..." --start\`),
   and gauzzaDocs then wakes them in the background when there is something for them to do.
 `

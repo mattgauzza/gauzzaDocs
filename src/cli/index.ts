@@ -7,6 +7,7 @@ import { DOC_ID, docId } from '../shared/docId'
 import { listProjects } from '../core/projects'
 import { type AgentTarget, detectAgents, installSkills, removeSkills } from '../core/agentSkills'
 import { getGlobal, instructionsFor, setDocInstructions, setGlobal } from '../core/instructions'
+import { askPerson, personName } from '../core/person'
 import pkg from '../../package.json'
 import * as plugins from '../core/plugins'
 import { checkPlugin, scaffold } from '../../scripts/plugin-check.mjs'
@@ -437,11 +438,15 @@ program
       return out({ ok: true }, () => (o.clear ? 'cleared' : 'saved'))
     }
     const r = o.global ? { global: getGlobal(), file: '' } : instructionsFor(file && path.resolve(file))
-    out(r, () => {
+    // Who the person is, so agents know whom to @mention when they need an answer.
+    const person = personName()
+    out({ ...r, person }, () => {
       const parts = []
       if (r.global) parts.push(`## For every file\n\n${r.global}`)
       if (file && !o.global) parts.push(r.file ? `## For ${path.basename(file)}\n\n${r.file}` : `(no instructions saved in ${path.basename(file)})`)
-      return parts.join('\n\n') || 'No agent instructions. Set them with --set, or in the app under Tools → Agent instructions.'
+      if (!parts.length) parts.push('No agent instructions. Set them with --set, or in the app under Tools → Agent instructions.')
+      parts.push(`## Asking ${person}\n\n${askPerson(person)}`)
+      return parts.join('\n\n')
     })
   })
 

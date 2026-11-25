@@ -9,6 +9,7 @@ import { Home } from './shell/Home'
 import { EDITORS } from './editors'
 import { StatusBar } from './shell/StatusBar'
 import { Connections } from './shell/Connections'
+import { needsYouIn, trackFiles, useNeedsYou, useNeedsYouVersion } from './shell/needsYou'
 import { agentColor } from '../../shared/agentColors'
 import { ToolbarOverflow } from './shell/ToolbarOverflow'
 import { usePanelSize } from './shell/resize'
@@ -130,6 +131,9 @@ export default function App() {
   const [commentCount, setCommentCount] = useState(0)
   const [draftQuote, setDraftQuote] = useState('')
   const [focusDraft, setFocusDraft] = useState(0)
+  // Threads where an agent @mentioned the person and is waiting on them, for every open tab.
+  useNeedsYouVersion()
+  const asking = useNeedsYou(cur?.path ?? '')
   useEffect(() => {
     api.listeners().then(setListeners)
     return window.gd.on('listeners', (l: Listener[]) => setListeners(l))
@@ -245,6 +249,7 @@ export default function App() {
   const saveSettings = async (p: Partial<Settings>) => setSettingsState(await api.setSettings(p))
 
   // ---------- tell main what is open ----------
+  useEffect(() => trackFiles(tabs.map(t => t.path)), [tabs.map(t => t.path).join('|')])
   useEffect(() => {
     window.gd.tabs(tabs.map(t => ({ path: t.path, kind: t.kind, dirty: t.dirty, active: t.id === active, large: t.large })))
     try {
@@ -859,6 +864,7 @@ export default function App() {
             >
               <KindIcon kind={t.kind} size={16} />
               <span className="tab-name">{baseName(t.path)}</span>
+              {needsYouIn(t.path) && <span className="tab-ask" title="An agent asked you something in this file" />}
               {t.agent && t.agent.until > Date.now() && <span className="tab-agent" style={{ background: t.agent.color }} title={`${t.agent.name} is editing`} />}
               <button className={`tab-close${t.dirty ? ' dirty' : ''}`} onClick={e => (e.stopPropagation(), close(t.id))} title="Close (Ctrl+W)">
                 <Icon name="close" size={14} />
@@ -926,8 +932,9 @@ export default function App() {
               </button>
             )}
             <Participants path={cur.path} say={say} />
-            <button className={`icon-btn comments-btn${commentsOpen ? ' on' : ''}`} title="Comments (Ctrl+Alt+M comments on the selection)" onClick={() => setCommentsOpen(!commentsOpen)}>
+            <button className={`icon-btn comments-btn${commentsOpen ? ' on' : ''}${asking.size ? ' asking' : ''}`} title={asking.size ? `An agent asked you something here (${asking.size}). Comments (Ctrl+Alt+M comments on the selection)` : 'Comments (Ctrl+Alt+M comments on the selection)'} onClick={() => setCommentsOpen(!commentsOpen)}>
               <Icon name="comment" />
+              {asking.size > 0 && <span className="needs-dot" />}
               {commentCount > 0 && <span className="badge">{commentCount}</span>}
             </button>
             {agentNow && (

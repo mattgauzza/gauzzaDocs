@@ -5,6 +5,10 @@
 
 .comment-mark, .cm-comment-mark { --cmc: #fbbc04; background: color-mix(in srgb, var(--cmc) 28%, transparent); border-bottom: 2px solid color-mix(in srgb, var(--cmc) 90%, transparent); cursor: pointer; border-radius: 1px; }
 .comment-mark:hover, .cm-comment-mark:hover { background: color-mix(in srgb, var(--cmc) 45%, transparent); }
+/* An agent asked the person something about this text: it glows blue until they answer (the page is always white) */
+@keyframes ask-mark { 50% { box-shadow: 0 0 0 3px rgba(26, 115, 232, .28); } }
+.comment-mark.needs-you { box-shadow: 0 0 0 1px rgba(26, 115, 232, .55); box-decoration-break: clone; -webkit-box-decoration-break: clone; animation: ask-mark 2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .comment-mark.needs-you { animation: none; } }
 
 @keyframes cm-focus { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: var(--page-shadow); } }
 .cm-thread.focused { animation: cm-focus 1.6s ease-out; }

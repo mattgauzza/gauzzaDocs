@@ -61,6 +61,7 @@ export const api = {
   rename: (path: string, stem: string) => window.gd.call<string>('rename', path, stem),
   instructions: (path?: string) => window.gd.call<{ global: string; file: string; stored?: string }>('instructions', path),
   setInstructions: (path: string | null, text: string) => window.gd.call<number>('setInstructions', path, text),
+  userName: () => window.gd.call<string>('userName'),
   commentsList: (path: string, all = false) => window.gd.call<Thread[]>('commentsList', path, all),
   commentAdd: (path: string, c: { text: string; quote?: string; anchor?: Thread['anchor'] }) => window.gd.call<Thread>('commentAdd', path, c),
   commentReply: (path: string, id: string, text: string) => window.gd.call('commentReply', path, id, text),

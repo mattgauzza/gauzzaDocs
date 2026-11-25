@@ -19,6 +19,8 @@ import { stopWatching, watchFolders } from './folders'
 import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
 import { LOOK_MAX, closeLook, look } from './look'
+import { personName } from '../core/person'
+import { mentionsName } from '../shared/mentions'
 
 app.setAppUserModelId('app.gauzzadocs.desktop')
 protocol.registerSchemesAsPrivileged([
@@ -115,11 +117,13 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'comment': {
       const t = comments.add(file, { text: String(params.text || ''), quote: params.quote as string, anchor: params.anchor as never, author: agent.name, by: 'agent' })
       commentsChanged(file, { type: 'comment', by: 'agent', author: agent.name, thread: t })
+      flashIfAsked(t.text)
       return t
     }
     case 'reply': {
       const r = comments.reply(file, String(params.id), { text: String(params.text || ''), author: agent.name, by: 'agent' })
       commentsChanged(file, { type: 'reply', by: 'agent', author: agent.name, thread: r.thread, reply: r.reply })
+      flashIfAsked(r.reply.text)
       return r
     }
     case 'resolve': {
@@ -232,13 +236,11 @@ function commentsChanged(file: string, event: Record<string, unknown>) {
   win?.webContents.send('comments-changed', path.resolve(file))
   bridge?.emit({ ...event, type: String(event.type), path: path.resolve(file) })
 }
-const userName = () => {
-  try {
-    const n = os.userInfo().username
-    return n.charAt(0).toUpperCase() + n.slice(1)
-  } catch {
-    return 'You'
-  }
+const userName = personName
+
+/** An agent asked the person something (@Name): flash the taskbar button if gauzzaDocs isn't the window in front. */
+function flashIfAsked(text: string) {
+  if (win && !win.isDestroyed() && !win.isFocused() && mentionsName(text, userName())) win.flashFrame(true)
 }
 
 // ---------- window ----------
@@ -258,6 +260,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, '../preload/index.js'), sandbox: false, spellcheck: true }
   })
   win.once('ready-to-show', () => win?.show())
+  win.on('focus', () => win?.flashFrame(false))
   win.on('closed', () => {
     win = null
     tabs = []
@@ -453,6 +456,8 @@ const api: Record<string, (...a: any[]) => unknown> = {
   pluginsRemove: (id: string) => work('pluginsRemove', [id]),
   pluginsSetEnabled: (id: string, on: boolean) => work('pluginsSetEnabled', [id, on]),
   // Comments made in the window are the person's.
+  /** The person's name: their comments are signed with it and agents @mention it to ask them something. */
+  userName: () => userName(),
   commentsList: (file: string, all?: boolean) => comments.list(file, { all }),
   commentAdd: (file: string, c: { text: string; quote?: string; anchor?: comments.Thread['anchor'] }) => {
     const t = comments.add(file, { ...c, author: userName(), by: 'user' })

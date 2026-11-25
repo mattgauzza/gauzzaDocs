@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { type Listener, type Thread, api, when } from '../lib'
 import { Icon } from './icons'
 import { usePanelSize } from './resize'
 import { JoinChip } from './JoinChip'
 import { agentColor } from '../../../shared/agentColors'
+import { markSeen, useNeedsYou } from './needsYou'
 
 /** Open threads that quote some text, for highlighting in the editor. Reloads whenever the file's threads change. */
 export function useQuotedThreads(path: string) {
   const [threads, setThreads] = useState<{ id: string; quote: string; color?: string }[]>([])
+  const needs = useNeedsYou(path)
   useEffect(() => {
     let alive = true
     const load = () =>
@@ -22,7 +24,8 @@ export function useQuotedThreads(path: string) {
       off()
     }
   }, [path])
-  return threads
+  // Threads where an agent asked the person something glow in the text too.
+  return useMemo(() => threads.map(t => (needs.has(t.id) ? { ...t, needsYou: true } : t)), [threads, needs])
 }
 
 /** Asks the shell to open the comments panel on one thread (clicking a highlight in the editor). */
@@ -49,6 +52,7 @@ export function CommentsPanel(props: {
   const [quote, setQuote] = useState(props.draftQuote)
   const box = useRef<HTMLTextAreaElement>(null)
   const fresh = useRef(new Set<string>()) // threads/replies that just arrived from an agent, highlighted briefly
+  const needs = useNeedsYou(props.path) // threads where an agent asked the person something
 
   const load = () =>
     api.commentsList(props.path, true).then(ts => {
@@ -100,7 +104,8 @@ export function CommentsPanel(props: {
     setQuote('')
     load()
   }
-  const shown = threads.filter(t => showResolved || !t.resolved)
+  // Newest first, with the threads that need the person on top.
+  const shown = threads.filter(t => showResolved || !t.resolved).reverse().sort((a, b) => +needs.has(b.id) - +needs.has(a.id))
 
   return (
     <aside className="comments" style={{ width }}>
@@ -155,8 +160,8 @@ export function CommentsPanel(props: {
 
       <div className="cm-list" ref={listRef}>
         {!shown.length && <p className="muted small cm-empty">No comments yet. Select something and press Ctrl+Alt+M, or write above.</p>}
-        {[...shown].reverse().map(t => (
-          <ThreadCard key={t.id} t={t} path={props.path} fresh={fresh.current} onChange={load} />
+        {shown.map(t => (
+          <ThreadCard key={t.id} t={t} path={props.path} fresh={fresh.current} needsYou={needs.has(t.id)} onChange={load} />
         ))}
       </div>
     </aside>
@@ -171,7 +176,7 @@ function Avatar({ name, by }: { name: string; by: 'user' | 'agent' }) {
   )
 }
 
-function ThreadCard({ t, path, fresh, onChange }: { t: Thread; path: string; fresh: Set<string>; onChange(): void }) {
+function ThreadCard({ t, path, fresh, needsYou, onChange }: { t: Thread; path: string; fresh: Set<string>; needsYou: boolean; onChange(): void }) {
   const [reply, setReply] = useState('')
   const [open, setOpen] = useState(false)
   const send = async () => {
@@ -186,13 +191,14 @@ function ThreadCard({ t, path, fresh, onChange }: { t: Thread; path: string; fre
     return true
   }
   return (
-    <div data-thread={t.id} style={t.by === 'agent' ? { ['--agent' as string]: agentColor(t.author), borderLeft: `3px solid ${agentColor(t.author)}` } : undefined} className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}`} onClick={() => setOpen(true)}>
+    <div data-thread={t.id} style={t.by === 'agent' ? { ['--agent' as string]: agentColor(t.author), borderLeft: `3px solid ${agentColor(t.author)}` } : undefined} className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}${needsYou ? ' needs-you' : ''}`} onClick={() => (setOpen(true), markSeen(path, t))}>
       <div className="cm-head">
         <Avatar name={t.author} by={t.by} />
         <div className="grow">
           <b>{t.author}</b>{t.by === 'agent' && <span className="cm-badge">agent</span>}
           <div className="muted small">{when(t.created)}{t.resolved ? ' · resolved' : ''}</div>
         </div>
+        {needsYou && <span className="cm-needs" title="An agent asked you something here. Reply, resolve or click to clear it.">Needs you</span>}
         <button className="icon-btn sm" title={t.resolved ? 'Reopen' : 'Resolve'} onClick={e => (e.stopPropagation(), api.commentResolve(path, t.id, !t.resolved).then(onChange))}>
           <Icon name={t.resolved ? 'sync' : 'check'} size={18} />
         </button>

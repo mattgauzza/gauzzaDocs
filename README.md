@@ -95,6 +95,10 @@ Select some text and press Ctrl+Alt+M (or use the comment button) to leave a com
 right away, along with small before and after diffs of anything you change. It answers in the comment thread and its
 reply shows up live. The header says "Claude is listening" while one is connected.
 
+When an agent needs your answer it writes @ and your name in the thread. That thread glows with a "Needs you" tag, the
+comments button and the file's tab get a dot, and the taskbar button flashes if gauzzaDocs isn't in front. It stops when
+you reply, resolve the thread or click it.
+
 ```
 gdocs listen report.md --once         # wait for your next comment, reply or edit, then exit
 gdocs comments report.md --waiting    # threads still waiting for an answer

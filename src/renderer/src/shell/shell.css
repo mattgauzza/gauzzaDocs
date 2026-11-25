@@ -212,6 +212,19 @@ textarea.instructions { min-height: 110px; padding: 10px 12px; border: 1px solid
 .cm-thread { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface); box-shadow: var(--page-shadow); cursor: default; transition: box-shadow .2s, background .6s; }
 .cm-thread.resolved { opacity: .6; }
 .cm-thread.fresh, .cm-reply.fresh { background: color-mix(in srgb, var(--agent) 12%, transparent); }
+/* An agent asked the person something here ("Needs you"): a soft pulsing glow until they reply, resolve or click it */
+@keyframes ask-glow {
+  0%, 100% { box-shadow: var(--page-shadow), 0 0 0 2px color-mix(in srgb, var(--accent) 65%, transparent), 0 0 10px 1px color-mix(in srgb, var(--accent) 30%, transparent); }
+  50% { box-shadow: var(--page-shadow), 0 0 0 2px var(--accent), 0 0 22px 5px color-mix(in srgb, var(--accent) 45%, transparent); }
+}
+@keyframes ask-dot { 50% { box-shadow: 0 0 0 2px var(--bg), 0 0 0 6px color-mix(in srgb, var(--accent) 35%, transparent); } }
+.cm-thread.needs-you { animation: ask-glow 2s ease-in-out infinite; }
+.cm-needs { flex: none; align-self: center; padding: 2px 8px; border-radius: 10px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.comments-btn.asking { color: var(--accent); }
+.comments-btn .needs-dot { position: absolute; top: 4px; left: 4px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); animation: ask-dot 1.6s ease-in-out infinite; }
+/* on the tab's file icon, so the name keeps its room */
+.tab-ask { position: absolute; left: 23px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); animation: ask-dot 1.6s ease-in-out infinite; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .cm-thread.needs-you, .comments-btn .needs-dot, .tab-ask { animation: none; } }
 .cm-head { display: flex; align-items: center; gap: 8px; }
 .cm-head b { font-weight: 600; font-size: 13px; }
 .cm-badge { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: color-mix(in srgb, var(--agent) 15%, transparent); color: var(--agent); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
