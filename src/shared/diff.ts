@@ -2,6 +2,9 @@ import { diffLines } from 'diff'
 
 export type Hunk = { kind: 'same' | 'add' | 'del'; lines: string[] }
 
+/** CRLF becomes LF and one final newline is dropped, so line endings and a missing last newline are not changes. */
+const normalize = (text: string) => text.replace(/\r\n/g, '\n').replace(/\n$/, '')
+
 const split = (value: string): string[] => {
   const lines = value.split('\n')
   if (lines.at(-1) === '') lines.pop()
@@ -14,7 +17,7 @@ const split = (value: string): string[] => {
  * No changes gives [].
  */
 export function lineDiff(a: string, b: string, context = 3): Hunk[] {
-  const raw: Hunk[] = diffLines(a, b).map(p => ({ kind: p.added ? 'add' : p.removed ? 'del' : 'same', lines: split(p.value) }))
+  const raw: Hunk[] = diffLines(normalize(a), normalize(b)).map(p => ({ kind: p.added ? 'add' : p.removed ? 'del' : 'same', lines: split(p.value) }))
   if (!raw.some(h => h.kind !== 'same')) return []
   const out: Hunk[] = []
   raw.forEach((h, i) => {

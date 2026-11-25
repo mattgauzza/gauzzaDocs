@@ -4,7 +4,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
+import { docBytes } from '../src/core/formats/doc'
 import { sheetBytes } from '../src/core/formats/sheet'
+import { slidesBytes } from '../src/core/formats/slides'
+import { deckToMarkdown, markdownToDeck } from '../src/shared/slides/markdown'
 import { compareVersions, versionText } from '../src/core/history/index'
 import { lineDiff, type Hunk } from '../src/shared/diff'
 import type { Workbook } from '../src/shared/types'
@@ -66,13 +69,14 @@ test('a sheet change shows the old and new cell lines', async () => {
     const add = r.hunks.filter(x => x.kind === 'add').flatMap(x => x.lines)
     assert.ok(del.includes('Sheet1!B7: 10'), JSON.stringify(del))
     assert.ok(add.includes('Sheet1!B7: 12'), JSON.stringify(add))
+    assert.match(await versionText(f, a), /^Sheet1!C1: =B7\/2$/m)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test('text is decoded as UTF-8 as is, and temp files are cleaned up', async () => {
-    assert.equal(await versionText('notes.txt', enc('Hi\nthere\n')), 'Hi\nthere\n')
+  assert.equal(await versionText('notes.txt', enc('Hi\nthere\n')), 'Hi\nthere\n')
   assert.deepEqual(fs.readdirSync(os.tmpdir()).filter(n => n.startsWith(`gd-compare-${process.pid}-`)), [])
 })
 
@@ -95,4 +99,42 @@ test('a side over 8 MB returns tooLarge without doing any work', async () => {
   const big = new Uint8Array(9 * 1024 * 1024)
   assert.deepEqual(await compareVersions('big.md', big, enc('x')), { tooLarge: true })
   assert.deepEqual(await compareVersions('big.md', enc('x'), big), { tooLarge: true })
+})
+
+test('CRLF on both sides gives hunk lines without carriage returns', () => {
+  const h = lineDiff('a\r\nb\r\nc\r\n', 'a\r\nB\r\nc\r\n')
+  assert.deepEqual(h, [
+    { kind: 'same', lines: ['a'] },
+    { kind: 'del', lines: ['b'] },
+    { kind: 'add', lines: ['B'] },
+    { kind: 'same', lines: ['c'] },
+  ])
+})
+
+test('CRLF against LF, otherwise equal, is no change', () => {
+  assert.deepEqual(lineDiff('a\r\nb\r\n', 'a\nb\n'), [])
+})
+
+test('a missing final newline on one side is no change', () => {
+  assert.deepEqual(lineDiff('a\nb', 'a\nb\n'), [])
+  assert.deepEqual(lineDiff('a\nb\n', 'a\nb'), [])
+})
+
+test('diffing from empty text gives one add hunk', () => {
+  assert.deepEqual(lineDiff('', 'x'), [{ kind: 'add', lines: ['x'] }])
+})
+
+test('a doc version is compared as Markdown', async () => {
+  const f = 'plan.docx'
+  const text = await versionText(f, await docBytes(f, '<h1>Plan</h1><p>First <strong>point</strong></p>'))
+  assert.match(text, /^# Plan$/m)
+  assert.match(text, /^First \*\*point\*\*$/m)
+})
+
+test('a slides version is compared as deck Markdown', async () => {
+  const md = '# Quarterly review\n\n- one\n- two\n'
+  const text = await versionText('deck.pptx', await slidesBytes('deck.pptx', markdownToDeck(md)))
+  assert.match(text, /^# Quarterly review$/m)
+  assert.match(text, /^- one$/m)
+  assert.equal(text, deckToMarkdown(markdownToDeck(md)))
 })

@@ -48,7 +48,10 @@ export async function versionText(file: string, bytes: Uint8Array): Promise<stri
         throw new Error(`Cannot compare .${ext} files as text`)
     }
   } finally {
-    fs.rmSync(tmp, { force: true })
+    // A held temp file (antivirus, indexer) must not fail the comparison; leaving it behind is fine.
+    try {
+      fs.rmSync(tmp, { force: true, maxRetries: 5, retryDelay: 100 })
+    } catch {}
   }
 }
 
