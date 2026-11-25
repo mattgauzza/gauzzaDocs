@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('gd', {
   platform: process.platform,
   call: (method: string, ...args: unknown[]) => ipcRenderer.invoke('api', method, args),
   /** Requests from main (agent ops, open/close from the CLI). The handler's return value or error is sent back. */
-  serve: (channel: 'agent' | 'open' | 'close' | 'snapshot' | 'look-prepare' | 'look-shot', handler: (req: any) => Promise<unknown>) => {
+  serve: (channel: 'agent' | 'open' | 'close' | 'snapshot' | 'look-prepare' | 'look-shot' | 'history-restore', handler: (req: any) => Promise<unknown>) => {
     const h = async (_e: unknown, req: { id: number }) => {
       try {
         ipcRenderer.invoke('agent:reply', req.id, { result: await handler(req) })
@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('gd', {
     ipcRenderer.on(channel, h)
     return () => ipcRenderer.removeListener(channel, h)
   },
-  on: (channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'agents-state' | 'update' | 'context-command' | 'folder-changed', cb: (...a: any[]) => void) => {
+  on: (channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'agents-state' | 'update' | 'context-command' | 'folder-changed' | 'history-paused', cb: (...a: any[]) => void) => {
     const h = (_e: unknown, ...a: any[]) => cb(...a)
     ipcRenderer.on(channel, h)
     return () => ipcRenderer.removeListener(channel, h)

@@ -1,5 +1,6 @@
-import type { InstalledPlugin, OpenFile, RecentFile, Settings, FilePayload } from '../../shared/types'
+import type { Author, HistoryVersion, InstalledPlugin, OpenFile, RecentFile, Settings, FilePayload } from '../../shared/types'
 import type { Kind } from '../../shared/kinds'
+import type { Hunk } from '../../shared/diff'
 
 /** Mirrors src/core/comments.ts (kept here so the window does not import Node code). */
 export interface Reply { id: string; author: string; by: 'user' | 'agent'; text: string; created: number }
@@ -35,10 +36,20 @@ export interface AgentStatus {
   nextAt?: number
 }
 
+/** Mirrors src/core/history/log.ts HistoryEvent: one line of a file's work history. */
+export interface HistoryEvent { at: number; type: string; by: string; summary: string; v?: number }
+/** What changed between two versions (src/core/history/compare.ts), or too large to compare here. */
+export type HistoryDiff = { hunks: Hunk[] } | { tooLarge: true }
+/** The history store's size and cap; paused: why history stopped recording this session; dir: where it is kept. */
+export interface HistoryStats { bytes: number; capBytes: number; overCapBytes?: number; paused?: string; dir?: string }
+/** Who changed a file since its last save, and what the agents did (a save's version authors and summary). */
+export interface SaveContext { authors: Author[]; summary?: string }
+
 /** Typed wrappers over window.gd.call (main process API in src/main/index.ts). */
 export const api = {
   load: (path: string) => window.gd.call<OpenFile>('load', path),
-  save: (path: string, payload: FilePayload) => window.gd.call<number>('save', path, payload),
+  /** ctx: who changed it since the last save; main credits the person when it is left out. */
+  save: (path: string, payload: FilePayload, ctx?: SaveContext) => window.gd.call<number>('save', path, payload, ctx),
   newFile: (kind: Kind, ext?: string, dir?: string) => window.gd.call<string>('newFile', kind, ext, dir),
   projectsList: () => window.gd.call<Project[]>('projectsList'),
   projectsAdd: (dir: string, name?: string) => window.gd.call<Project>('projectsAdd', dir, name),
@@ -107,6 +118,26 @@ export const api = {
   welcomed: () => window.gd.call<boolean>('welcomed'),
   setWelcomed: () => window.gd.call('setWelcomed'),
   openUrl: (url: string) => window.gd.call('openUrl', url),
+  /** The person's name, as comments and versions credit them. */
+  userName: () => window.gd.call<string>('userName'),
+  // ---------- version history (src/main/historyJobs.ts) ----------
+  /** Versions, oldest first. */
+  historyList: (path: string) => window.gd.call<HistoryVersion[]>('historyList', path),
+  /** The work history, newest first. */
+  historyLog: (path: string) => window.gd.call<HistoryEvent[]>('historyLog', path),
+  /** Changes from version a to version b, or to the file on disk now when b is left out. */
+  historyDiff: (path: string, a: number, b?: number) => window.gd.call<HistoryDiff>('historyDiff', path, a, b),
+  /** Unsaved editor content goes as unsavedPayload (kept as a version, never written); authors default to the person. */
+  historyRestore: (path: string, n: number, opts: { unsavedPayload?: FilePayload; discardCurrent?: boolean; authors?: Author[] } = {}) =>
+    window.gd.call<HistoryVersion>('historyRestore', path, n, opts),
+  /** An empty name clears it. Main credits the person (userName). */
+  historyName: (path: string, n: number, name: string) => window.gd.call('historyName', path, n, name),
+  historyForget: (path: string) => window.gd.call('historyForget', path),
+  /** Records the file on disk as an outside change when it differs from its latest version. */
+  historyCheck: (path: string) => window.gd.call('historyCheck', path),
+  historyStats: () => window.gd.call<HistoryStats>('historyStats'),
+  /** Writes version n to a new file in the docs folder and returns its path. */
+  historyOpenCopy: (path: string, n: number) => window.gd.call<string>('historyOpenCopy', path, n),
   quit: () => window.gd.call('quit')
 }
 

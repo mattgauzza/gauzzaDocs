@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type Kind, baseName, extOf, kindOf, lossy, stem } from '../../shared/kinds'
-import type { AgentInfo, AgentOp, FilePayload, Settings } from '../../shared/types'
+import type { AgentInfo, AgentOp, Author, FilePayload, HistoryVersion, Settings } from '../../shared/types'
 import type { EditorHandle, EditorProps, MenuItem, MenuName } from './editor'
 import { type Listener, api, dirOf } from './lib'
 import { DONATE, EMPIRICAL_VOICE, REPO, SUBMIT_PLUGIN } from '../../shared/links'
@@ -16,6 +16,8 @@ import { Onboarding } from './shell/Onboarding'
 import { Explorer } from './shell/Explorer'
 import { TabBoundary } from './shell/TabBoundary'
 import { CommentsPanel } from './shell/Comments'
+import { HistoryPanel } from './shell/History'
+import { errorText, saveContext } from './shell/historyView'
 import { diffLines } from './shell/diff'
 import LargeViewer from './shell/LargeViewer'
 import { Participants } from './shell/Participants'
@@ -121,6 +123,11 @@ export default function App() {
     api.updateReady().then(v => v && setUpdate(v))
     return window.gd.on('update', (v: string) => setUpdate(v))
   }, [])
+  // A history failure never stops saving; main says so once per session.
+  useEffect(() => window.gd.on('history-paused', (reason: string) => say(`Version history paused: ${reason}`)), [])
+  // The person's name, as their versions credit them.
+  const personRef = useRef('You')
+  useEffect(() => void api.userName().then(n => void (n && (personRef.current = n)), () => {}), [])
 
   // ---------- two-way: comments and the agents listening ----------
   const [listeners, setListeners] = useState<Listener[]>([])
@@ -138,6 +145,15 @@ export default function App() {
     setCommentCount(0)
     if (cur) api.commentsList(cur.path).then(ts => setCommentCount(ts.length), () => {})
   }, [cur?.path])
+  // Version history takes the comments' place beside the file (File > Version history, Ctrl+Alt+Shift+H).
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const showHistory = (on: boolean) => {
+    setHistoryOpen(on)
+    if (on) setCommentsOpen(false)
+  }
+  useEffect(() => {
+    if (commentsOpen) setHistoryOpen(false)
+  }, [commentsOpen])
   const listensTo = (file: string) => listenersRef.current.filter(l => !l.path || l.path.toLowerCase() === file.toLowerCase())
   const addComment = () => {
     const t = tabsRef.current.find(x => x.id === activeRef.current)
@@ -346,21 +362,48 @@ export default function App() {
     }
   }
 
+  // ---------- who changed each tab since its last save: its next version's authors ----------
+  // Every edit adds the person, or the agent whose op is landing on that tab; agent ops that changed something are
+  // named in the version's summary. A save takes them all and starts afresh.
+  const tabAuthors = useRef(new Map<number, { authors: Map<string, Author>; ops: string[] }>())
+  const agentRunning = useRef(new Map<number, { name: string; op: string; changed?: boolean }[]>())
+  const noteChange = (id: number) => {
+    const run = agentRunning.current.get(id)?.at(-1)
+    const a: Author = run ? { name: run.name, by: 'agent' } : { name: personRef.current, by: 'person' }
+    let e = tabAuthors.current.get(id)
+    if (!e) tabAuthors.current.set(id, (e = { authors: new Map(), ops: [] }))
+    e.authors.set(`${a.by}:${a.name}`, a)
+    if (run && !run.changed) {
+      run.changed = true
+      e.ops.push(run.op)
+    }
+  }
+  /** A save that failed gives its authors back, ahead of anyone who edited meanwhile. */
+  const giveBack = (id: number, taken: { authors: Map<string, Author>; ops: string[] }) => {
+    const now = tabAuthors.current.get(id)
+    tabAuthors.current.set(id, now ? { authors: new Map([...taken.authors, ...now.authors]), ops: [...taken.ops, ...now.ops] } : taken)
+  }
+  /** Tabs being restored from version history: no saves meanwhile, or the old content would land over the restore. */
+  const restoring = useRef(new Set<number>())
+
   // ---------- saving ----------
   const save = useCallback(async (id: number, opts: { explicit?: boolean } = {}) => {
     const t = tabsRef.current.find(x => x.id === id)
     const h = handles.current.get(id)
-    if (!t || !h || !t.payload || t.large) return
+    if (!t || !h || !t.payload || t.large || restoring.current.has(id)) return
     window.clearTimeout(saveTimers.current.get(id))
     if (t.external && !opts.explicit) return // never overwrite someone else's change without being asked
     patch(id, { saving: true, error: undefined })
     const seq = changeSeq.current.get(id) || 0
+    const taken = tabAuthors.current.get(id)
+    tabAuthors.current.delete(id)
     try {
       const payload = await h.getPayload()
-      const mtime = await api.save(t.path, payload)
+      const mtime = await api.save(t.path, payload, taken ? saveContext([...taken.authors.values()], taken.ops) : undefined)
       patch(id, { saving: false, dirty: (changeSeq.current.get(id) || 0) !== seq, mtime, saved: Date.now(), external: false })
       window.gd.changed(t.path, { type: 'saved' })
     } catch (e) {
+      if (taken) giveBack(id, taken)
       patch(id, { saving: false, error: (e as Error).message })
       say(`Could not save ${baseName(t.path)}: ${(e as Error).message}`)
     }
@@ -424,6 +467,7 @@ export default function App() {
     const t = tabsRef.current.find(x => x.id === id)
     if (!t) return
     changeSeq.current.set(id, (changeSeq.current.get(id) || 0) + 1)
+    noteChange(id)
     if (!t.dirty) patch(id, { dirty: true })
     window.gd.changed(t.path, { type: 'changed' })
     if (!agentBusy.current.has(id)) userEdited(id)
@@ -460,6 +504,8 @@ export default function App() {
   const closeNow = (id: number) => {
     window.clearTimeout(saveTimers.current.get(id))
     handles.current.delete(id)
+    tabAuthors.current.delete(id)
+    agentRunning.current.delete(id)
     const list = tabsRef.current
     const i = list.findIndex(t => t.id === id)
     const rest = list.filter(t => t.id !== id)
@@ -507,12 +553,16 @@ export default function App() {
   useEffect(() => {
     const iv = window.setInterval(async () => {
       for (const t of tabsRef.current) {
-        if (t.saving || !t.payload) continue // asleep: it reloads from disk when woken anyway
+        if (t.saving || !t.payload || restoring.current.has(t.id)) continue // asleep: it reloads from disk when woken anyway
         const m = await api.mtime(t.path)
         const now = tabsRef.current.find(x => x.id === t.id)
-        if (!m || !now || now.saving || Math.abs(m - now.mtime) < 1) continue
+        if (!m || !now || now.saving || restoring.current.has(t.id) || Math.abs(m - now.mtime) < 1) continue
         if (now.dirty) {
-          if (!now.external) patch(t.id, { external: true })
+          if (!now.external) {
+            patch(t.id, { external: true })
+            // Their version is kept before anything here can be saved over it.
+            api.historyCheck(t.path).catch(() => {})
+          }
           continue
         }
         reloadFromDisk(t.id)
@@ -526,9 +576,34 @@ export default function App() {
     try {
       const f = await api.load(t.path)
       handles.current.delete(id)
+      tabAuthors.current.delete(id) // the edits they were credited for are gone
       patch(id, x => ({ payload: f.payload, mtime: f.mtime, version: x.version + 1, dirty: false, external: false }))
     } catch (e) {
       patch(id, { mtime: Date.now(), error: (e as Error).message })
+    }
+  }
+
+  /**
+   * Restores version n of an open file (from the panel, or from `gdocs history restore` while it is open). Unsaved
+   * edits go along as a payload: the store keeps them as a version, never written to the file. Then the tab reloads
+   * from disk. A sleeping tab has nothing unsaved and loads the restored file when it wakes.
+   */
+  const restoreInTab = async (id: number, n: number, opts: { discardCurrent?: boolean; authors?: Author[] } = {}): Promise<HistoryVersion> => {
+    restoring.current.add(id)
+    window.clearTimeout(saveTimers.current.get(id))
+    try {
+      // A save already on its way finishes first.
+      for (let i = 0; i < 100 && tabsRef.current.find(x => x.id === id)?.saving; i++) await new Promise(r => setTimeout(r, 50))
+      const t = tabsRef.current.find(x => x.id === id)
+      if (!t) throw new Error('That file is no longer open')
+      const h = handles.current.get(id)
+      const unsavedPayload = t.dirty && h && t.payload && !t.large ? await (h.peekPayload ?? h.getPayload)() : undefined
+      const v = await api.historyRestore(t.path, n, { unsavedPayload, discardCurrent: opts.discardCurrent, authors: opts.authors })
+      tabAuthors.current.delete(id) // the unsaved edits are a version now
+      if (tabsRef.current.find(x => x.id === id)?.payload) await reloadFromDisk(id)
+      return v
+    } finally {
+      restoring.current.delete(id)
     }
   }
 
@@ -576,12 +651,18 @@ export default function App() {
         } else if (!snapshots.current.has(t.id)) await snapshotNow(t.id)
       }
       agentBusy.current.add(t.id)
+      // Edits while this op lands are the agent's (its name goes on the next version, and the op in its summary).
+      const run = { name: req.agent?.name || 'Agent', op: req.op.op }
+      if (!reading) agentRunning.current.set(t.id, [...(agentRunning.current.get(t.id) || []), run])
       try {
         return await h.agent(req.op, req.agent)
       } finally {
         // Other listeners (other agents) hear this agent's change as a diff signed with its name; the agent itself
         // filters its own events out. Wait a moment for the edit to land in the editor.
         window.setTimeout(async () => {
+          const left = (agentRunning.current.get(t.id) || []).filter(r => r !== run)
+          if (left.length) agentRunning.current.set(t.id, left)
+          else agentRunning.current.delete(t.id)
           if (watched) await emitDiff(t.id, { by: 'agent', author: req.agent?.name || 'Agent' })
           else await snapshotNow(t.id)
           agentBusy.current.delete(t.id)
@@ -600,7 +681,17 @@ export default function App() {
       }
       return { kind: t.kind, payload: await (h.peekPayload ?? h.getPayload)() }
     })
-    return () => (offOpen(), offClose(), offAgent(), offSnapshot())
+    // `gdocs history restore` on a file open here: restored through its tab, as the panel does.
+    const offRestore = window.gd.serve('history-restore', async (req: { path: string; n: number; discardCurrent?: boolean; authors?: Author[] }) => {
+      const t = tabFor(req.path)
+      try {
+        if (!t) return await api.historyRestore(req.path, req.n, { discardCurrent: req.discardCurrent, authors: req.authors })
+        return await restoreInTab(t.id, req.n, { discardCurrent: req.discardCurrent, authors: req.authors })
+      } catch (e) {
+        throw new Error(errorText(e))
+      }
+    })
+    return () => (offOpen(), offClose(), offAgent(), offSnapshot(), offRestore())
   }, [])
 
   // ---------- Ctrl+scroll zooms the document in focus (trackpad pinch arrives as Ctrl+wheel too) ----------
@@ -719,6 +810,17 @@ export default function App() {
     window.addEventListener('keydown', k)
     return () => window.removeEventListener('keydown', k)
   })
+  // Ctrl+Alt+Shift+H, as in Google Docs. Caught before the editors see it (the sheet's Ctrl+H would open its find bar).
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || !e.altKey || !e.shiftKey || (e.code !== 'KeyH' && e.key.toLowerCase() !== 'h')) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (tabsRef.current.some(x => x.id === activeRef.current)) showHistory(!historyOpen)
+    }
+    window.addEventListener('keydown', k, true)
+    return () => window.removeEventListener('keydown', k, true)
+  })
 
   // ---------- menus ----------
   const menus = useMemo(() => {
@@ -751,6 +853,7 @@ export default function App() {
       ...(exportsFor[cur.kind].length ? [{ label: 'Download', submenu: exportsFor[cur.kind].map(([label, f]) => ({ label, run: () => exportAs(cur, f) })) }] : []),
       { label: 'Show in folder', run: () => api.reveal(cur.path) },
       { label: 'Reload from disk', run: () => reloadFromDisk(cur.id) },
+      { label: 'Version history', shortcut: 'Ctrl+Alt+Shift+H', run: () => showHistory(true) },
       sep,
       { label: 'Print', shortcut: 'Ctrl+P', run: () => print(cur) },
       { label: 'Close', shortcut: 'Ctrl+W', run: () => close(cur.id) }
@@ -926,6 +1029,9 @@ export default function App() {
               </button>
             )}
             <Participants path={cur.path} say={say} />
+            <button className={`icon-btn history-btn${historyOpen ? ' on' : ''}`} title="Version history (Ctrl+Alt+Shift+H)" onClick={() => showHistory(!historyOpen)}>
+              <Icon name="history" />
+            </button>
             <button className={`icon-btn comments-btn${commentsOpen ? ' on' : ''}`} title="Comments (Ctrl+Alt+M comments on the selection)" onClick={() => setCommentsOpen(!commentsOpen)}>
               <Icon name="comment" />
               {commentCount > 0 && <span className="badge">{commentCount}</span>}
@@ -976,6 +1082,10 @@ export default function App() {
         {cur && commentsOpen && active !== HOME && (
           <CommentsPanel key={cur.path} path={cur.path} listeners={listeners} draftQuote={draftQuote} draftText={draftText} focusDraft={focusDraft}
             focusThread={focusedThread} onClose={() => setCommentsOpen(false)} onCount={setCommentCount} />
+        )}
+        {cur && historyOpen && active !== HOME && (
+          <HistoryPanel key={cur.path} path={cur.path} dirty={cur.dirty} refreshKey={cur.mtime} onClose={() => setHistoryOpen(false)}
+            onRestore={(n, o) => restoreInTab(cur.id, n, o)} onOpen={open} say={say} />
         )}
         {cur && previewDef && h?.getText && <PreviewPane key={`${cur.id}:${previewDef.id}`} def={previewDef} handle={h} path={cur.path} tick={cur.dirty ? Date.now() : cur.saved} onClose={() => setPreview(null)} />}
       </div>

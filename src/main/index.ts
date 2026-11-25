@@ -447,8 +447,12 @@ const api: Record<string, (...a: any[]) => unknown> = {
   historyCheck: (file: string) => work('historyCheck', [file]),
   historyEvent: (file: string, event: { type: HistoryEventType; by: string; summary: string; at?: number }) => work('historyEvent', [file, event]),
   historyCleanup: () => work('historyCleanup'),
-  /** { bytes, capBytes, overCapBytes?, paused? } (paused: the reason history stopped recording this session). */
-  historyStats: async () => ({ ...(await work<Record<string, unknown>>('historyStats')), ...(historyPaused ? { paused: historyPaused } : {}) }),
+  /** { bytes, capBytes, overCapBytes?, paused?, dir } (paused: the reason history stopped recording this session; dir: where it is kept). */
+  historyStats: async () => ({
+    ...(await work<Record<string, unknown>>('historyStats')),
+    ...(historyPaused ? { paused: historyPaused } : {}),
+    dir: path.join(HOME, 'history')
+  }),
   historyFlush: () => work('historyFlush'),
   /** Writes version n to a new file in the docs folder and returns its path (Open as a copy). */
   historyOpenCopy: (file: string, n: number) => work<string>('historyOpenCopy', [file, n]),
