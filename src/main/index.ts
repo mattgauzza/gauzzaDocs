@@ -13,7 +13,7 @@ import * as comments from '../core/comments'
 import { type Bridge, startBridge } from './server'
 import { attachContextMenu, setupSpelling } from './contextMenu'
 import { stopWorker, warmUp, work } from './work'
-import { closeSettings, defaultsPageUrl, registerWithWindows } from './winAssoc'
+import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
 
 app.setAppUserModelId('app.gauzzadocs.desktop')
@@ -358,6 +358,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
     installUpdate()
   },
   /** Windows only lets the person pick default apps; this opens that page (or the OS equivalent). */
+  defaultsStatus: () => defaultsStatus(),
   openDefaultApps: () => {
     if (process.platform === 'win32') {
       // Straight to gauzzaDocs' own page (every file type, one click each). Make sure the registration is in place first.

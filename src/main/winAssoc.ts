@@ -88,5 +88,19 @@ export async function registerWithWindows(exe: string) {
 /** Settings opened on gauzzaDocs' own page (Windows 11), or the general Default apps page on older Windows. */
 export const defaultsPageUrl = () => `ms-settings:defaultapps?registeredAppUser=${encodeURIComponent(APP_NAME)}`
 
+/** Which file types the person has made gauzzaDocs the default for (Windows records their pick as UserChoice). */
+export async function defaultsStatus(): Promise<{ ext: string; name: string; ours: boolean }[]> {
+  if (process.platform !== 'win32') return []
+  const seen = new Map<string, string>()
+  for (const [ext, name] of TYPES) if (!seen.has(ext)) seen.set(ext, name)
+  return Promise.all(
+    [...seen].map(async ([ext, name]) => {
+      const key = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.${ext}\\UserChoice`
+      const r = await run('reg', ['query', key, '/v', 'ProgId'], { windowsHide: true }).catch(() => null)
+      return { ext, name, ours: !!r && /ProgId\s+REG_SZ\s+gauzzaDocs\./i.test(r.stdout) }
+    })
+  )
+}
+
 /** An already-open Settings window only comes to the front and ignores the link, so close it first. */
 export const closeSettings = () => run('taskkill', ['/IM', 'SystemSettings.exe'], { windowsHide: true }).then(() => new Promise(r => setTimeout(r, 800)), () => {})

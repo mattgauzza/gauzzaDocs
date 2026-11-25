@@ -16,7 +16,15 @@ export function Onboarding({ onClose }: { onClose(): void }) {
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState<string>('')
   const [err, setErr] = useState('')
-  const [defaultsOpened, setDefaultsOpened] = useState(false)
+  // Which file types already open with gauzzaDocs; re-read when the person comes back from Settings.
+  const [defaults, setDefaults] = useState<{ ext: string; name: string; ours: boolean }[] | null>(null)
+  useEffect(() => {
+    const check = () => api.defaultsStatus().then(setDefaults, () => setDefaults([]))
+    check()
+    window.addEventListener('focus', check)
+    return () => window.removeEventListener('focus', check)
+  }, [])
+  const ours = defaults?.filter(d => d.ours) || []
 
   useEffect(() => {
     api.agentsDetect().then(list => {
@@ -59,9 +67,20 @@ export function Onboarding({ onClose }: { onClose(): void }) {
             <p className="muted">
               This opens gauzzaDocs in Windows Settings with every file type it handles. Click the ones you want it to open.
             </p>
-            <button className="btn" onClick={() => (api.openDefaultApps(), setDefaultsOpened(true))}>
-              {defaultsOpened ? 'Opened in Settings' : 'Make gauzzaDocs the default'}
-            </button>
+            {defaults && defaults.length > 0 && (
+              <p className="ob-status">
+                {ours.length === 0
+                  ? 'gauzzaDocs isn\'t the default for any file types yet.'
+                  : ours.length === defaults.length
+                    ? 'gauzzaDocs opens all of these file types.'
+                    : `gauzzaDocs opens ${ours.map(d => '.' + d.ext).join(', ')}.`}
+              </p>
+            )}
+            {(!defaults || ours.length < defaults.length) && (
+              <button className="btn" onClick={() => api.openDefaultApps()}>
+                {ours.length ? 'Choose more file types' : 'Make gauzzaDocs the default'}
+              </button>
+            )}
           </div>
         </section>
 
@@ -94,10 +113,16 @@ export function Onboarding({ onClose }: { onClose(): void }) {
                 ))}
               </div>
             )}
-            <div className="ob-row">
-              <button className="btn primary" disabled={!pick.size || busy} onClick={install}>{busy ? 'Installing...' : 'Connect selected'}</button>
-              {done && <span className="small"><Icon name="check" size={16} /> Connected {done}. They pick it up the next time they start.</span>}
-            </div>
+            {agents && agents.every(a => a.installed || !a.detected) ? (
+              <p className="ob-status">
+                <Icon name="check" size={16} /> {agents.some(a => a.installed) ? 'Your agents are connected. They pick it up the next time they start.' : 'No agents found on this PC.'}
+              </p>
+            ) : (
+              <div className="ob-row">
+                <button className="btn primary" disabled={!pick.size || busy} onClick={install}>{busy ? 'Connecting...' : 'Connect'}</button>
+                {done && <span className="small"><Icon name="check" size={16} /> Connected {done}. They pick it up the next time they start.</span>}
+              </div>
+            )}
             {err && <p className="error small">{err}</p>}
           </div>
         </section>

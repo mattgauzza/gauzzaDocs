@@ -266,3 +266,6 @@ textarea.instructions { min-height: 110px; padding: 10px 12px; border: 1px solid
 .ob-agent { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--toolbar); font-size: 13px; cursor: pointer; }
 .ob-agent.missing { opacity: .6; }
 .ob-row { display: flex; align-items: center; gap: 12px; }
+
+.btn { white-space: nowrap; flex: none; }
+.ob-status { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 13px; color: var(--text); }
