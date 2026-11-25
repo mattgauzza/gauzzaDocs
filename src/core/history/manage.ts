@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { getDocInstructions, inFile, splitInstructions, withInstructions } from '../instructions'
 import { LARGE_BYTES } from '../large'
-import { discardPending, flushHistory, historyHooks, markBeforeRestore, recordVersion } from './record'
+import { discardPending, flushHistory, historyHooks, logEventLocked, markBeforeRestore, recordVersion, reportHistoryFailure } from './record'
 import {
   bakPath,
   canonicalPath,
@@ -12,8 +12,10 @@ import {
   historyKey,
   indexPath,
   listHistoryEntries,
+  logPath,
   objectPath,
   readIndex,
+  renameRetrySync,
   withLock,
   withLocks,
   writeAtomic,
@@ -26,7 +28,6 @@ import {
 const DAY_MS = 24 * 60 * 60 * 1000
 const OUTSIDE: Author = { name: 'outside gauzzaDocs', by: 'outside' }
 const sha256 = (bytes: Uint8Array) => crypto.createHash('sha256').update(bytes).digest('hex')
-const logPath = (key: string) => indexPath(key).replace(/\.json$/, '.log.jsonl')
 
 function find(file: string, n: number): { idx: HistoryIndex; version: HistoryVersion } {
   const idx = readIndex(historyKey(file), canonicalPath(file))
@@ -44,7 +45,7 @@ export async function showVersion(file: string, n: number): Promise<Uint8Array> 
 }
 
 /** Gives a version a name (kept for good by cleanup). An empty name clears it. */
-export async function nameVersion(file: string, n: number, name: string): Promise<void> {
+export async function nameVersion(file: string, n: number, name: string, by = 'Agent'): Promise<void> {
   const key = historyKey(file)
   await withLock(key, async () => {
     const { idx, version } = find(file, n)
@@ -52,6 +53,7 @@ export async function nameVersion(file: string, n: number, name: string): Promis
     if (t) version.name = t
     else delete version.name
     writeIndex(key, idx)
+    await logEventLocked(file, { type: 'named', by, summary: t ? `named v${n} "${t}"` : `cleared the name of v${n}` })
   })
 }
 
@@ -135,11 +137,12 @@ export async function moveHistory(from: string, to: string): Promise<void> {
         /* no usable backup to carry over */
       }
       try {
-        fs.renameSync(logPath(j.oldKey), logPath(j.newKey))
-      } catch {
-        /* no log */
+        renameRetrySync(logPath(j.oldKey), logPath(j.newKey))
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') reportHistoryFailure(e) // no log is fine; one that cannot move is a history failure
       }
       for (const f of [indexPath(j.oldKey), bakPath(j.oldKey)]) fs.rmSync(f, { force: true })
+      await logEventLocked(j.newPath, { type: 'moved', by: 'outside gauzzaDocs', summary: `moved from ${j.oldPath}` })
     })
     try {
       historyHooks.onMoved(j.oldPath, j.newPath)
@@ -202,6 +205,7 @@ export async function restoreVersion(
     await fs.promises.mkdir(path.dirname(path.resolve(file)), { recursive: true })
     const stat = await writeAtomic(file, out)
     const recorded = await recordVersion(file, out, stat, { authors: opts.authors, summary: `Restored v${n}` }, { restoredFrom: n, noFold: true })
+    await logEventLocked(file, { type: 'restored', by: opts.authors.map(a => a.name).join(', '), summary: `restored v${n}` })
     if (recorded) return recorded
     const final = readIndex(historyKey(file), canonicalPath(file))
     return final?.versions[final.versions.length - 1] ?? version

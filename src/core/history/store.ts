@@ -50,6 +50,8 @@ export const historyKey = (file: string) => sha256(canonicalPath(file))
 export const objectPath = (hash: string) => path.join(OBJECTS_DIR, hash.slice(0, 2), hash)
 export const indexPath = (key: string) => path.join(FILES_DIR, `${key}.json`)
 export const bakPath = (key: string) => `${indexPath(key)}.bak`
+/** The work history log of a file. */
+export const logPath = (key: string) => path.join(FILES_DIR, `${key}.log.jsonl`)
 const lockPath = (key: string) => path.join(FILES_DIR, `${key}.lock`)
 
 async function renameRetry(from: string, to: string) {
@@ -64,7 +66,7 @@ async function renameRetry(from: string, to: string) {
     }
   }
 }
-function renameRetrySync(from: string, to: string) {
+export function renameRetrySync(from: string, to: string) {
   const until = Date.now() + RENAME_RETRY_MS
   for (;;) {
     try {

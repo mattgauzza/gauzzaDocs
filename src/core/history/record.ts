@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { LARGE_BYTES } from '../large'
 import { samePath } from '../paths'
+import { appendEventLocked, type HistoryEvent } from './log'
 import { enqueue, idle } from './queue'
 import {
   canonicalPath,
@@ -10,8 +11,10 @@ import {
   indexPath,
   isExcluded,
   listHistoryPaths,
+  logPath,
   putObject,
   readIndex,
+  renameRetrySync,
   withLock,
   writeIndex,
   type Author,
@@ -48,6 +51,21 @@ function pause(e: unknown) {
     pausedCb(reason)
   } catch {
     /* a listener must never break a save */
+  }
+}
+
+/** Reports a history failure that must not fail the caller (shown once as "Version history paused"). */
+export const reportHistoryFailure = (e: unknown): void => pause(e)
+
+/**
+ * Appends a work history event for a caller that holds the file's lock. A log failure is a history failure: it is
+ * reported as "paused" and never thrown.
+ */
+export async function logEventLocked(file: string, ev: Omit<HistoryEvent, 'at'> & { at?: number }): Promise<void> {
+  try {
+    await appendEventLocked(file, { at: Date.now(), ...ev })
+  } catch (e) {
+    pause(e)
   }
 }
 
@@ -139,6 +157,16 @@ export async function recordVersion(
     idx.versions.push(version)
   }
   writeIndex(key, idx)
+  if (extra?.restoredFrom === undefined) {
+    // restoreVersion logs its own "restored" event
+    const outside = ctx.authors.length > 0 && ctx.authors.every(a => a.by === 'outside')
+    await logEventLocked(file, {
+      at: now,
+      type: outside ? 'outside' : 'save',
+      by: ctx.authors.map(a => a.name).join(', '),
+      summary: extra?.baseline ? `kept the original as v${version.n}` : outside ? `changed outside gauzzaDocs, kept as v${version.n}` : `saved v${version.n}`,
+    })
+  }
   return version
 }
 
@@ -182,13 +210,13 @@ async function adoptMoved(canon: string, key: string, hash: string): Promise<boo
     if (!old || !last || last.hash !== hash || !reallyMissing(oldPath)) return false // changed while we looked
     writeIndex(key, { path: canon, versions: old.versions })
     const oldIndex = indexPath(oldKey)
-    const oldLog = oldIndex.replace(/\.json$/, '.log.jsonl')
     try {
-      fs.renameSync(oldLog, indexPath(key).replace(/\.json$/, '.log.jsonl'))
-    } catch {
-      /* no log, or the new one already has one */
+      renameRetrySync(logPath(oldKey), logPath(key)) // replaces a log the new path already has: the moved history's log is the true one
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') pause(e) // no log is fine; a log that cannot be moved is a history failure
     }
     for (const f of [oldIndex, `${oldIndex}.bak`]) fs.rmSync(f, { force: true })
+    await logEventLocked(canon, { type: 'moved', by: 'outside gauzzaDocs', summary: `moved from ${oldPath}` }) // we hold the new path's lock too
     try {
       historyHooks.onMoved(oldPath, canon)
     } catch {
