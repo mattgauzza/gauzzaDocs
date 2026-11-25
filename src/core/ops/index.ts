@@ -4,6 +4,7 @@ import type { OpHandler } from '../../shared/ops/types'
 import type { AgentOp } from '../../shared/types'
 import { kindOf } from '../../shared/kinds'
 import { loadFile, saveFile } from '../files'
+import type { WriteContext } from '../history'
 import { findInFile, indexFile, isLarge, readLines } from '../large'
 import { docOps } from './doc'
 import { pdfOps } from './pdf'
@@ -13,7 +14,7 @@ import { slidesOps } from './slides'
 export const HANDLERS: Record<Kind, OpHandler> = { text: textOps, doc: docOps, sheet: sheetOps, pdf: pdfOps, slides: slidesOps }
 
 /** Applies an op straight to a file on disk (used when the file is not open in the app). Read-only ops never write. */
-export async function runOffline(file: string, op: AgentOp): Promise<unknown> {
+export async function runOffline(file: string, op: AgentOp, ctx?: WriteContext): Promise<unknown> {
   // Huge files: reads and searches stream from disk; edits still load the file once (no way around it for a rewrite).
   if (isLarge(file) && ['read', 'find', 'info'].includes(op.op) && kindOf(file) === 'text') {
     const idx = await indexFile(file)
@@ -25,6 +26,6 @@ export async function runOffline(file: string, op: AgentOp): Promise<unknown> {
   }
   const f = await loadFile(file, { full: true })
   const r = await HANDLERS[f.kind](f.payload, op, { path: f.path })
-  if (r.payload && !op.dryRun) await saveFile(f.path, r.payload)
+  if (r.payload && !op.dryRun) await saveFile(f.path, r.payload, ctx)
   return r.result
 }

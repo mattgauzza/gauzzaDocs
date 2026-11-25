@@ -428,11 +428,11 @@ program
   .option('--set <text>', 'replace the instructions ("-" for stdin, @file); with --global, the global ones')
   .option('--global', 'the instructions for every file (~/.gauzzadocs/agent.md)')
   .option('--clear', 'remove them')
-  .action((file: string | undefined, o) => {
+  .action(async (file: string | undefined, o) => {
     if (o.set !== undefined || o.clear) {
       const text = o.clear ? '' : input(o.set)
       if (o.global) setGlobal(text)
-      else if (file) setDocInstructions(path.resolve(file), text)
+      else if (file) await setDocInstructions(path.resolve(file), text)
       else throw new Error('Give a file, or --global')
       return out({ ok: true }, () => (o.clear ? 'cleared' : 'saved'))
     }

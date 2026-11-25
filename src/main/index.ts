@@ -402,9 +402,9 @@ const api: Record<string, (...a: any[]) => unknown> = {
   },
   instructions: (file?: string) => instructionsFor(file),
   /** file null = the global instructions. Per-file ones in HTML/Markdown are written into the file itself. */
-  setInstructions: (file: string | null, text: string) => {
+  setInstructions: async (file: string | null, text: string) => {
     if (!file) return setGlobal(text), 0
-    setDocInstructions(file, text)
+    await setDocInstructions(file, text)
     return fs.statSync(file).mtimeMs // so the open tab does not take this for someone else's edit
   },
   recent: () => getRecent(),

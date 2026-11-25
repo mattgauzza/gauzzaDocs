@@ -536,10 +536,16 @@ export async function loadSlides(file: string): Promise<{ kind: 'slides'; deck: 
 /** Where the untouched original of a presentation is kept before the first save that could lose something. */
 export const slidesBackupPath = (file: string) => path.join(path.dirname(file), `${stem(file)}.original.pptx`)
 
-export async function saveSlides(file: string, deck: Deck) {
+/** The bytes of a deck file: Markdown text, or a pptx built in memory. Never touches the disk. */
+export async function slidesBytes(file: string, deck: Deck): Promise<Uint8Array> {
   const ext = extOf(file)
-  if (ext === 'md' || ext === 'markdown') return fs.writeFileSync(file, deckToMarkdown(deck))
-  if (ext === 'pptx' && fs.existsSync(file) && fs.statSync(file).size && !fs.existsSync(slidesBackupPath(file))) {
+  if (ext === 'md' || ext === 'markdown') return Buffer.from(deckToMarkdown(deck))
+  return deckToPptx(deck, path.dirname(file))
+}
+
+/** Keeps the untouched presentation beside it, once, when it holds things this editor would drop. Runs before the first save. */
+export async function backupSlidesOriginal(file: string) {
+  if (extOf(file) === 'pptx' && fs.existsSync(file) && fs.statSync(file).size && !fs.existsSync(slidesBackupPath(file))) {
     try {
       // Files this editor wrote (they carry the gdocsDeck property) only need the cheap check; others get a full read.
       const buf = fs.readFileSync(file)
@@ -549,9 +555,12 @@ export async function saveSlides(file: string, deck: Deck) {
       if (lose) fs.copyFileSync(file, slidesBackupPath(file))
     } catch { /* not a readable pptx: nothing worth keeping */ }
   }
-  const tmp = `${file}.gd-${process.pid}.tmp`
-  fs.writeFileSync(tmp, await deckToPptx(deck, path.dirname(file)))
-  fs.renameSync(tmp, file)
+}
+
+/** Saves through saveFile, so every write is atomic and keeps a version. */
+export async function saveSlides(file: string, deck: Deck) {
+  const { saveFile } = await import('../files')
+  await saveFile(file, { kind: 'slides', deck })
 }
 
 /** A deck from Markdown (gdocs slides from-md). */

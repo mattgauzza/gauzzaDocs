@@ -90,7 +90,7 @@ test('saving a .md file keeps its front matter first and its agent instructions'
   await saveFile(file, f.payload)
   assert.ok(fs.readFileSync(file, 'utf8').startsWith('---\ntitle: Project Atlas\n'))
 
-  setDocInstructions(file, 'Keep it short.')
+  await setDocInstructions(file, 'Keep it short.')
   const again = await loadFile(file)
   await saveFile(file, again.payload)
   const text = fs.readFileSync(file, 'utf8')

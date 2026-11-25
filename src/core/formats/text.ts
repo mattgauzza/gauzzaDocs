@@ -7,6 +7,6 @@ export function loadText(file: string) {
   return { kind: 'text' as const, text: text.replace(/\r\n/g, '\n'), eol }
 }
 
-export function saveText(file: string, text: string, eol: '\n' | '\r\n' = '\n') {
-  fs.writeFileSync(file, eol === '\r\n' ? text.replace(/\r?\n/g, '\r\n') : text)
+export function textBytes(text: string, eol: '\n' | '\r\n' = '\n'): Uint8Array {
+  return Buffer.from(eol === '\r\n' ? text.replace(/\r?\n/g, '\r\n') : text)
 }
