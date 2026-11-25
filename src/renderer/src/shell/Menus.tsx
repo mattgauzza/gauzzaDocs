@@ -37,20 +37,31 @@ export function MenuBar({ menus }: { menus: { name: string; items: MenuItem[] }[
   )
 }
 
-export function MenuList({ items, close, className = '' }: { items: MenuItem[]; close: () => void; className?: string }) {
-  const [sub, setSub] = useState<number | null>(null)
+export function MenuList({ items, close, className = '', style }: { items: MenuItem[]; close: () => void; className?: string; style?: React.CSSProperties }) {
+  const [sub, setSub] = useState<{ i: number; top: number; left: number; flip: boolean } | null>(null)
+  // Submenus are positioned on screen (fixed) instead of inside this list: the list scrolls when it is tall, and a
+  // scrolling box clips anything that sticks out of it, which hid every submenu.
+  const openSub = (i: number, el: HTMLElement) => {
+    const r = el.getBoundingClientRect()
+    const flip = r.right + 280 > window.innerWidth
+    setSub({ i, top: Math.max(8, Math.min(r.top - 6, window.innerHeight - 360)), left: flip ? r.left : r.right, flip })
+  }
   return (
-    <div className={`menu ${className}`} onMouseDown={e => e.preventDefault()}>
+    <div className={`menu ${className}`} style={style} onMouseDown={e => e.preventDefault()}>
       {items.map((it, i) =>
         it.sep ? (
           <div key={i} className="menu-sep" />
         ) : (
-          <div key={i} className="menu-item-wrap" onMouseEnter={() => setSub(it.submenu ? i : null)}>
+          <div
+            key={i}
+            className="menu-item-wrap"
+            onMouseEnter={e => (it.submenu || it.grid ? openSub(i, e.currentTarget) : setSub(null))}
+          >
             <button
-              className="menu-item"
+              className={`menu-item${sub?.i === i ? ' open' : ''}`}
               disabled={it.disabled}
-              onClick={() => {
-                if (it.submenu) return setSub(i)
+              onClick={e => {
+                if (it.submenu || it.grid) return openSub(i, e.currentTarget.parentElement as HTMLElement)
                 close()
                 it.run?.()
               }}
@@ -58,12 +69,48 @@ export function MenuList({ items, close, className = '' }: { items: MenuItem[]; 
               <span className="menu-check">{it.checked ? '✓' : ''}</span>
               <span className="menu-label">{it.label}</span>
               {it.shortcut && <span className="menu-key">{it.shortcut}</span>}
-              {it.submenu && <span className="menu-arrow">▸</span>}
+              {(it.submenu || it.grid) && <span className="menu-arrow">▸</span>}
             </button>
-            {it.submenu && sub === i && <MenuList items={it.submenu} close={close} className="submenu" />}
+            {sub?.i === i && !it.disabled && (it.submenu || it.grid) && (
+              <div
+                className="menu-fly"
+                style={{ position: 'fixed', top: sub.top, left: sub.left, transform: sub.flip ? 'translateX(-100%)' : undefined }}
+              >
+                {it.grid ? (
+                  <GridPicker {...it.grid} close={close} />
+                ) : (
+                  <MenuList items={it.submenu!} close={close} className="submenu" />
+                )}
+              </div>
+            )}
           </div>
         )
       )}
+    </div>
+  )
+}
+
+/** Google Docs style size picker: hover across the grid to choose rows x columns. */
+function GridPicker({ rows, cols, pick, close }: { rows: number; cols: number; pick(r: number, c: number): void; close(): void }) {
+  const [at, setAt] = useState<[number, number]>([1, 1])
+  return (
+    <div className="menu grid-picker" onMouseDown={e => e.preventDefault()}>
+      <div className="grid-cells" style={{ gridTemplateColumns: `repeat(${cols}, 18px)` }} onMouseLeave={() => setAt([1, 1])}>
+        {Array.from({ length: rows * cols }, (_, k) => {
+          const r = Math.floor(k / cols) + 1
+          const c = (k % cols) + 1
+          return (
+            <button
+              key={k}
+              className={`grid-cell${r <= at[0] && c <= at[1] ? ' on' : ''}`}
+              onMouseEnter={() => setAt([r, c])}
+              onClick={() => (close(), pick(r, c))}
+              aria-label={`${c} by ${r}`}
+            />
+          )
+        })}
+      </div>
+      <div className="grid-size">{at[1]} x {at[0]}</div>
     </div>
   )
 }

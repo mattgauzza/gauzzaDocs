@@ -403,12 +403,9 @@ export default function DocEditor(props: EditorProps) {
       },
       menus: () => {
         const r = (fn: (c: ReturnType<Editor['chain']>) => ReturnType<Editor['chain']>) => () => fn(editor.chain().focus()).run()
-        const tableSizes: MenuItem[] = [
-          [2, 2], [3, 3], [4, 3], [4, 4], [5, 5], [8, 4]
-        ].map(([rr, cc]) => ({ label: `${cc} × ${rr}`, run: () => insertTable(rr, cc) }))
         const insert: MenuItem[] = [
           { label: 'Image…', run: pickImage },
-          { label: 'Table', submenu: tableSizes },
+          { label: 'Table', grid: { rows: 8, cols: 10, pick: (rr, cc) => insertTable(rr, cc) } },
           { label: 'Link', shortcut: 'Ctrl+K', run: () => setLinkOpen(true) },
           { sep: true, label: '' },
           { label: 'Horizontal line', run: r(c => c.setHorizontalRule()) },

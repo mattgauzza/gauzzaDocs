@@ -13,6 +13,8 @@ export interface MenuItem {
   disabled?: boolean
   submenu?: MenuItem[]
   sep?: boolean // a divider; label ignored
+  /** A size grid instead of a list (Insert > Table): hover to pick rows x columns, click to choose. */
+  grid?: { rows: number; cols: number; pick(rows: number, cols: number): void }
 }
 export type MenuName = 'Edit' | 'View' | 'Insert' | 'Format' | 'Tools'
 
