@@ -324,3 +324,24 @@ textarea.instructions { min-height: 110px; padding: 10px 12px; border: 1px solid
 .grid-cell { width: 18px; height: 18px; border: 1px solid var(--line); border-radius: 2px; background: var(--surface); padding: 0; }
 .grid-cell.on { border-color: var(--accent); background: var(--accent-soft); }
 .grid-size { margin-top: 8px; text-align: center; font-size: 13px; color: var(--muted); }
+
+/* ---------- agents subscribed to the document ---------- */
+.participants { display: flex; align-items: center; gap: 4px; }
+.pt-wrap { position: relative; }
+.pt-avatar { position: relative; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--pt); color: #fff; font-weight: 600; font-size: 13px; flex: none; box-shadow: 0 0 0 2px var(--bg); }
+.pt-avatar.working { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--pt); animation: pulse 1.4s infinite; }
+.pt-avatar.paused { opacity: .45; }
+.pt-dot { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--bg); background: var(--muted); }
+.pt-dot.working { background: #34a853; }
+.pt-dot.waiting { background: #fbbc04; }
+.pt-dot.error { background: var(--danger); }
+.pt-dot.paused { background: var(--muted); }
+.pt-add { display: inline-flex; align-items: center; gap: 6px; height: 30px; min-width: 30px; padding: 0 8px; border: 1px dashed var(--line); border-radius: 15px; color: var(--muted); font-size: 13px; justify-content: center; }
+.pt-add:hover { border-color: var(--accent); color: var(--accent); }
+.pt-menu { right: 0; left: auto; top: calc(100% + 6px); min-width: 250px; }
+.pt-head { padding: 6px 16px 4px; }
+.pt-log { max-height: 60vh; white-space: pre-wrap; font-size: 12px; }
+.pt-agents { display: flex; flex-wrap: wrap; gap: 8px; }
+.pt-choice { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 14px 0 6px; border: 1px solid var(--line); border-radius: 20px; font-size: 14px; color: var(--text); }
+.pt-choice.on { border-color: var(--accent); background: var(--accent-soft); }
+.pt-choice .pt-avatar { width: 28px; height: 28px; box-shadow: none; }

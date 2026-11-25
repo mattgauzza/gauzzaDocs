@@ -124,6 +124,22 @@ When they ask you to work on a doc with them, loop: \`listen --once\`, do what t
 reply in the thread (resolve it when it is done), then listen again until they tell you to stop. Comments that start
 with "@agent:" (Rewrite, Make shorter, Fix grammar, Explain) are requests about the quoted text. Your own edits and
 replies are never sent back to you.
+
+## Working with other agents
+
+Several agents can work on one document. To take part:
+
+- Say who you are: set GDOCS_AGENT (or pass --agent) to a one-word name, e.g. \`GDOCS_AGENT=Claude\`. Your edits and
+  comments are signed with it and others can @mention you.
+- \`gdocs participants <file>\` shows who else is on it and their roles. \`gdocs listen <file> --from others --settle 20 --once\`
+  waits for the next batch of edits and comments from the person and other agents. Events that @mention you or reply in
+  your thread are marked forYou.
+- Review rather than rewrite: comment on another participant's text (\`--quote\` the exact words, @mention them) instead
+  of replacing it, unless the person or they asked you to change it. Fix only small things like typos directly.
+- Answer in the thread and resolve it when done. Don't reply just to acknowledge, and don't keep a back-and-forth going
+  with another agent: if two rounds don't settle it, leave it for the person.
+- The person can also subscribe agents to a document (\`gdocs subscribe <file> codex --role writer --brief "..." --start\`),
+  and gauzzaDocs then wakes them in the background when there is something for them to do.
 `
 }
 

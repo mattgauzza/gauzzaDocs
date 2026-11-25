@@ -29,4 +29,4 @@ export function structuralEdits(op: AgentOp, count: number): PdfEdit[] {
   }
 }
 
-export const PDF_OPS_HELP = 'info, read, annotate, rotate, deletePages, movePage, merge'
+export const PDF_OPS_HELP = 'info, read, find, textLines, replaceText, annotate, formFields, fillForm, rotate, deletePages, movePage, merge'

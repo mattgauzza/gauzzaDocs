@@ -45,6 +45,26 @@ export type PdfEdit =
   | { type: 'rect'; page: number; x: number; y: number; w: number; h: number; color?: string; fill?: string } // fill '#ffffff' = whiteout
   | { type: 'ink'; page: number; points: [number, number][]; color?: string; width?: number }
   | { type: 'image'; page: number; x: number; y: number; w: number; h: number; png: string } // png as data: URL or base64
+  // Edit a line that is already in the PDF: the original text inside x/y/w/h is removed (and covered with bg), then
+  // `text` is drawn on the same baseline (`base`, display y). dx/dy move the new text after it was placed.
+  | {
+      type: 'replaceText'
+      page: number
+      x: number
+      y: number
+      w: number
+      h: number
+      base?: number
+      text: string
+      size: number
+      font?: 'sans' | 'serif' | 'mono'
+      bold?: boolean
+      italic?: boolean
+      color?: string
+      bg?: string
+      dx?: number
+      dy?: number
+    }
   | { type: 'rotate'; page: number; degrees: number } // added to the page's current rotation
   | { type: 'delete'; page: number }
   | { type: 'move'; page: number; to: number }

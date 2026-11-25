@@ -18,7 +18,22 @@ export interface Market { source: string; name?: string; categories: string[]; p
 /** Mirrors core/projects.ts. */
 export interface Project { path: string; name: string; added: number; opened: number; missing?: boolean }
 export interface Entry { name: string; path: string; dir: boolean; size: number; mtime: number }
-export interface Listener { id: number; agent: string; path?: string; since: number }
+export interface Listener { id: number; agent: string; path?: string; since: number; virtual?: boolean }
+/** Mirrors src/main/agents.ts AgentStatus: an agent subscribed to a document and what it is doing. */
+export interface AgentStatus {
+  id: string
+  path: string
+  name: string
+  agent: 'claude' | 'codex' | 'gemini' | 'copilot'
+  role: 'writer' | 'reviewer' | 'editor' | 'custom'
+  brief: string
+  state: 'idle' | 'working' | 'waiting' | 'paused' | 'error'
+  pausedReason?: string
+  error?: string
+  access: 'limited' | 'full'
+  lastRun?: { start: number; end?: number; code?: number | null; log: string }
+  nextAt?: number
+}
 
 /** Typed wrappers over window.gd.call (main process API in src/main/index.ts). */
 export const api = {
@@ -52,6 +67,12 @@ export const api = {
   commentResolve: (path: string, id: string, resolved: boolean) => window.gd.call('commentResolve', path, id, resolved),
   commentDelete: (path: string, id: string) => window.gd.call('commentDelete', path, id),
   listeners: () => window.gd.call<Listener[]>('listeners'),
+  agentsOn: (path: string) => window.gd.call<AgentStatus[]>('agentsOn', path),
+  agentSubscribe: (path: string, s: { agent: AgentStatus['agent']; name?: string; role?: AgentStatus['role']; brief?: string; start?: boolean }) => window.gd.call('agentSubscribe', path, s),
+  agentUpdate: (id: string, patch: { brief?: string; role?: AgentStatus['role']; paused?: boolean }) => window.gd.call('agentUpdate', id, patch),
+  agentRemove: (id: string) => window.gd.call('agentRemove', id),
+  agentWake: (id: string, note?: string) => window.gd.call('agentWake', id, note),
+  agentLog: (id: string) => window.gd.call<string>('agentLog', id),
   recent: () => window.gd.call<RecentFile[]>('recent'),
   removeRecent: (path: string) => window.gd.call('removeRecent', path),
   listDir: (dir: string) => window.gd.call<{ name: string; path: string; dir: boolean; mtime: number }[]>('listDir', dir),

@@ -43,7 +43,11 @@
 }
 .doc-prose { outline: none; min-height: 864px; font: 11pt/1.5 Arial, Helvetica, sans-serif; color: #202124; caret-color: #000; }
 .doc-prose > * + * { margin-top: 0; }
-.doc-prose p { margin: 0; min-height: 1.5em; }
+/* Space after each paragraph (Word's default), so text written in Markdown or by an agent reads as separate paragraphs,
+   the same as in the saved file and in exports. Lists and quotes get the same gap after them; list items stay tight. */
+.doc-prose p { margin: 0 0 8pt; min-height: 1.5em; }
+.doc-prose ul, .doc-prose ol { margin-bottom: 8pt; }
+.doc-prose li > p, .doc-prose td > p, .doc-prose th > p { margin-bottom: 0; }
 .doc-prose h1, .doc-prose h2, .doc-prose h3, .doc-prose h4 { font-weight: 400; line-height: 1.3; }
 .doc-prose h1 { font-size: 20pt; margin: 20pt 0 6pt; }
 .doc-prose h1.title { font-size: 26pt; margin: 0 0 3pt; }
@@ -51,7 +55,7 @@
 .doc-prose h3 { font-size: 14pt; margin: 16pt 0 4pt; color: #434343; }
 .doc-prose h4 { font-size: 12pt; margin: 14pt 0 4pt; color: #666; }
 .doc-prose > :first-child { margin-top: 0; }
-.doc-prose ul, .doc-prose ol { margin: 0; padding-left: 36px; }
+.doc-prose ul, .doc-prose ol { margin: 0 0 8pt; padding-left: 36px; }
 .doc-prose li > p { margin: 0; }
 .doc-prose a { color: #1155cc; text-decoration: underline; cursor: pointer; }
 .doc-prose blockquote { margin: 8pt 0; padding-left: 16px; border-left: 3px solid #dadce0; color: #5f6368; }
@@ -210,3 +214,4 @@
 :root[data-theme='dark'] .md-reader :is(.hljs-title, .hljs-section, .hljs-name) { color: #d2a8ff; }
 :root[data-theme='dark'] .md-reader :is(.hljs-type) { color: #ffa657; }
 
+.doc-prose li > ul, .doc-prose li > ol { margin-bottom: 0; }

@@ -73,3 +73,24 @@ button:disabled { opacity: .45; cursor: default; }
 .agent-flash { animation: agent-flash 1.6s ease-out; }
 
 .editor-placeholder { display: grid; place-items: center; height: 100%; color: var(--muted); }
+
+/* toolbar overflow (shell/ToolbarOverflow.tsx): tools past the edge hide behind a "more" button */
+.toolbar { overflow: hidden; }
+.toolbar[data-tb-overflow] { padding-right: 44px; }
+.toolbar:not([data-expanded]) > [data-tb-hidden] { display: none !important; }
+.toolbar[data-expanded] { flex-wrap: wrap; height: auto; min-height: 40px; padding-top: 6px; padding-bottom: 6px; row-gap: 4px; border-radius: 16px; }
+.tb-more { background: var(--toolbar); }
+.tb-more.on { background: var(--accent-soft); color: var(--accent); }
+
+/* drag-to-resize handles (shell/resize.tsx) */
+.resize-handle { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 6; cursor: col-resize; touch-action: none; }
+.resize-handle.left { left: -4px; }
+.resize-handle.right { right: -4px; }
+.resize-handle::after { content: ''; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: transparent; transition: background .12s; }
+.resize-handle:hover::after, body.resizing .resize-handle::after { background: var(--accent); width: 2px; left: 2px; }
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing iframe { pointer-events: none; }
+.comments, .preview-pane, .doc-outline, .md-split-left { position: relative; }
+.preview-pane { min-width: 0; max-width: none; }
+.md-split-left { min-width: 0; min-height: 0; display: flex; border-right: 1px solid var(--line); }
+.md-split-left > .md-source { border-right: 0; }

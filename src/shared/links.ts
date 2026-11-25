@@ -6,4 +6,4 @@ export const EMPIRICAL = 'https://empirical.gauzza.com'
 export const EMPIRICAL_CLI = 'https://www.npmjs.com/package/@empirical-gauzza/cli'
 export const EMPIRICAL_VOICE = 'https://empirical.gauzza.com/voice'
 /** Where the heart button and README send people who want to support the project. Empty hides the button. */
-export const DONATE = ''
+export const DONATE = 'https://ko-fi.com/mattgauzza'

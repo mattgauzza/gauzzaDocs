@@ -20,6 +20,7 @@ export interface Listener {
   agent: string
   path?: string
   since: number
+  virtual?: boolean // an agent subscribed to the doc (woken by the app) rather than connected with gdocs listen
 }
 
 export interface Bridge {
@@ -29,7 +30,8 @@ export interface Bridge {
   close(): void
 }
 
-export function startBridge(rpc: Rpc, onListeners: (l: Listener[]) => void): Promise<Bridge> {
+/** `tap` sees every event the bridge sends (the agent runner uses it to decide who to wake). */
+export function startBridge(rpc: Rpc, onListeners: (l: Listener[]) => void, tap?: (event: { type: string; path?: string; [k: string]: unknown }) => void): Promise<Bridge> {
   const token = crypto.randomBytes(24).toString('hex')
   const streams = new Map<http.ServerResponse, Listener>()
   let seq = 0
@@ -86,6 +88,9 @@ export function startBridge(rpc: Rpc, onListeners: (l: Listener[]) => void): Pro
       resolve({
         port,
         emit: event => {
+          try {
+            tap?.({ ...event, at: Date.now() })
+          } catch { /* a tap must never break the stream */ }
           const line = `data: ${JSON.stringify({ ...event, at: Date.now() })}\n\n`
           for (const [res, l] of streams) if (!l.path || (event.path && same(l.path, event.path))) res.write(line)
         },

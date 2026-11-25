@@ -15,6 +15,7 @@ import { Icon } from './icons'
 import { flash, outline, replaceRanges, runDocOp, searchDoc } from './live'
 import { FONTS, Toolbar, ZOOMS, applyStyle, currentSize } from './Toolbar'
 import './doc.css'
+import { usePanelSize } from '../shell/resize'
 
 const PRINT_CSS = `
 h1.title { font-size: 26pt; font-weight: 400; margin: 0 0 3pt; }
@@ -168,6 +169,8 @@ export default function DocEditor(props: EditorProps) {
   const [wc, setWc] = useState(false)
   const [heads, setHeads] = useState<{ level: number; text: string; pos: number }[]>([])
   const [outlineOpen, setOutlineOpen] = useState<boolean | null>(null)
+  const [outlineW, outlineHandle] = usePanelSize('outline', 240, { min: 160, max: 480, edge: 'right' })
+  const [splitAt, splitHandle] = usePanelSize('md-split', 0.5, { min: 0.2, max: 0.8, edge: 'right', unit: 'ratio' })
   const fileInput = useRef<HTMLInputElement>(null)
   const onChange = useRef(props.onChange)
   onChange.current = props.onChange
@@ -560,7 +563,8 @@ export default function DocEditor(props: EditorProps) {
       <input ref={fileInput} type="file" accept="image/*" hidden onChange={e => (onImageFile(e.target.files?.[0]), (e.target.value = ''))} />
       <div className="doc-body">
         {showOutline && (
-          <aside className="doc-outline">
+          <aside className="doc-outline" style={{ width: outlineW }}>
+            {outlineHandle}
             <div className="doc-outline-head">
               <span>Outline</span>
               <button className="tb" title="Close outline" onClick={() => setOutlineOpen(false)}><Icon name="close" size={16} /></button>
@@ -606,8 +610,11 @@ export default function DocEditor(props: EditorProps) {
         </div>
         {mode === 'read' && <MdReader ref={readerRef} markdown={mdText} zoom={zoom} />}
         {mode === 'split' && (
-          <div className="md-split">
-            <MdSource ref={sourceRef} initial={mdText} onChange={onSourceChange} onTopLine={line => readerRef.current?.scrollToLine(line)} />
+          <div className="md-split" style={{ gridTemplateColumns: `minmax(0, ${splitAt}fr) minmax(0, ${1 - splitAt}fr)` }}>
+            <div className="md-split-left">
+              <MdSource ref={sourceRef} initial={mdText} onChange={onSourceChange} onTopLine={line => readerRef.current?.scrollToLine(line)} />
+              {splitHandle}
+            </div>
             <MdReader ref={readerRef} markdown={mdText} wide />
           </div>
         )}

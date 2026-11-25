@@ -2,8 +2,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { PDFDocument } from 'pdf-lib'
 import { applyPdfEdits, checkEdits, displaySize, parsePages } from '../../shared/pdf/edits'
-import { structuralEdits } from '../../shared/ops/pdf'
+import { PDF_OPS_HELP, structuralEdits } from '../../shared/ops/pdf'
 import { allText, joinPages, type PdfJsDocLike } from '../../shared/pdf/text'
+import { type FormValue, coerceValue, fillFields, listFields } from '../../shared/pdf/forms'
+import { type PdfJsPageLike, type PdfLine, lineEdit, pageLines, planReplace } from '../../shared/pdf/lines'
 import { OpError, type OpHandler, str } from '../../shared/ops/types'
 
 /** Opens bytes with the pdf.js legacy build (the one meant for Node). */
@@ -23,6 +25,39 @@ export async function pdfInfo(bytes: Uint8Array) {
     title: doc.getTitle() || null,
     author: doc.getAuthor() || null
   }
+}
+
+/** Lines of text with their boxes (for editing existing text). All pages when `pages` is empty. */
+export async function pdfLines(bytes: Uint8Array, spec?: string | number): Promise<PdfLine[][]> {
+  const { doc, close } = await openPdfJs(bytes)
+  try {
+    const out: PdfLine[][] = []
+    for (const n of parsePages(spec as string, doc.numPages))
+      out.push(await pageLines((await doc.getPage(n)) as unknown as PdfJsPageLike, n, { loadFonts: true }))
+    return out
+  } finally {
+    await close()
+  }
+}
+
+/**
+ * Replaces text that is already in the PDF (within single lines). Without a page, searches every page and stops at the
+ * first match unless `all`. Returns the edits it made, so the live editor can show them the same way.
+ */
+export async function replaceTextEdits(bytes: Uint8Array, find: string, withText: string, opts: { page?: number; all?: boolean }) {
+  const pages = await pdfLines(bytes, opts.page)
+  const plan: ReturnType<typeof planReplace> = []
+  let spans = ''
+  for (const lines of pages) {
+    try {
+      plan.push(...planReplace(lines, find, withText, { all: opts.all }))
+      if (!opts.all) break
+    } catch (e) {
+      if (/more than one line/.test((e as Error).message)) spans ||= (e as Error).message
+    }
+  }
+  if (!plan.length) throw new OpError(spans || `"${find}" was not found${opts.page ? ` on page ${opts.page}` : ''}`)
+  return { edits: plan.map(p => lineEdit(p.line, p.text)), count: plan.reduce((n, p) => n + p.count, 0) }
 }
 
 export async function pdfText(bytes: Uint8Array, spec?: string) {
@@ -68,6 +103,25 @@ export const pdfOps: OpHandler = async (payload, op, ctx) => {
       const out = await applyPdfEdits(bytes, edits)
       return { result: { ok: true, pages: await pageCount(out) }, payload: changed(out) }
     }
+    case 'textLines': {
+      const pages = await pdfLines(bytes, op.page as number | undefined)
+      return { result: { lines: pages.flat() } }
+    }
+    case 'replaceText': {
+      const { edits, count } = await replaceTextEdits(bytes, String(op.find ?? ''), String(op.with ?? ''), { page: op.page as number | undefined, all: !!op.all })
+      return { result: { ok: true, replaced: count, lines: edits.length }, payload: changed(await applyPdfEdits(bytes, edits)) }
+    }
+    case 'formFields':
+      return { result: { fields: await listFields(bytes) } }
+    case 'fillForm': {
+      const fields = op.fields as Record<string, unknown> | undefined
+      if (!fields || typeof fields !== 'object') throw new OpError('fillForm needs fields: { "Field name": value }')
+      const known = new Map((await listFields(bytes)).map(f => [f.name, f.type]))
+      const values: Record<string, FormValue> = {}
+      for (const [k, v] of Object.entries(fields)) values[k] = coerceValue(known.get(k), v)
+      const out = await fillFields(bytes, values, { flatten: !!op.flatten })
+      return { result: { ok: true, filled: Object.keys(values).length, flattened: !!op.flatten }, payload: changed(out) }
+    }
     case 'merge': {
       const files = op.files
       if (!Array.isArray(files) || !files.length) throw new OpError('merge needs files: [paths]')
@@ -76,8 +130,8 @@ export const pdfOps: OpHandler = async (payload, op, ctx) => {
       return { result: { ok: true, pages: await pageCount(out) }, payload: changed(out) }
     }
     case 'write':
-      throw new OpError('PDFs cannot be rewritten from text. Use annotate, rotate, deletePages, movePage or merge.')
+      throw new OpError('PDFs cannot be rewritten from text. Use replaceText, annotate, fillForm, rotate, deletePages, movePage or merge.')
     default:
-      throw new OpError(`Unknown op "${op.op}" for PDFs. Try: info, read, annotate, rotate, deletePages, movePage, merge`)
+      throw new OpError(`Unknown op "${op.op}" for PDFs. Try: ${PDF_OPS_HELP}`)
   }
 }

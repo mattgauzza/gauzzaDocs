@@ -56,6 +56,44 @@
 .pdf-draft-ink { position: absolute; inset: 0; pointer-events: none; }
 .pdf-textbox { position: absolute; min-width: 40px; padding: 0; margin: 0; outline: 1px dashed var(--accent); outline-offset: 3px; background: rgba(255, 255, 255, .6); cursor: text; z-index: 3; }
 
+/* Edit text: lines already in the PDF, the box you type in, and edited lines waiting to be saved */
+.pdf-page.tool-edittext .pdf-overlay { pointer-events: none; }
+.pdf-line { position: absolute; pointer-events: auto; cursor: text; border-radius: 2px; }
+.pdf-line:hover { background: rgba(26, 115, 232, .08); outline: 1px solid rgba(26, 115, 232, .55); }
+.pdf-cover { position: absolute; pointer-events: none; }
+.pdf-mark.mark-replaceText { outline: 1px dashed rgba(26, 115, 232, .7); outline-offset: 1px; }
+.pdf-page.tool-edittext .pdf-mark.mark-replaceText { pointer-events: auto; cursor: text; }
+.pdf-page.tool-edittext .pdf-mark.mark-replaceText:hover { background: rgba(26, 115, 232, .08); }
+.mark-replaceText .mark-text-body { line-height: inherit; }
+.pdf-textbox.pdf-linebox { pointer-events: auto; padding: 0 1px; white-space: pre; outline: 2px solid var(--accent); outline-offset: 1px; box-shadow: 0 2px 10px rgba(0, 0, 0, .18); }
+
+/* Form fields over their boxes on the page */
+.pdf-forms { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.pdf-forms.inert .pdf-field { pointer-events: none; }
+.pdf-field { position: absolute; pointer-events: auto; box-sizing: border-box; margin: 0; padding: 0 3px; border: 1px solid rgba(26, 115, 232, .45); border-radius: 2px;
+  background: #e8f0fe; color: #000; font-family: Helvetica, Arial, sans-serif; outline: none; color-scheme: only light; }
+.pdf-field:hover:not(:disabled) { border-color: #1a73e8; }
+.pdf-field:focus { border-color: #1a73e8; box-shadow: 0 0 0 2px rgba(26, 115, 232, .3); background: #fff; }
+.pdf-field:disabled { background: #f1f3f4; color: #5f6368; border-color: transparent; }
+textarea.pdf-field { resize: none; padding-top: 2px; line-height: 1.2; }
+select.pdf-field { padding: 0 1px; }
+.pdf-check, .pdf-radio { padding: 0; cursor: pointer; display: grid; place-items: center; }
+.pdf-radio { border-radius: 50%; }
+.pdf-check.on::after { content: ''; width: 34%; height: 62%; margin-top: -12%; border: solid #000; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.pdf-radio.on::after { content: ''; width: 50%; height: 50%; border-radius: 50%; background: #000; }
+
+/* Sign */
+.pdf-modal-backdrop { position: absolute; inset: 0; z-index: 8; display: grid; place-items: center; background: rgba(32, 33, 36, .35); }
+.pdf-modal { background: var(--surface); color: var(--text); border-radius: 12px; box-shadow: var(--shadow); padding: 16px 18px; max-width: calc(100% - 32px); }
+.sig-head, .sig-foot { display: flex; align-items: center; gap: 8px; }
+.sig-head { margin-bottom: 10px; }
+.sig-foot { margin-top: 12px; flex-wrap: wrap; }
+.sig-ink { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--line); padding: 0; }
+.sig-ink.on { box-shadow: 0 0 0 2px var(--accent); }
+.sig-canvas { display: block; max-width: 100%; background: #fff; border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; touch-action: none; }
+.sig-line { margin: -34px 24px 18px; padding-top: 4px; border-top: 1px solid #bdc1c6; font-size: 11px; color: #80868b; pointer-events: none; position: relative; }
+.sig-remember { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+
 /* thumbnails */
 .pdf-thumbs { flex: none; width: 172px; overflow-y: auto; padding: 16px 0 24px; border-right: 1px solid var(--line-soft); background: var(--bg); display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .pdf-thumb { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px; border-radius: 6px; cursor: pointer; border: 2px solid transparent; }

@@ -1,10 +1,24 @@
 import type { PdfEdit } from '../../../shared/types'
 
 /** Markup that stays editable on the page until saved (page structure changes are applied at once instead). */
-export type Markup = Extract<PdfEdit, { type: 'text' | 'highlight' | 'rect' | 'ink' | 'image' }>
-export const isMarkup = (e: PdfEdit): e is Markup => ['text', 'highlight', 'rect', 'ink', 'image'].includes(e.type)
+export type Markup = Extract<PdfEdit, { type: 'text' | 'highlight' | 'rect' | 'ink' | 'image' | 'replaceText' }>
+export type ReplaceEdit = Extract<PdfEdit, { type: 'replaceText' }>
+export const isMarkup = (e: PdfEdit): e is Markup => ['text', 'highlight', 'rect', 'ink', 'image', 'replaceText'].includes(e.type)
 
-export type Tool = 'select' | 'text' | 'highlight' | 'draw' | 'whiteout' | 'rect'
+export type Tool = 'select' | 'edittext' | 'text' | 'highlight' | 'draw' | 'whiteout' | 'rect'
+
+/** CSS for the standard font a replaceText edit is drawn with, so what you type looks like what gets saved. */
+export const cssFamily = (f: ReplaceEdit['font']) =>
+  f === 'serif' ? "'Times New Roman', Times, serif" : f === 'mono' ? "'Courier New', Courier, monospace" : 'Helvetica, Arial, sans-serif'
+export const cssFont = (e: ReplaceEdit, scale = 1) =>
+  `${e.italic ? 'italic ' : ''}${e.bold ? 'bold ' : ''}${e.size * scale}px ${cssFamily(e.font)}`
+
+/**
+ * Edited lines are laid out with line-height 1.2em (the spacing they are saved with). This is where the first CSS line
+ * box has to start, in points, for its baseline to sit on the PDF baseline; the ratios come from the CSS fonts' metrics.
+ */
+const BASELINE = { sans: 0.9465, serif: 0.9375, mono: 0.8665 }
+export const lineTop = (e: ReplaceEdit) => (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - BASELINE[e.font || 'sans'] * e.size
 
 export const DEFAULT_COLORS: Record<string, string> = { text: '#000000', highlight: '#ffeb3b', draw: '#1a73e8', rect: '#d93025' }
 
@@ -26,6 +40,16 @@ export function bbox(e: Markup) {
   switch (e.type) {
     case 'text':
       return textBox(e)
+    case 'replaceText': {
+      measureCtx ??= document.createElement('canvas').getContext('2d')
+      let w = e.w
+      if (measureCtx) {
+        measureCtx.font = cssFont(e)
+        w = Math.max(...(e.text || ' ').split('\n').map(l => measureCtx!.measureText(l).width))
+      }
+      const lines = Math.max(1, (e.text || ' ').split('\n').length)
+      return { x: e.x + (e.dx || 0), y: lineTop(e), w: Math.max(w, 6), h: lines * e.size * 1.2 }
+    }
     case 'ink': {
       const xs = e.points.map(p => p[0])
       const ys = e.points.map(p => p[1])
@@ -40,13 +64,15 @@ export function bbox(e: Markup) {
 }
 
 export function translate(e: Markup, dx: number, dy: number): Markup {
+  // An edited line moves its new text only; the cover stays where the old words were.
+  if (e.type === 'replaceText') return { ...e, dx: (e.dx || 0) + dx, dy: (e.dy || 0) + dy }
   if (e.type === 'ink') return { ...e, points: e.points.map(([x, y]) => [x + dx, y + dy] as [number, number]) }
   return { ...e, x: e.x + dx, y: e.y + dy }
 }
 
 /** Resize from the bottom-right corner (box-shaped markup only). */
 export function resize(e: Markup, w: number, h: number, keepAspect = false): Markup {
-  if (e.type === 'text' || e.type === 'ink') return e
+  if (e.type === 'text' || e.type === 'ink' || e.type === 'replaceText') return e
   if (keepAspect && e.w && e.h) h = (w * e.h) / e.w
   return { ...e, w: Math.max(4, w), h: Math.max(4, h) }
 }
@@ -68,4 +94,57 @@ export async function readImage(file: File): Promise<{ src: string; w: number; h
   c.height = img.naturalHeight
   c.getContext('2d')!.drawImage(img, 0, 0)
   return { src: c.toDataURL('image/png'), w: c.width, h: c.height }
+}
+
+/**
+ * Text and background colors of a line on the rendered page: the background is the most common color in a thin ring
+ * around the box, the text is the average of the pixels inside that differ most from it.
+ */
+export function sampleColors(canvas: HTMLCanvasElement, box: { x: number; y: number; w: number; h: number }, pageWidthPt: number) {
+  const fallback = { color: '#000000', bg: '#ffffff' }
+  if (!canvas.width || !canvas.height) return fallback
+  const k = canvas.width / pageWidthPt // canvas pixels per point
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return fallback
+  const clamp = (v: number, max: number) => Math.max(0, Math.min(max, Math.round(v)))
+  const x0 = clamp((box.x - 3) * k, canvas.width - 1)
+  const y0 = clamp((box.y - 3) * k, canvas.height - 1)
+  const x1 = clamp((box.x + box.w + 3) * k, canvas.width)
+  const y1 = clamp((box.y + box.h + 3) * k, canvas.height)
+  if (x1 - x0 < 2 || y1 - y0 < 2) return fallback
+  let data: Uint8ClampedArray
+  try {
+    data = ctx.getImageData(x0, y0, x1 - x0, y1 - y0).data
+  } catch {
+    return fallback
+  }
+  const W = x1 - x0
+  const H = y1 - y0
+  const ring = Math.max(1, Math.round(2 * k))
+  const buckets = new Map<number, { n: number; r: number; g: number; b: number }>()
+  const inner: [number, number, number][] = []
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4
+      if (data[i + 3] < 8) continue
+      const px: [number, number, number] = [data[i], data[i + 1], data[i + 2]]
+      if (x < ring || y < ring || x >= W - ring || y >= H - ring) {
+        const key = ((px[0] >> 4) << 8) | ((px[1] >> 4) << 4) | (px[2] >> 4)
+        const b = buckets.get(key) || { n: 0, r: 0, g: 0, b: 0 }
+        b.n++
+        b.r += px[0]
+        b.g += px[1]
+        b.b += px[2]
+        buckets.set(key, b)
+      } else inner.push(px)
+    }
+  const top = [...buckets.values()].sort((a, b) => b.n - a.n)[0]
+  if (!top) return fallback
+  const bg: [number, number, number] = [top.r / top.n, top.g / top.n, top.b / top.n]
+  const dist = (p: [number, number, number]) => Math.hypot(p[0] - bg[0], p[1] - bg[1], p[2] - bg[2])
+  const far = Math.max(0, ...inner.map(dist))
+  const ink = far > 40 ? inner.filter(p => dist(p) > far * 0.6) : []
+  const avg = (ps: [number, number, number][], c: 0 | 1 | 2) => ps.reduce((n, p) => n + p[c], 0) / ps.length
+  const hex = (c: [number, number, number]) => '#' + c.map(v => Math.round(v).toString(16).padStart(2, '0')).join('')
+  return { bg: hex(bg), color: ink.length ? hex([avg(ink, 0), avg(ink, 1), avg(ink, 2)]) : '#000000' }
 }

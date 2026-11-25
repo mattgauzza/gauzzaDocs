@@ -12,6 +12,7 @@ import { type Kind, kindOf, languageOf } from '../shared/kinds'
 import type { AgentOp } from '../shared/types'
 import { type Ctx, call, liveOptions, runOp } from './common'
 import { registerCommentCommands } from './comments'
+import { registerSubscribeCommands } from './subscribe'
 import { registerProjectCommands } from './projects'
 import { registerDocCommands } from './doc'
 import { registerPdfCommands } from './pdf'
@@ -414,6 +415,7 @@ program
 
 registerProjectCommands(program, ctx)
 registerCommentCommands(program, ctx, () => program.opts().agent || process.env.GDOCS_AGENT || 'Agent')
+registerSubscribeCommands(program, ctx)
 registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)
 registerPdfCommands(program, ctx)

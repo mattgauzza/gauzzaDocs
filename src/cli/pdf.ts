@@ -15,7 +15,7 @@ const number = (v: string) => {
 export function registerPdfCommands(program: Command, ctx: Ctx) {
   const pdf = program
     .command('pdf')
-    .description('Read and mark up PDFs: text, highlights, whiteout, page rotate/delete/move, merge.\nCoordinates are points (1/72 in) from the top-left of the page; pages are 1-based.')
+    .description('Read, edit and mark up PDFs: edit existing text, fill forms, highlights, whiteout, page rotate/delete/move, merge.\nCoordinates are points (1/72 in) from the top-left of the page; pages are 1-based.')
 
   const done = (r: unknown) => {
     const res = r as { applied?: number; pages?: number } | undefined
@@ -106,6 +106,62 @@ export function registerPdfCommands(program: Command, ctx: Ctx) {
   liveOptions(pdf.command('move-page <file> <page> <to>').description('move a page to a new position')).action(async (file, page, to, o) =>
     done(await ctx.run(file, { op: 'movePage', page: number(page), to: number(to) }, o))
   )
+
+  // ---------- editing text that is already in the PDF ----------
+  pdf
+    .command('lines <file>')
+    .description('lines of text with their boxes (what replace-text and the Edit text tool work on)')
+    .option('-p, --page <n>', 'one page (default all)', number)
+    .action(async (file, o) => {
+      const r = (await ctx.run(file, { op: 'textLines', page: o.page })) as { lines: { id: string; x: number; y: number; w: number; h: number; size: number; font: string; bold: boolean; italic: boolean; text: string }[] }
+      ctx.out(r, () =>
+        r.lines
+          .map(l => `${l.id.padEnd(7)} ${`${Math.round(l.x)},${Math.round(l.y)} ${Math.round(l.w)}x${Math.round(l.h)}`.padEnd(16)} ${`${Math.round(l.size)}pt ${l.font}${l.bold ? ' bold' : ''}${l.italic ? ' italic' : ''}`.padEnd(20)} ${l.text}`)
+          .join('\n') || '(no editable text: scanned pages have no text layer)'
+      )
+    })
+
+  liveOptions(
+    pdf
+      .command('replace-text <file> <find> <with>')
+      .description('change words that are already in the PDF: the old text is removed and the new text drawn in a matching font. Matches must sit inside one line')
+      .option('-p, --page <n>', 'only this page', number)
+      .option('--all', 'every match (default: the first)')
+  ).action(async (file, find, withText, o) => {
+    const r = (await ctx.run(file, { op: 'replaceText', page: o.page, find, with: ctx.input(withText), all: !!o.all }, o)) as { replaced: number; pending?: boolean }
+    ctx.out(r, () => `Replaced ${r.replaced}${r.pending ? ' (shown in the app; written into the file on save)' : ''}.`)
+  })
+
+  // ---------- forms ----------
+  pdf
+    .command('fields <file>')
+    .description('form fields: name, type, current value and options')
+    .action(async file => {
+      const r = (await ctx.run(file, { op: 'formFields' })) as { fields: { name: string; type: string; value: unknown; options?: string[]; readOnly?: boolean }[] }
+      ctx.out(r, () =>
+        r.fields
+          .map(f => `${f.name.padEnd(28)} ${f.type.padEnd(10)} ${JSON.stringify(f.value)}${f.options ? `  options: ${f.options.join(' | ')}` : ''}${f.readOnly ? '  (read-only)' : ''}`)
+          .join('\n') || '(this PDF has no form fields)'
+      )
+    })
+
+  liveOptions(
+    pdf
+      .command('fill <file> [pairs...]')
+      .description('fill form fields: name=value pairs (checkboxes take true/false), or --values with a JSON map')
+      .option('--values <json>', 'JSON object of field name to value ("-" for stdin, @file)')
+      .option('--flatten', 'bake the values into the page and remove the fields')
+  ).action(async (file, pairs: string[], o) => {
+    const fields: Record<string, unknown> = o.values ? JSON.parse(ctx.input(o.values)) : {}
+    for (const p of pairs) {
+      const i = p.indexOf('=')
+      if (i < 1) throw new Error(`"${p}" should be name=value`)
+      fields[p.slice(0, i)] = p.slice(i + 1)
+    }
+    if (!Object.keys(fields).length && !o.flatten) throw new Error('Nothing to fill. Use name=value pairs or --values')
+    const r = (await ctx.run(file, { op: 'fillForm', fields, flatten: !!o.flatten }, o)) as { filled: number; pending?: boolean }
+    ctx.out(r, () => `Filled ${r.filled} field${r.filled === 1 ? '' : 's'}${o.flatten ? ' and flattened the form' : ''}${r.pending ? ' (shown in the app; written into the file on save)' : ''}.`)
+  })
 
   pdf
     .command('merge <out> <inputs...>')

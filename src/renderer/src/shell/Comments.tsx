@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { type Listener, type Thread, api, when } from '../lib'
 import { Icon } from './icons'
+import { usePanelSize } from './resize'
 
 /** Open threads that quote some text, for highlighting in the editor. Reloads whenever the file's threads change. */
 export function useQuotedThreads(path: string) {
@@ -39,6 +40,7 @@ export function CommentsPanel(props: {
   focusDraft: number // bumped to focus the new-comment box
   focusThread?: { id: string; n: number } // bumped to scroll to and flash one thread
 }) {
+  const [width, resizeHandle] = usePanelSize('comments', 340, { min: 260, max: 720, edge: 'left' })
   const [threads, setThreads] = useState<Thread[]>([])
   const [showResolved, setShowResolved] = useState(false)
   const [draft, setDraft] = useState('')
@@ -101,7 +103,8 @@ export function CommentsPanel(props: {
   const shown = threads.filter(t => showResolved || !t.resolved)
 
   return (
-    <aside className="comments">
+    <aside className="comments" style={{ width }}>
+      {resizeHandle}
       <header>
         <b className="grow">Comments</b>
         <label className="small muted cm-toggle">

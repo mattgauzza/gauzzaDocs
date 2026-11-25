@@ -10,8 +10,8 @@ read and edit the same files while you watch. You can comment back to the agent 
   lists and code blocks come back out the same way they went in.
 - Spreadsheets have a formula bar, the usual formulas, formatting, merged cells, conditional formatting and charts.
   They open and save as Excel, CSV or TSV.
-- PDFs can be marked up with text, highlights, drawing, whiteout or a signature image. Pages can be rotated, reordered
-  or deleted.
+- PDFs let you change the text that's already there, fill in forms and sign them. You can also add text, highlights,
+  drawing or whiteout. Pages can be rotated, reordered or deleted.
 - Every other file opens in a code editor that works like Notepad++. Plugins add formatters, previews and commands.
 - Files stay normal files on your PC. There's no account and nothing gets uploaded.
 
@@ -62,6 +62,8 @@ gdocs sheet set budget.xlsx B7 "=SUM(B2:B6)"
 gdocs sheet format budget.xlsx A7:D7 --bold
 gdocs pdf text contract.pdf --pages 1-3
 gdocs pdf highlight contract.pdf --page 2 --x 72 --y 140 --w 300 --h 14
+gdocs pdf replace-text invoice.pdf "1,250 USD" "1,400 USD"
+gdocs pdf fill application.pdf name="Jamie Chen" agree=true
 gdocs format data.json --with json-tools.pretty
 ```
 
@@ -102,6 +104,32 @@ listening it first gets any comments it missed. Its own edits and replies aren't
 
 Comments are saved in `~/.gauzzadocs/comments.json` and follow a file when you rename it in the app. Your edits are
 only compared while an agent is listening, so there's no cost the rest of the time.
+
+### Agents working together
+
+I can put more than one agent on a document and let them work it out between them. Each one is subscribed to the doc
+with a role and a brief. gauzzaDocs runs it in the background with its own CLI and my own login, so there are no API
+keys. An agent gets a turn when I comment, when someone @mentions it, when someone replies in its thread or, for
+reviewers and editors, after someone else's edits settle down.
+
+```
+gdocs subscribe plan.md codex --role writer --brief "Write a one page plan for the move. Short summary at the top." --start
+gdocs subscribe plan.md claude --role reviewer --brief "Review it and leave at most two comments a turn."
+gdocs participants plan.md
+gdocs wake plan.md claude --note "Check the numbers in section 2"
+```
+
+Codex writes the draft and I watch it land in the open doc. Claude reads it, quotes the parts it has a problem with
+and @mentions Codex. Codex fixes them and answers in the thread. I can comment at any point and whoever owns that part
+picks it up. In the app it's the Add agent button next to the comments button, and each agent shows up there as an
+avatar with what it's doing.
+
+Agents hear each other's edits and comments too, but never their own. An agent you run yourself can join with
+`gdocs listen plan.md --from others --settle 20 --once`.
+
+There are limits so they can't run away. Each agent gets one turn at a time and at most six turns in ten minutes. A
+turn can't run longer than ten minutes. If they keep waking each other without anything from me in between, every agent on that doc pauses.
+Each turn is logged, and View last run on an agent's avatar shows what it did.
 
 ### Your writing voice with Empirical
 
@@ -156,6 +184,15 @@ gdocs projects                     # your projects
 gdocs projects add ~/Clients --name Clients
 gdocs ls Clients                   # one level of a project or folder
 ```
+
+## Editing PDFs
+
+I wanted to fix a typo in a PDF without hunting down the Word file it came from. Press E for Edit text and click any
+line to change it. The new words go in the same spot at the same size and color, in the closest standard font, and the
+old words are taken out of the file instead of just painted over. Forms fill in right on the page and Sign lets you
+draw your signature and drop it on the line. Agents do the same with `gdocs pdf replace-text` and `gdocs pdf fill`.
+Open as document in the Tools menu turns a PDF into a Word file you can rewrite, but you get the text, headings and
+lists, not the layout. Scanned pages have no text to edit.
 
 ## Tabs and saving
 
@@ -213,6 +250,9 @@ Comments are saved on your PC, so they don't travel with the file yet.
 gauzzaDocs is free and open source under the [MIT license](LICENSE). Issues and pull requests are welcome. See
 [CONTRIBUTING.md](CONTRIBUTING.md), and [plugins/README.md](plugins/README.md#submitting-a-plugin) if you want to
 publish a plugin.
+
+If gauzzaDocs is useful to you, you can support it on [Ko-fi](https://ko-fi.com/mattgauzza). The heart in the app's tab
+strip goes there too.
 
 ## Where things live
 

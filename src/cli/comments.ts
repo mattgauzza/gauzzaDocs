@@ -4,6 +4,7 @@ import * as store from '../core/comments'
 import { readServer } from '../core/paths'
 import { call } from './common'
 import type { Ctx } from './common'
+import { isForAgent } from '../core/subscriptions'
 
 /**
  * The two-way channel between the person and an agent:
@@ -68,11 +69,15 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
   program
     .command('listen [file]')
     .description(
-      'stream what the person does: their comments, replies, resolves and edits (yours are left out). Needs the app.\n' +
-        'Starts by replaying open threads still waiting for an answer. --once returns after the first event,\n' +
-        'which suits agents: listen --once, act on it, reply, listen again. The person sees that you are listening.'
+      'stream what others do on a file: the person\'s and other agents\' comments, replies, resolves and edits\n' +
+        '(your own are left out; set your name with --agent or GDOCS_AGENT). Needs the app.\n' +
+        'Starts by replaying open threads still waiting for you. --once returns after the first event (or batch, with\n' +
+        '--settle), which suits agents: listen --once, act on it, reply, listen again. Events that @mention you or\n' +
+        'reply in your thread are marked forYou. The person sees that you are listening.'
     )
-    .option('--once', 'exit after the first event')
+    .option('--from <who>', 'others (default: everyone but you), user (only the person), agents (only other agents) or all', 'others')
+    .option('--settle <seconds>', 'after the first event keep collecting until it has been quiet this long, then print the batch')
+    .option('--once', 'exit after the first event (or the first batch with --settle)')
     .option('--timeout <seconds>', 'give up after this long (exit code 2)')
     .option('--no-catch-up', 'do not replay threads already waiting for an answer')
     .option('--comments-only', 'leave out edits')
@@ -90,12 +95,44 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
         }, Number(o.timeout) * 1000)
       }
 
-      if (o.catchUp !== false && target) {
-        const pending = ((await call('comments', { path: target })) as store.Thread[]).filter(waiting)
-        for (const t of pending) {
-          print({ type: 'comment', path: target, by: 'user', author: lastAuthor(t), thread: t, waiting: true })
+      const me = agentName()
+      const from = String(o.from || 'others')
+      if (!['others', 'user', 'agents', 'all'].includes(from)) throw new Error('--from must be others, user, agents or all')
+      const wanted = (ev: Record<string, unknown>) => {
+        if (!ev.by) return false // housekeeping (opened, saved, ...) is not news
+        const mine = ev.by === 'agent' && String(ev.author || '').toLowerCase() === me.toLowerCase()
+        if (from === 'user') return ev.by === 'user'
+        if (from === 'agents') return ev.by === 'agent' && !mine
+        if (from === 'all') return true
+        return !mine
+      }
+      const settleMs = o.settle ? Math.max(0, Number(o.settle)) * 1000 : 0
+      let batch: Record<string, unknown>[] = []
+      let settleTimer: NodeJS.Timeout | undefined
+      const deliver = (ev: Record<string, unknown>) => {
+        if (isForAgent(ev as never, me)) ev.forYou = true
+        if (!settleMs) {
+          print(ev)
           if (o.once) return void (clearTimeout(timer), process.exit(0))
+          return
         }
+        batch.push(ev)
+        clearTimeout(settleTimer)
+        settleTimer = setTimeout(() => {
+          for (const b of batch) print(b)
+          batch = []
+          if (o.once) {
+            clearTimeout(timer)
+            process.exit(0)
+          }
+        }, settleMs)
+      }
+
+      if (o.catchUp !== false && target) {
+        // Threads still waiting for this agent: the last word isn't its own, and it's the person's or addressed to it.
+        const pending = ((await call('comments', { path: target })) as store.Thread[]).filter(t => waitingFor(t, me))
+        for (const t of pending) deliver({ type: 'comment', path: target, by: lastBy(t), author: lastAuthor(t), thread: t, waiting: true })
+        if (pending.length && o.once && !settleMs) return
       }
 
       const q = new URLSearchParams({ agent: agentName(), ...(target ? { path: target } : {}) })
@@ -115,13 +152,9 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
           buf = buf.slice(i + 2)
           if (!chunk.startsWith('data: ')) continue
           const ev = JSON.parse(chunk.slice(6)) as Record<string, unknown>
-          if (ev.by !== 'user') continue // the agent's own actions and housekeeping events are not news to it
+          if (!wanted(ev)) continue // its own actions and housekeeping events are not news to it
           if (o.commentsOnly && ev.type === 'edit') continue
-          print(ev)
-          if (o.once) {
-            clearTimeout(timer)
-            process.exit(0)
-          }
+          deliver(ev)
         }
       }
     })
@@ -129,29 +162,41 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
 const lastAuthor = (t: store.Thread) => (t.replies.length ? t.replies[t.replies.length - 1].author : t.author)
+const lastBy = (t: store.Thread) => (t.replies.length ? t.replies[t.replies.length - 1].by : t.by)
 /** Open thread whose most recent message is the person's: an agent owes an answer. */
-const waiting = (t: store.Thread) => !t.resolved && (t.replies.length ? t.replies[t.replies.length - 1].by : t.by) === 'user'
+const waiting = (t: store.Thread) => !t.resolved && lastBy(t) === 'user'
+/** Open thread an agent named `me` owes an answer: the last word isn't its own, and it's the person's or mentions or involves it. */
+export function waitingFor(t: store.Thread, me: string) {
+  if (t.resolved) return false
+  const last = t.replies.length ? t.replies[t.replies.length - 1] : t
+  const n = me.toLowerCase()
+  if (last.by === 'agent' && last.author.toLowerCase() === n) return false
+  if (last.by === 'user') return true
+  const mentioned = new RegExp(`@${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(last.text)
+  return mentioned || (t.by === 'agent' && t.author.toLowerCase() === n)
+}
 
 function human(ev: Record<string, unknown>): string {
   const file = typeof ev.path === 'string' ? path.basename(ev.path) : ''
   const t = ev.thread as store.Thread | undefined
   switch (ev.type) {
     case 'comment':
-      return `${ev.waiting ? 'waiting' : 'comment'} [${t!.id}] ${ev.author} on ${file}${t!.quote ? ` about "${clip(t!.quote, 100)}"` : ''}:\n  ${t!.text}${
+      return `${ev.forYou ? '(for you) ' : ''}${ev.waiting ? 'waiting' : 'comment'} [${t!.id}] ${ev.author} on ${file}${t!.quote ? ` about "${clip(t!.quote, 100)}"` : ''}:\n  ${t!.text}${
         t!.replies.length ? '\n' + t!.replies.map(r => `  ↳ ${r.author}: ${r.text}`).join('\n') : ''}\n  (answer: gdocs reply "${ev.path}" ${t!.id} "…")`
     case 'reply': {
       const r = ev.reply as store.Reply
-      return `reply [${t!.id}] ${r.author} on ${file}${t!.quote ? ` (thread about "${clip(t!.quote, 60)}")` : ''}:\n  ${r.text}\n  (answer: gdocs reply "${ev.path}" ${t!.id} "…")`
+      return `${ev.forYou ? '(for you) ' : ''}reply [${t!.id}] ${r.author} on ${file}${t!.quote ? ` (thread about "${clip(t!.quote, 60)}")` : ''}:\n  ${r.text}\n  (answer: gdocs reply "${ev.path}" ${t!.id} "…")`
     }
     case 'resolved':
       return `${ev.resolved ? 'resolved' : 'reopened'} [${t!.id}] by ${ev.author} on ${file}`
     case 'deleted':
       return `deleted thread [${ev.id}] on ${file}`
     case 'edit': {
-      if (ev.summary) return `edit by the person on ${file}: ${ev.summary}`
+      const by = ev.by === 'agent' ? `${ev.author}` : 'the person'
+      if (ev.summary) return `edit by ${by} on ${file}: ${ev.summary}`
       const rem = (ev.removed as string[]) || []
       const add = (ev.added as string[]) || []
-      return [`edit by the person on ${file} at line ${ev.line}:`, ...rem.map(l => `  - ${l}`), ...add.map(l => `  + ${l}`), ...(ev.truncated ? ['  (more lines changed; gdocs read to see all)'] : [])].join('\n')
+      return [`edit by ${by} on ${file} at line ${ev.line}:`, ...rem.map(l => `  - ${l}`), ...add.map(l => `  + ${l}`), ...(ev.truncated ? ['  (more lines changed; gdocs read to see all)'] : [])].join('\n')
     }
     default:
       return `${ev.type} ${file}`

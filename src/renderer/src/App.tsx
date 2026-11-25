@@ -7,12 +7,15 @@ import { DONATE, EMPIRICAL_VOICE, REPO, SUBMIT_PLUGIN } from '../../shared/links
 import { AgentDialog, Confirm, InstructionsDialog, PluginsDialog, SettingsDialog, ShortcutsDialog } from './shell/Dialogs'
 import { Home } from './shell/Home'
 import { StatusBar } from './shell/StatusBar'
+import { ToolbarOverflow } from './shell/ToolbarOverflow'
+import { usePanelSize } from './shell/resize'
 import { Onboarding } from './shell/Onboarding'
 import { Explorer } from './shell/Explorer'
 import { TabBoundary } from './shell/TabBoundary'
 import { CommentsPanel } from './shell/Comments'
 import { diffLines } from './shell/diff'
 import LargeViewer from './shell/LargeViewer'
+import { Participants } from './shell/Participants'
 import { SelectionBubble } from './shell/SelectionBubble'
 import { Icon, KindIcon, Logo } from './shell/icons'
 import { MenuBar, MenuList } from './shell/Menus'
@@ -381,20 +384,25 @@ export default function App() {
     const text = await textOf(id)
     if (text !== null) snapshots.current.set(id, text)
   }
+  /** Sends what changed since the last snapshot, signed by whoever made the change (the person or an agent). */
+  const emitDiff = async (id: number, by: { by: 'user' } | { by: 'agent'; author: string }) => {
+    const now = tabsRef.current.find(x => x.id === id)
+    if (!now) return
+    if (now.kind === 'pdf') return window.gd.changed(now.path, { type: 'edit', ...by, summary: 'PDF markup or pages changed' })
+    const before = snapshots.current.get(id)
+    const after = await textOf(id)
+    if (after === null) return
+    snapshots.current.set(id, after)
+    if (before === undefined || before === after) return
+    window.gd.changed(now.path, { type: 'edit', ...by, ...diffLines(before, after) })
+  }
   const userEdited = (id: number) => {
     const t = tabsRef.current.find(x => x.id === id)
     if (!t || !listensTo(t.path).length) return // nobody listening: no snapshots, no diffing, no memory spent
     window.clearTimeout(editTimers.current.get(id))
-    editTimers.current.set(id, window.setTimeout(async () => {
-      const now = tabsRef.current.find(x => x.id === id)
-      if (!now) return
-      if (now.kind === 'pdf') return window.gd.changed(now.path, { type: 'edit', by: 'user', summary: 'PDF markup or pages changed' })
-      const before = snapshots.current.get(id)
-      const after = await textOf(id)
-      if (after === null) return
-      snapshots.current.set(id, after)
-      if (before === undefined || before === after) return
-      window.gd.changed(now.path, { type: 'edit', by: 'user', ...diffLines(before, after) })
+    editTimers.current.set(id, window.setTimeout(() => {
+      editTimers.current.delete(id)
+      emitDiff(id, { by: 'user' })
     }, 1500))
   }
   // Start snapshots when an agent starts listening to an open file; drop them when nobody listens.
@@ -473,6 +481,17 @@ export default function App() {
         ]
       })
     })
+  // Editors can ask the shell to open a file in a new tab (PDF > Open as document writes a .docx and opens it).
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const p = (e as CustomEvent<{ path?: string }>).detail?.path
+      if (!p) return
+      e.preventDefault()
+      open(p)
+    }
+    window.addEventListener('gd-open-file', onOpen)
+    return () => window.removeEventListener('gd-open-file', onOpen)
+  }, [])
   useEffect(() => window.gd.on('confirm-quit', async () => {
     for (const t of tabsRef.current.filter(x => x.dirty)) if (!(await close(t.id))) return
     api.quit()
@@ -538,14 +557,25 @@ export default function App() {
         await save(t.id, { explicit: true })
         return { ok: true, path: t.path }
       }
+      const watched = listensTo(t.path).length > 0 && !reading
+      if (watched) {
+        // The person's unsent typing is theirs: send it before the agent's change so nothing is misattributed.
+        if (editTimers.current.has(t.id)) {
+          window.clearTimeout(editTimers.current.get(t.id))
+          editTimers.current.delete(t.id)
+          await emitDiff(t.id, { by: 'user' })
+        } else if (!snapshots.current.has(t.id)) await snapshotNow(t.id)
+      }
       agentBusy.current.add(t.id)
       try {
         return await h.agent(req.op, req.agent)
       } finally {
-        // The agent's own change is not news to it: take a fresh snapshot once its edit has landed.
-        window.setTimeout(() => {
+        // Other listeners (other agents) hear this agent's change as a diff signed with its name; the agent itself
+        // filters its own events out. Wait a moment for the edit to land in the editor.
+        window.setTimeout(async () => {
+          if (watched) await emitDiff(t.id, { by: 'agent', author: req.agent?.name || 'Agent' })
+          else await snapshotNow(t.id)
           agentBusy.current.delete(t.id)
-          snapshotNow(t.id)
         }, 400)
       }
     })
@@ -842,11 +872,12 @@ export default function App() {
             <MenuBar menus={menus} />
           </div>
           <div className="file-actions-right">
-            {listensTo(cur.path).length > 0 && (
+            {listensTo(cur.path).filter(l => !l.virtual).length > 0 && (
               <span className="listening" title="An agent is listening: your comments and edits are sent to it as you make them">
-                <span className="cm-live" /> {[...new Set(listensTo(cur.path).map(l => l.agent))].join(', ')} is listening
+                <span className="cm-live" /> {[...new Set(listensTo(cur.path).filter(l => !l.virtual).map(l => l.agent))].join(', ')} is listening
               </span>
             )}
+            <Participants path={cur.path} say={say} />
             <button className={`icon-btn comments-btn${commentsOpen ? ' on' : ''}`} title="Comments (Ctrl+Alt+M comments on the selection)" onClick={() => setCommentsOpen(!commentsOpen)}>
               <Icon name="comment" />
               {commentCount > 0 && <span className="badge">{commentCount}</span>}
@@ -933,6 +964,7 @@ export default function App() {
 
       <SelectionBubble enabled={!!cur && active !== HOME && !cur.large && (cur.kind === 'doc' || cur.kind === 'text') && !dialog} onComment={addComment} />
       {welcome && <Onboarding onClose={() => setWelcome(false)} />}
+      <ToolbarOverflow />
       {toast && <div className="toast">{toast}</div>}
       {dialog === 'plugins' && <PluginsDialog onClose={() => setDialog(null)} onReload={reloadPlugins} />}
       {dialog === 'settings' && <SettingsDialog settings={settings} onClose={() => setDialog(null)} onSave={saveSettings} />}
@@ -983,6 +1015,7 @@ function PreviewPane({ def, handle, path, tick, onClose }: {
   tick: number
   onClose(): void
 }) {
+  const [width, resizeHandle] = usePanelSize('preview', 480, { min: 280, max: 1200, edge: 'left' })
   const ref = useRef<HTMLDivElement>(null)
   const [err, setErr] = useState('')
   useEffect(() => {
@@ -998,7 +1031,8 @@ function PreviewPane({ def, handle, path, tick, onClose }: {
     return () => window.clearTimeout(t)
   }, [tick, def])
   return (
-    <aside className="preview-pane">
+    <aside className="preview-pane" style={{ width }}>
+      {resizeHandle}
       <header>
         <Icon name="preview" size={18} /> <b className="grow">{def.name}</b>
         <button className="icon-btn sm" onClick={onClose} title="Close preview"><Icon name="close" size={16} /></button>

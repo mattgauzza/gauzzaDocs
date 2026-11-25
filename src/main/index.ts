@@ -10,7 +10,9 @@ import { wrapHtml } from '../shared/convert'
 import { type Kind, OPEN_FILTERS, extOf, kindOf, stem } from '../shared/kinds'
 import type { AgentInfo, AgentOp, FilePayload, OpenFile } from '../shared/types'
 import * as comments from '../core/comments'
-import { type Bridge, startBridge } from './server'
+import { type Bridge, type Listener, startBridge } from './server'
+import { AgentRunner, writeLaunchers } from './agents'
+import * as subs from '../core/subscriptions'
 import { attachContextMenu, setupSpelling } from './contextMenu'
 import { stopWorker, warmUp, work } from './work'
 import { stopWatching, watchFolders } from './folders'
@@ -120,6 +122,30 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       commentsChanged(file, { type: 'resolved', by: 'agent', author: agent.name, thread: t, resolved: t.resolved })
       return t
     }
+    // ---------- agents subscribed to a document ----------
+    case 'subscribe': {
+      const sub = subs.subscribe(file, { agent: params.agent_kind as subs.AgentKind, name: params.name as string, role: params.role as subs.Role, brief: params.brief as string })
+      if (params.start) runner?.wake(sub.id)
+      agentsChanged()
+      return sub
+    }
+    case 'unsubscribe': {
+      const sub = subs.findSubscription(file, String(params.name || ''))
+      if (!sub) throw new Error(`No agent called ${params.name} on this document`)
+      runner?.stop(sub.id)
+      subs.unsubscribe(sub.id)
+      agentsChanged()
+      return { ok: true, removed: sub.name }
+    }
+    case 'participants':
+      return runner?.states(file) || subs.listSubscriptions(file)
+    case 'wake': {
+      const sub = subs.findSubscription(file, String(params.name || ''))
+      if (!sub) throw new Error(`No agent called ${params.name} on this document`)
+      if (sub.paused) subs.updateSubscription(sub.id, { paused: false })
+      runner?.wake(sub.id, params.note as string | undefined)
+      return { ok: true, woke: sub.name }
+    }
     case 'listeners':
       return bridge?.listeners() || []
     case 'close':
@@ -135,11 +161,30 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         return { result, live: true }
       }
       if (op.op === 'save') return { result: { ok: true, note: 'not open; nothing to save' }, live: false }
-      return { result: await work('runOffline', [file, op]), live: false }
+      const offline = await work('runOffline', [file, op])
+      // Other agents hear about edits made on disk too (live edits are diffed by the window instead).
+      if (!READ_ONLY_OPS.has(op.op)) bridge?.emit({ type: 'edit', by: 'agent', author: agent.name, path: file, summary: `${op.op} (on disk)` })
+      return { result: offline, live: false }
     }
     default:
       throw new Error(`Unknown method "${method}"`)
   }
+}
+
+/** Ops that only look, so they're not news to other agents. */
+const READ_ONLY_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets', 'charts', 'rules', 'merges', 'comments'])
+
+// ---------- subscribed agents ----------
+let runner: AgentRunner | null = null
+/** Listeners the window diffs edits for: agents connected with `gdocs listen`, plus every active subscription. */
+function allListeners(): Listener[] {
+  const live = bridge?.listeners() || []
+  const virtual = subs.listSubscriptions().filter(s => !s.paused).map((s, i) => ({ id: -1 - i, agent: s.name, path: s.path, since: s.created, virtual: true }))
+  return [...live, ...virtual] as Listener[]
+}
+function agentsChanged() {
+  win?.webContents.send('listeners', allListeners())
+  runner?.publish()
 }
 
 /** Tells the window (to redraw the comment panel) and every listening agent that a thread changed. */
@@ -308,6 +353,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
     fs.renameSync(file, to)
     renameRecent(file, to)
     renameInstructions(file, to)
+    subs.renameSubscriptions(file, to)
     comments.renameComments(file, to)
     return to
   },
@@ -384,7 +430,33 @@ const api: Record<string, (...a: any[]) => unknown> = {
     comments.remove(file, id)
     commentsChanged(file, { type: 'deleted', by: 'user', id })
   },
-  listeners: () => bridge?.listeners() || [],
+  listeners: () => allListeners(),
+  // Agents subscribed to documents (Add agent, the participant strip).
+  agentsOn: (file: string) => runner?.states(file) || [],
+  agentSubscribe: (file: string, s: { agent: subs.AgentKind; name?: string; role?: subs.Role; brief?: string; start?: boolean }) => {
+    const sub = subs.subscribe(file, s)
+    if (s.start) runner?.wake(sub.id)
+    agentsChanged()
+    return sub
+  },
+  agentUpdate: (id: string, patch: { brief?: string; role?: subs.Role; paused?: boolean }) => {
+    const sub = subs.updateSubscription(id, patch)
+    if (patch.paused) runner?.stop(id)
+    agentsChanged()
+    return sub
+  },
+  agentRemove: (id: string) => {
+    runner?.stop(id)
+    subs.unsubscribe(id)
+    agentsChanged()
+  },
+  agentWake: (id: string, note?: string) => {
+    const s = subs.listSubscriptions().find(x => x.id === id)
+    if (s?.paused) subs.updateSubscription(id, { paused: false })
+    runner?.wake(id, note)
+    agentsChanged()
+  },
+  agentLog: (id: string) => runner?.lastLog(id) || '',
   cliInfo: () => ({ port: bridge?.port, cli: path.join(app.getAppPath(), 'dist', 'cli.mjs'), home: os.homedir() }),
   updateReady: () => updateReady(),
   installUpdate: () => {
@@ -445,6 +517,11 @@ function installCli() {
     const body = `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "${cli}" %*\r\n`
     put(path.join(dir, 'gauzzadocs.cmd'), body, true)
     put(path.join(dir, 'gdocs.cmd'), body, false)
+    // Git Bash (the shell Claude Code uses on Windows) can't run a .cmd by its bare name; npm writes these too.
+    const fwd = (p: string) => p.replace(/\\/g, '/')
+    const sh = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${fwd(process.execPath)}" "${fwd(cli)}" "$@"\n`
+    put(path.join(dir, 'gauzzadocs'), sh, true)
+    put(path.join(dir, 'gdocs'), sh, false)
   } else if (!process.env.APPIMAGE) {
     const bin = path.join(os.homedir(), '.local', 'bin')
     const sh = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cli}" "$@"\n`
@@ -512,7 +589,16 @@ else {
     if (app.isPackaged) registerWithWindows(process.execPath).catch(() => {}) // Open with + the Default apps page
     if (app.isPackaged) work('agentsRefresh', [app.getVersion()]).catch(() => {}) // keep installed skills current
     setupSpelling(getSettings().spellcheck !== false)
-    bridge = await startBridge(rpc, list => win?.webContents.send('listeners', list))
+    // Agents subscribed to documents run through their own CLIs; they use launchers that point at this app's CLI.
+    const binDir = path.join(HOME, 'bin')
+    try {
+      writeLaunchers(binDir, process.execPath, path.join(app.getAppPath(), 'dist', 'cli.mjs'))
+    } catch { /* agents fall back to the gdocs on PATH */ }
+    runner = new AgentRunner({
+      binDir,
+      notify: states => win?.webContents.send('agents-state', states)
+    })
+    bridge = await startBridge(rpc, () => win?.webContents.send('listeners', allListeners()), ev => runner?.onEvent(ev as subs.DocEvent))
     installCli()
     createWindow()
     watchForUpdates(() => win)
@@ -521,6 +607,7 @@ else {
   })
   app.on('before-quit', () => {
     forceQuit = true
+    runner?.shutdown()
     stopWorker()
     stopWatching()
     bridge?.close()
