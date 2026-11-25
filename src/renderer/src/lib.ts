@@ -58,6 +58,7 @@ export const api = {
   largeForget: (path: string) => window.gd.call('largeForget', path),
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
+  openDefaultApps: () => window.gd.call('openDefaultApps'),
   openUrl: (url: string) => window.gd.call('openUrl', url),
   quit: () => window.gd.call('quit')
 }

@@ -345,6 +345,12 @@ const api: Record<string, (...a: any[]) => unknown> = {
     forceQuit = true
     installUpdate()
   },
+  /** Windows only lets the person pick default apps; this opens that page (or the OS equivalent). */
+  openDefaultApps: () => {
+    if (process.platform === 'win32') return shell.openExternal('ms-settings:defaultapps')
+    if (process.platform === 'darwin') return dialog.showMessageBox(win!, { message: 'In Finder, select a file, press Cmd+I, pick gauzzaDocs under "Open with" and click Change All.' })
+    return dialog.showMessageBox(win!, { message: 'Right-click a file in your file manager, choose Open With, pick gauzzaDocs and set it as the default.' })
+  },
   openUrl: (url: string) => (/^https:\/\//i.test(url) ? shell.openExternal(url) : undefined),
   quit: () => {
     forceQuit = true
@@ -390,6 +396,13 @@ const filesFromArgv = (argv: string[]) => argv.slice(app.isPackaged ? 1 : 2).fil
 
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
+  // macOS hands double-clicked files over as events (possibly before the window exists).
+  const pendingOpen: string[] = []
+  app.on('open-file', (e, file) => {
+    e.preventDefault()
+    if (win && app.isReady()) openInWindow(file).catch(() => {})
+    else pendingOpen.push(file)
+  })
   app.on('second-instance', (_e, argv) => {
     if (!win) createWindow()
     else {
@@ -436,7 +449,7 @@ else {
     installCli()
     createWindow()
     watchForUpdates(() => win)
-    const initial = filesFromArgv(process.argv)
+    const initial = [...filesFromArgv(process.argv), ...pendingOpen.splice(0)]
     if (initial.length) win!.webContents.once('did-finish-load', () => setTimeout(() => initial.forEach(f => openInWindow(f).catch(() => {})), 300))
   })
   app.on('before-quit', () => {

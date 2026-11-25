@@ -252,3 +252,4 @@ textarea.instructions { min-height: 110px; padding: 10px 12px; border: 1px solid
 .strip-btn:hover { background: var(--hover); }
 .strip-btn.update { color: #34a853; }
 .strip-btn.heart:hover { color: #e8457a; }
+.form .row-setting { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }

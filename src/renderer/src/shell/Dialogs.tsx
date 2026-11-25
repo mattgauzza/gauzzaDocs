@@ -172,7 +172,12 @@ export function SettingsDialog({ settings, onClose, onSave }: { settings: Settin
         </label>
         <label className="row"><input type="checkbox" checked={s.textWrap} onChange={e => set('textWrap', e.target.checked)} /> Wrap long lines in the text editor</label>
         <label>Text editor font size<input type="number" min={9} max={32} value={s.fontSize} onChange={e => set('fontSize', Number(e.target.value))} /></label>
-        <label>Plugin library (registry.json URL or a local folder)<input value={s.registry} onChange={e => set('registry', e.target.value)} /></label>
+        <div className="row-setting">
+          <span className="grow">Open Word, Markdown, Excel, CSV, PDF and text files with gauzzaDocs when you double-click them.
+            The installer adds gauzzaDocs to Open with; Windows only lets you pick the default yourself.</span>
+          <button type="button" className="btn sm" onClick={() => api.openDefaultApps()}>Choose default apps</button>
+        </div>
+        <label>Plugin library (marketplace.json URL or a local folder)<input value={s.registry} onChange={e => set('registry', e.target.value)} /></label>
       </div>
     </Modal>
   )
