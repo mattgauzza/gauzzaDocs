@@ -395,7 +395,9 @@ registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)
 registerPdfCommands(program, ctx)
 
-program.parseAsync().catch(e => {
+// Always node-style argv: installed copies run this under the app's Electron runtime (ELECTRON_RUN_AS_NODE),
+// where Commander would otherwise treat the script path as the first command.
+program.parseAsync(process.argv, { from: 'node' }).catch(e => {
   const msg = (e as Error).message || String(e)
   if (json()) console.error(JSON.stringify({ error: msg }))
   else console.error(`error: ${msg}`)
