@@ -181,6 +181,19 @@ test('recordVersion and markBeforeRestore set the flags and never fold into them
   assert.deepEqual(listVersions(f).map(x => x.n), [1, 2, 3]) // restoredFrom blocks folding
 })
 
+test('noFold only disables folding: identical bytes are still skipped', async () => {
+  const f = fresh()
+  await guardedWrite(f, person, writeText(f, 'one'))
+  await flushHistory()
+  await withLock(historyKey(f), async () => {
+    const same = Buffer.from('one')
+    assert.equal(await recordVersion(f, same, { size: 3, mtime: 1 }, agent('Claude'), { noFold: true }), null)
+    const v = await recordVersion(f, Buffer.from('two'), { size: 3, mtime: 2 }, person, { noFold: true })
+    assert.equal(v?.n, 2) // same author within 10 minutes would fold; noFold keeps it apart
+  })
+  assert.deepEqual(listVersions(f).map(x => x.n), [1, 2])
+})
+
 test('write errors reject; history is not touched by them', async () => {
   const f = fresh()
   await assert.rejects(guardedWrite(f, person, async () => { throw new Error('disk gone') }), /disk gone/)

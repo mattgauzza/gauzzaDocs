@@ -86,7 +86,7 @@ function defaultSummary(authors: Author[], extra?: { baseline?: boolean }) {
 /**
  * Records `bytes` as the next version of `file`. The caller holds the file's lock.
  * Skips (returns null) files that are excluded or over the size limit, and bytes identical to the latest version.
- * Folds into the latest version per the folding rules. `noFold` bypasses both the identical-bytes skip and folding.
+ * Folds into the latest version per the folding rules. `noFold` only turns folding off: identical bytes are always skipped.
  * Throws on storage errors: callers on the save path catch and report them as "paused".
  */
 export async function recordVersion(
@@ -103,7 +103,7 @@ export async function recordVersion(
   const idx = readIndex(key, canon) ?? { path: canon, versions: [] }
   const latest = idx.versions[idx.versions.length - 1]
   const noFold = !!extra?.noFold
-  if (!noFold && latest && latest.hash === hash) return null
+  if (latest && latest.hash === hash) return null
   const now = extra?.at ?? Date.now()
   await putObject(bytes, path.extname(file)) // the object exists before any index points at it
   const canFold =
@@ -217,6 +217,9 @@ interface Pending {
 /** Work that could not be recorded yet (history trouble). The next locked job for the file does it first, in order. */
 const pending = new Map<string, Pending>()
 const MAX_PENDING_OWN = 20
+
+/** Drops work still waiting to be recorded for this file (its history is being forgotten). */
+export const discardPending = (file: string): void => void pending.delete(historyKey(file))
 
 function stash(key: string, own?: Own, baseline?: Captured) {
   const p = pending.get(key) ?? { own: [] }

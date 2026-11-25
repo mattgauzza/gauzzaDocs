@@ -49,7 +49,7 @@ export const historyKey = (file: string) => sha256(canonicalPath(file))
 
 export const objectPath = (hash: string) => path.join(OBJECTS_DIR, hash.slice(0, 2), hash)
 export const indexPath = (key: string) => path.join(FILES_DIR, `${key}.json`)
-const bakPath = (key: string) => `${indexPath(key)}.bak`
+export const bakPath = (key: string) => `${indexPath(key)}.bak`
 const lockPath = (key: string) => path.join(FILES_DIR, `${key}.lock`)
 
 async function renameRetry(from: string, to: string) {
@@ -246,38 +246,70 @@ function takeOver(file: string, judged: string): boolean {
   return false
 }
 
-/** One writer at a time per file history, across processes. */
-export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const file = lockPath(key)
-  fs.mkdirSync(FILES_DIR, { recursive: true })
-  const until = Date.now() + LOCK_WAIT_MS
-  let mine = ''
+/** Takes the lock file if it is free (or stale). Returns what was written into it, or null while someone else holds it. */
+function tryAcquire(file: string): string | null {
   for (;;) {
+    const mine = JSON.stringify({ pid: process.pid, at: Date.now(), id: crypto.randomBytes(4).toString('hex') }) // stamped when taken, not when we started waiting
     try {
-      mine = JSON.stringify({ pid: process.pid, at: Date.now(), id: crypto.randomBytes(4).toString('hex') }) // stamped when taken, not when we started waiting
       const fd = fs.openSync(file, 'wx')
       try {
         fs.writeSync(fd, mine)
       } finally {
         fs.closeSync(fd)
       }
-      break
+      return mine
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
       const judged = staleContent(file)
       if (judged !== null && takeOver(file, judged)) continue
-      if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock (${key})`)
-      await sleep(LOCK_RETRY_MS)
+      return null
     }
+  }
+}
+function release(file: string, mine: string) {
+  try {
+    if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }) // never delete a lock that is no longer ours
+  } catch {
+    /* already gone */
+  }
+}
+
+/** One writer at a time per file history, across processes. */
+export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const file = lockPath(key)
+  fs.mkdirSync(FILES_DIR, { recursive: true })
+  const until = Date.now() + LOCK_WAIT_MS
+  let mine: string | null
+  while (!(mine = tryAcquire(file))) {
+    if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock (${key})`)
+    await sleep(LOCK_RETRY_MS)
   }
   try {
     return await fn()
   } finally {
-    try {
-      if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }) // never delete a lock that is no longer ours
-    } catch {
-      /* already gone */
+    release(file, mine)
+  }
+}
+
+/** The same lock for short synchronous jobs (naming a version, moving a history). Blocks while waiting. */
+export function withLockSync<T>(keys: string | string[], fn: () => T): T {
+  const held: [string, string][] = []
+  fs.mkdirSync(FILES_DIR, { recursive: true })
+  try {
+    for (const key of [...new Set(Array.isArray(keys) ? keys : [keys])].sort()) {
+      // a fixed order, so two movers never wait on each other
+      const file = lockPath(key)
+      const until = Date.now() + LOCK_WAIT_MS
+      let mine: string | null
+      while (!(mine = tryAcquire(file))) {
+        if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock (${key})`)
+        sleepSync(LOCK_RETRY_MS)
+      }
+      held.push([file, mine])
     }
+    return fn()
+  } finally {
+    for (const [file, mine] of held.reverse()) release(file, mine)
   }
 }
 
@@ -289,6 +321,53 @@ export function isExcluded(file: string, patterns: string[] = getSettings().hist
   if (parts.some(p => EXCLUDED_DIRS.has(p.toLowerCase()))) return true
   const base = parts[parts.length - 1] ?? ''
   return patterns.some(p => globToRegExp(p).test(base))
+}
+
+/** Every stored index (including ones only the .bak survives for) as { key, path }. Unreadable ones are left out. */
+export function listHistoryEntries(): { key: string; path: string }[] {
+  let names: string[]
+  try {
+    names = fs.readdirSync(FILES_DIR)
+  } catch {
+    return []
+  }
+  const keys = new Set(names.filter(n => n.endsWith('.json') || n.endsWith('.json.bak')).map(n => n.replace(/\.json(\.bak)?$/, '')))
+  const out: { key: string; path: string }[] = []
+  for (const key of keys) {
+    try {
+      const idx = parseIndex(indexPath(key)) || parseIndex(bakPath(key))
+      if (idx) out.push({ key, path: idx.path })
+    } catch {
+      /* unreadable right now */
+    }
+  }
+  return out
+}
+
+/**
+ * Hashes used by every history except `key`'s (index and .bak of each). Null when anything cannot be read
+ * with certainty: the caller must then keep every object.
+ */
+export function hashesUsedElsewhere(key: string): Set<string> | null {
+  let names: string[]
+  try {
+    names = fs.readdirSync(FILES_DIR)
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? new Set() : null
+  }
+  const used = new Set<string>()
+  for (const n of names) {
+    const m = n.match(/^(.+)\.json(\.bak)?$/)
+    if (!m || m[1] === key) continue
+    try {
+      const idx = parseIndex(path.join(FILES_DIR, n))
+      if (idx === null) return null // corrupt: cannot tell what it uses
+      for (const v of idx?.versions ?? []) used.add(v.hash)
+    } catch {
+      return null
+    }
+  }
+  return used
 }
 
 /** Paths recorded in every index, for resolving a doc id back to a file. */
