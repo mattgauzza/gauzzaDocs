@@ -142,6 +142,17 @@ test('20 folded saves of one version leave exactly one save event for it', async
   assert.deepEqual(readLog(f).filter(e => e.type === 'save').map(e => e.summary), ['saved v3', 'saved v2'])
 })
 
+test('save events of an excluded file fold by version number, not by redacted summary', async () => {
+  const f = fresh('.env')
+  await appendEvent(f, ev({ at: 1, type: 'save', summary: 'saved v1', v: 1 }))
+  await appendEvent(f, ev({ at: 2, type: 'save', summary: 'saved v2', v: 2 }))
+  await appendEvent(f, ev({ at: 3, type: 'save', summary: 'saved v2', v: 2 })) // a fold of v2
+  const log = readLog(f)
+  assert.deepEqual(log.map(e => e.v), [2, 1])
+  assert.equal(log[0].at, 3)
+  assert.ok(log.every(e => e.summary === 'save')) // still redacted
+})
+
 test('a normal append reads only the tail, never the whole log', async () => {
   const f = fresh()
   for (let i = 0; i < 50; i++) await appendEventLocked(f, ev({ at: i, type: 'comment', summary: `c${i}` }))

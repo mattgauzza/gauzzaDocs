@@ -23,6 +23,8 @@ export interface HistoryEvent {
   type: HistoryEventType
   by: string
   summary: string
+  /** The version number a save or outside event is about. */
+  v?: number
 }
 
 const MAX_LOG_BYTES = 2 * 1024 * 1024
@@ -58,7 +60,7 @@ export async function appendEventLocked(file: string, ev: HistoryEvent): Promise
   if (last && !torn) {
     if (next.type === 'agent-op' && last.type === 'agent-op' && last.by === next.by && next.at - last.at <= MERGE_MS && next.at >= last.at) {
       replacement = JSON.stringify({ ...next, summary: `${Number(editCount(last)) + 1} edits` })
-    } else if (next.type === 'save' && last.type === 'save' && last.summary === next.summary) {
+    } else if (next.type === 'save' && last.type === 'save' && next.v !== undefined && last.v === next.v) {
       replacement = JSON.stringify(next) // the same version saved again: one event per version
     }
   }

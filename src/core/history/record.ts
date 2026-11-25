@@ -164,6 +164,7 @@ export async function recordVersion(
       at: now,
       type: outside ? 'outside' : 'save',
       by: ctx.authors.map(a => a.name).join(', '),
+      v: version.n,
       summary: extra?.baseline ? `kept the original as v${version.n}` : outside ? `changed outside gauzzaDocs, kept as v${version.n}` : `saved v${version.n}`,
     })
   }
