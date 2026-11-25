@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gauzzaDocs: a free editor your AI agents can work in</title>
+<meta name="description" content="A free, open source desktop editor for docs, sheets, slides, PDFs and any text or code file. It works like Google Docs. Claude Code, Codex, GitHub Copilot CLI and Gemini CLI can edit your files live while you watch.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f9fbfd" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1b1c1f" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:title" content="gauzzaDocs">
+<meta property="og:description" content="Docs, sheets, slides and PDFs on your own PC. Your AI edits them while you watch. Free and open source for Windows, macOS and Linux.">
+<meta property="og:url" content="https://mattgauzza.github.io/gauzzaDocs/">
+<meta property="og:image" content="https://mattgauzza.github.io/gauzzaDocs/media/demo-poster.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400..700&amp;display=swap">
+<link rel="stylesheet" href="style.css">
+<script>
+  (function () {
+    var d = document.documentElement;
+    var agents = ['claude', 'codex', 'gemini', 'copilot'];
+    d.setAttribute('data-agent', agents[Math.floor(Math.random() * agents.length)]);
+    try {
+      var t = new URLSearchParams(location.search).get('theme');
+      if (t === 'dark' || t === 'light') d.setAttribute('data-theme', t);
+    } catch (e) {}
+  })();
+</script>
+<script src="site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="bar">
+  <a class="brand" href="./">
+    <img src="icon.svg" alt="" width="32" height="32">
+    <span>gauzzaDocs</span>
+  </a>
+  <nav class="bar-nav" aria-label="Site">
+    <a class="nav-download" href="#download">Download</a>
+    <a href="https://github.com/mattgauzza/gauzzaDocs">GitHub</a>
+    <a class="heart-link" href="https://ko-fi.com/mattgauzza" aria-label="Support gauzzaDocs on Ko-fi" title="Support gauzzaDocs on Ko-fi">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+    </a>
+  </nav>
+</header>
+
+<div class="desk">
+
+  <nav class="outline" aria-label="On this page">
+    <ul>
+      <li class="outline-title"><a href="#top">gauzzaDocs</a></li>
+      <li><a href="#why">Why I built it</a></li>
+      <li><a href="#files">What it opens</a></li>
+      <li><a href="#agents">Your agents, live</a></li>
+      <li><a href="#together">Agents working together</a></li>
+      <li><a href="#voice">Your writing voice</a></li>
+      <li><a href="#free">Free, local and private</a></li>
+      <li><a href="#sharing">Sharing</a></li>
+      <li><a href="#support">Support and contributing</a></li>
+    </ul>
+  </nav>
+
+  <main id="main" class="pages">
+
+    <!-- Page 1: what it is and the download -->
+    <div class="page hero">
+      <section id="top" aria-labelledby="hero-title">
+        <h1 id="hero-title">Docs, sheets, slides and PDFs on your own PC. Your AI edits them while you watch.<span class="caret" aria-hidden="true"><span class="flag"></span></span></h1>
+
+        <p class="lead">gauzzaDocs works like Google Docs and opens any text or code file too. Claude Code, Codex, GitHub Copilot CLI and Gemini CLI can edit your files live, answer your comments and work together on one doc. It's free and open source for Windows, macOS and Linux.</p>
+
+        <div class="anchor" id="download">
+          <div class="get">
+            <a class="btn btn-primary" id="dl-primary" href="https://github.com/mattgauzza/gauzzaDocs/releases/latest">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              <span id="dl-label">Download gauzzaDocs</span>
+            </a>
+            <a class="btn btn-quiet" href="https://github.com/mattgauzza/gauzzaDocs">
+              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+              <span>View on GitHub</span>
+            </a>
+          </div>
+
+          <p class="dl-meta" id="dl-meta">For Windows, macOS and Linux.</p>
+
+          <ul class="dl-alt" aria-label="Other downloads">
+            <li data-os="windows"><a data-asset="win" href="https://github.com/mattgauzza/gauzzaDocs/releases/latest">Windows</a></li>
+            <li data-os="mac"><a data-asset="mac" href="https://github.com/mattgauzza/gauzzaDocs/releases/latest">macOS (Apple Silicon)</a></li>
+            <li data-os="linux"><a data-asset="appimage" href="https://github.com/mattgauzza/gauzzaDocs/releases/latest">Linux AppImage</a></li>
+            <li><a data-asset="deb" href="https://github.com/mattgauzza/gauzzaDocs/releases/latest">Linux .deb</a></li>
+            <li><a href="https://github.com/mattgauzza/gauzzaDocs/releases/latest">All releases</a></li>
+          </ul>
+
+          <aside class="note" id="install-note" aria-label="Install note from Matt">
+            <div class="cm">
+              <div class="cm-head"><span class="av who-matt" aria-hidden="true">M</span>Matt</div>
+              <p data-os="windows">The Windows installer isn't code signed, so Windows may show "Windows protected your PC". Choose More info, then Run anyway. After that it updates itself.</p>
+              <p data-os="mac">On a Mac, the app isn't signed with an Apple certificate. Run <code>xattr -cr /Applications/gauzzaDocs.app</code> once in Terminal before you open it.</p>
+              <p data-os="linux">On Linux, install the .deb with <code>sudo apt install ./gauzzaDocs-*.deb</code> or use the AppImage. The AppImage updates itself.</p>
+            </div>
+          </aside>
+        </div>
+
+        <!-- The demo video (media/demo.mp4, poster media/demo-poster.png) goes here once it's recorded. -->
+        <figure class="media">
+          <img src="media/demo-poster.png" alt="Codex fixing a line in a launch plan in its own color while Claude, Gemini and Copilot listen, with the connected agents list open and Codex's reply in the comment thread" width="1920" height="1080" decoding="async">
+        </figure>
+      </section>
+    </div>
+
+    <!-- Page 2: why -->
+    <div class="page letter">
+      <section id="why" aria-labelledby="why-title">
+        <h2 id="why-title">Why I built it</h2>
+        <p>I don't have an Office subscription. LibreOffice and OpenOffice feel ancient, slow and hard to use. I wanted something that feels like Google Docs but runs on my own computer.</p>
+        <p>I also wanted a real connection to my AI. When an agent edits a doc for me, I want to watch it happen. And if I leave a comment or change something, that should stream straight back to the agent so it can keep going.</p>
+        <p>So gauzzaDocs is an editor that feels like Google Docs plus a command line tool agents use to work in the same files with you.</p>
+        <p class="sign"><span class="av who-matt" aria-hidden="true">M</span>Matt</p>
+      </section>
+    </div>
+
+    <!-- Page 3: what it opens -->
+    <div class="page">
+      <section id="files" aria-labelledby="files-title">
+        <h2 id="files-title">What it opens</h2>
+        <p>Every open file is a tab, like in a code editor. Changes save a moment after you stop typing, like Google Docs. Files stay normal files on your PC.</p>
+
+        <ul class="kinds">
+          <li class="kind">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#4285f4"/><path d="M14 2v4a2 2 0 0 0 2 2h4z" fill="#fff" opacity=".45"/><path d="M7 11h10v1.2H7zm0 2.6h10v1.2H7zm0 2.6h7v1.2H7z" fill="#fff"/></svg>
+            <div>
+              <h3>Docs <span class="ext">.docx .md .html</span></h3>
+              <p>Documents look like Google Docs, with real pages, the usual toolbar, comments and an outline. They open and save as Word, Markdown or HTML and export to PDF. Markdown, which is mostly what AI writes, gets Edit, Read, Split and Source views.</p>
+            </div>
+          </li>
+          <li class="kind">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#0f9d58"/><path d="M14 2v4a2 2 0 0 0 2 2h4z" fill="#fff" opacity=".45"/><path d="M7 11h10v7H7zm1.2 1.2v1.7h3.2v-1.7zm4.4 0v1.7h3.2v-1.7zm-4.4 2.9v1.7h3.2v-1.7zm4.4 0v1.7h3.2v-1.7z" fill="#fff" fill-rule="evenodd"/></svg>
+            <div>
+              <h3>Sheets <span class="ext">.xlsx .csv .tsv</span></h3>
+              <p>Spreadsheets have a formula bar, the usual formulas, formatting, merged cells, conditional formatting and charts. They open and save as Excel, CSV or TSV.</p>
+            </div>
+          </li>
+          <li class="kind">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#f4b400"/><path d="M14 2v4a2 2 0 0 0 2 2h4z" fill="#fff" opacity=".45"/><path d="M7 11h10v7H7zm1.3 1.3v4.4h7.4v-4.4z" fill="#fff" fill-rule="evenodd"/></svg>
+            <div>
+              <h3>Slides <span class="ext">.pptx</span></h3>
+              <p>I wanted to put a quick deck together without opening PowerPoint. Presentations look like Google Slides, with speaker notes and a presenter view. Decks open and save as PowerPoint files and export to PDF.</p>
+            </div>
+          </li>
+          <li class="kind">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#ea4335"/><path d="M14 2v4a2 2 0 0 0 2 2h4z" fill="#fff" opacity=".45"/><text x="12" y="17.6" text-anchor="middle" font-size="6.2" font-weight="700" fill="#fff" font-family="Arial, sans-serif">PDF</text></svg>
+            <div>
+              <h3>PDFs you can edit <span class="ext">.pdf</span></h3>
+              <p>I wanted to fix a typo in a PDF without hunting down the Word file it came from. Press E and click any line to change it. The new words go in the same spot at the same size and color. You can fill in forms and sign them. You can also add text, highlights, drawing or whiteout. Pages can be rotated, reordered or deleted.</p>
+            </div>
+          </li>
+          <li class="kind">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#8e44ef"/><path d="M14 2v4a2 2 0 0 0 2 2h4z" fill="#fff" opacity=".45"/><path d="m9.6 16.6-2.4-2.4 2.4-2.4.9.9-1.5 1.5 1.5 1.5zm4.8 0-.9-.9 1.5-1.5-1.5-1.5.9-.9 2.4 2.4z" fill="#fff"/></svg>
+            <div>
+              <h3>Text and code <span class="ext">any other file</span></h3>
+              <p>Every other file opens in a code editor that works like Notepad++. Plugins add formatters, previews and commands.</p>
+            </div>
+          </li>
+        </ul>
+
+        <figure class="media">
+          <img src="media/shot-files.png" alt="The gauzzaDocs home screen with a new document, spreadsheet, presentation, Markdown doc, Word document, text or code file and PDF" width="1920" height="1080" loading="lazy" decoding="async">
+        </figure>
+      </section>
+    </div>
+
+    <!-- Page 4: agents, live -->
+    <div class="page">
+      <section id="agents" aria-labelledby="agents-title">
+        <h2 id="agents-title">Your agents, live</h2>
+        <p><code>gdocs agents install</code> adds a gauzzaDocs skill to Claude Code, Codex, GitHub Copilot CLI and Gemini CLI if they're on your PC. The skill tells the agent how to use the <code>gdocs</code> command and how to answer your comments. Each agent works in its own color.</p>
+
+        <ul class="agents" aria-label="Agents gauzzaDocs connects">
+          <li class="who-claude"><span class="tick" aria-hidden="true"></span>Claude Code</li>
+          <li class="who-codex"><span class="tick" aria-hidden="true"></span>Codex</li>
+          <li class="who-copilot"><span class="tick" aria-hidden="true"></span>GitHub Copilot CLI</li>
+          <li class="who-gemini"><span class="tick" aria-hidden="true"></span>Gemini CLI</li>
+        </ul>
+
+        <h3>Watch every edit</h3>
+        <p>When the file is open in the app, an agent's edits go straight into the editor. You see them happen in that agent's color, its name shows at the top and Ctrl+Z undoes them. When the file isn't open, <code>gdocs</code> edits it on disk.</p>
+<pre class="cli" tabindex="0" aria-label="Example commands"><code>gdocs read report.md
+gdocs append report.md "## Next steps" --live
+gdocs replace report.md "Q3" "Q4" --all</code></pre>
+
+        <div class="anchor">
+          <h3>Comments go both ways</h3>
+          <p>Select some text and press Ctrl+Alt+M to leave a comment. An agent that's listening gets it right away, along with small before and after diffs of anything you change. It answers in the comment thread and its reply shows up live. Agents can leave comments for you too.</p>
+          <aside class="note" aria-label="Example comment from an agent">
+            <div class="cm who-claude">
+              <div class="cm-head"><span class="av" aria-hidden="true">C</span>Claude</div>
+              <p class="cm-quote">Q4 numbers</p>
+              <p>Should this be a table?</p>
+            </div>
+          </aside>
+        </div>
+        <p>An agent that runs <code>listen --once</code>, does what you asked, replies and then listens again will keep working with you until you tell it to stop.</p>
+<pre class="cli" tabindex="0" aria-label="Comment commands"><code>gdocs listen report.md --once   <span class="c"># wait for your next comment, reply or edit</span>
+gdocs reply report.md &lt;id&gt; "Done, moved it under Risks." --resolve
+gdocs comment report.md "Should this be a table?" --quote "Q4 numbers"</code></pre>
+
+        <h3>Agents can see the page</h3>
+        <p>Reading the text doesn't tell an agent how the page looks. <code>gdocs look</code> renders the file the way the app shows it and saves screenshots. The agent opens them and checks the layout, the tables and anything that's cut off. It renders in a hidden window, so it doesn't move what you're looking at.</p>
+
+        <h3>You choose who's connected</h3>
+        <p>The header says <span class="listening">Claude is listening</span> while an agent is connected. Click it to see every agent on the file. Disconnect cuts one off, and it can't listen to that file again until you click Allow again or restart the app.</p>
+
+        <figure class="media">
+          <img src="media/shot-live.png" alt="Claude's comment on a highlighted phrase in the doc, with the agents that are listening named in the header" width="1920" height="1080" loading="lazy" decoding="async">
+        </figure>
+      </section>
+    </div>
+
+    <!-- Page 5: agents working together -->
+    <div class="page">
+      <section id="together" aria-labelledby="together-title">
+        <h2 id="together-title">Agents working together</h2>
+        <p>I can put more than one agent on a document and let them work it out between them. Each one is subscribed to the doc with a role and a brief. gauzzaDocs runs it in the background with its own CLI and my own login, so there are no API keys.</p>
+
+        <div class="anchor">
+<pre class="cli" tabindex="0" aria-label="Subscribe two agents to one doc"><code>gdocs subscribe plan.md codex --role writer --brief "Write a one page plan for the move. Short summary at the top." --start
+gdocs subscribe plan.md claude --role reviewer --brief "Review it and leave at most two comments a turn."</code></pre>
+          <aside class="note" aria-label="Agents on plan.md">
+            <div class="cm">
+              <p class="people-file">plan.md</p>
+              <ul class="people">
+                <li class="who-codex"><span class="av" aria-hidden="true">C</span>Codex<span class="role">writer</span></li>
+                <li class="who-claude"><span class="av" aria-hidden="true">C</span>Claude<span class="role">reviewer</span></li>
+              </ul>
+            </div>
+          </aside>
+        </div>
+
+        <ol class="turns">
+          <li class="who-codex">Codex writes the draft and I watch it land in the open doc.</li>
+          <li class="who-claude">Claude reads it, quotes the parts it has a problem with and @mentions Codex.</li>
+          <li class="who-codex">Codex fixes them and answers in the thread.</li>
+          <li class="me">I can comment at any point and whoever owns that part picks it up.</li>
+        </ol>
+
+        <p>In the app it's the Add agent button next to the comments button. Each agent shows up there as an avatar with what it's doing.</p>
+        <p>There are limits so they can't run away. Each agent gets one turn at a time and at most six turns in ten minutes. A turn can't run longer than ten minutes. If they keep waking each other without anything from me in between, every agent on that doc pauses.</p>
+
+        <figure class="media">
+          <img src="media/shot-together.png" alt="Codex, Gemini, Claude and Copilot listening on one doc, with Claude asking Codex about a line in the comments" width="1920" height="1080" loading="lazy" decoding="async">
+        </figure>
+      </section>
+    </div>
+
+    <!-- Page 6: writing voice -->
+    <div class="page">
+      <section id="voice" aria-labelledby="voice-title">
+        <h2 id="voice-title">Your writing voice with Empirical</h2>
+        <p>I also build <a href="https://empirical.gauzza.com">Empirical</a>, a shared memory for AI agents. Its command line tool is <a href="https://www.npmjs.com/package/@empirical-gauzza/cli">@empirical-gauzza/cli</a> on npm, and it gives Claude Code, Codex, Copilot and Cursor the same memory.</p>
+        <p>It can also hold your writing voice. You do a short interview once, and after that any agent writing in your name can look it up.</p>
+<pre class="cli" tabindex="0" aria-label="Install Empirical and the writing voice skill"><code>npm install -g @empirical-gauzza/cli
+empirical install                         <span class="c"># sign in and set up</span>
+empirical plugin install claude --voice   <span class="c"># also codex, copilot or all</span></code></pre>
+        <p>Set up your voice at <a href="https://empirical.gauzza.com/voice">empirical.gauzza.com/voice</a>. It's also under Help in the app. Then add it to your standing instructions so agents check it before they write.</p>
+<pre class="cli" tabindex="0" aria-label="Standing instruction for your voice"><code>gdocs instructions --global --set 'Before writing in my name, look up my voice: empirical memory query --match "how this person writes" --tags writing-voice --top-k 50'</code></pre>      </section>
+    </div>
+
+    <!-- Page 7: free, local, private and sharing -->
+    <div class="page">
+      <section id="free" aria-labelledby="free-title">
+        <h2 id="free-title">Free, local and private</h2>
+        <ul class="checks">
+          <li>gauzzaDocs is free and open source under the <a href="https://github.com/mattgauzza/gauzzaDocs/blob/HEAD/LICENSE">MIT license</a>.</li>
+          <li>There's no account and nothing gets uploaded. Your files stay normal files on your PC.</li>
+          <li><code>gdocs</code> talks to the app over 127.0.0.1 with a token, so only programs running as you can use it.</li>
+          <li>Plugins come from a <a href="https://github.com/mattgauzza/gauzzaDocs/blob/HEAD/plugins/MARKETPLACE.md">public marketplace</a> in the repo. Every download is checked against its SHA-256 before it's installed.</li>
+        </ul>
+      </section>
+
+      <section id="sharing" aria-labelledby="sharing-title">
+        <h2 id="sharing-title">Sharing</h2>
+        <p>gauzzaDocs has no server, so sharing works the way it does for any file on your PC. Keep your files in a synced folder like OneDrive, Dropbox or Google Drive. A git repository works too. Open tabs reload when the synced copy changes. Comments are saved on your PC, so they don't travel with the file yet.</p>
+        <div class="anchor">
+          <p>I'm thinking about <mark class="cmt">a small server for sharing</mark>. You'd get a link to a doc, and the people you send it to could read it, comment and edit with you live. It would come with a small monthly subscription to pay for the server.</p>
+          <aside class="note" aria-label="Comment from Matt">
+            <div class="cm">
+              <div class="cm-head"><span class="av who-matt" aria-hidden="true">M</span>Matt</div>
+              <p>If you'd use it, <a href="https://github.com/mattgauzza/gauzzaDocs/issues/new">open an issue</a> and say so. I'll build it once enough people ask.</p>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </div>
+
+    <!-- Page 8: support -->
+    <div class="page">
+      <section id="support" aria-labelledby="support-title">
+        <h2 id="support-title">Support and contributing</h2>
+        <p>If gauzzaDocs is useful to you, you can support it on Ko-fi. The heart in the app's tab strip goes there too.</p>
+        <a class="btn btn-heart" href="https://ko-fi.com/mattgauzza">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+          <span>Support gauzzaDocs on Ko-fi</span>
+        </a>
+        <p>Issues and pull requests are welcome. Start with <a href="https://github.com/mattgauzza/gauzzaDocs/blob/HEAD/CONTRIBUTING.md">CONTRIBUTING.md</a>. If you want to publish a plugin, <a href="https://github.com/mattgauzza/gauzzaDocs/blob/HEAD/plugins/README.md#submitting-a-plugin">the plugin guide</a> explains how to write one and get it listed. You can also <a href="https://github.com/mattgauzza/gauzzaDocs/issues/new?template=plugin-submission.yml">fill in the submission form</a> and I'll add it.</p>
+      </section>
+    </div>
+
+  </main>
+</div>
+
+<footer class="foot">
+  <div class="foot-in">
+    <a class="brand" href="./">
+      <img src="icon.svg" alt="" width="24" height="24">
+      <span>gauzzaDocs</span>
+    </a>
+    <p>Made by Matt.</p>
+    <nav aria-label="Footer">
+      <a href="https://github.com/mattgauzza/gauzzaDocs">GitHub</a>
+      <a href="https://github.com/mattgauzza/gauzzaDocs/releases/latest">Releases</a>
+      <a href="https://github.com/mattgauzza/gauzzaDocs/blob/HEAD/LICENSE">MIT license</a>
+      <a href="https://ko-fi.com/mattgauzza">Ko-fi</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

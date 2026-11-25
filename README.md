@@ -4,6 +4,8 @@ gauzzaDocs is a desktop editor for documents, spreadsheets, PDFs and any text or
 and Sheets and keeps everything in tabs on your own PC. It comes with a command line tool, `gdocs`, that AI agents use to
 read and edit the same files while you watch. You can comment back to the agent from inside the doc.
 
+There's a short tour with screenshots at [mattgauzza.github.io/gauzzaDocs](https://mattgauzza.github.io/gauzzaDocs/).
+
 - Documents look like Google Docs, with real pages, the usual toolbar, comments and an outline. They open and save as
   Word, Markdown or HTML and export to PDF.
 - Markdown files (which is mostly what AI writes) have Edit, Read, Split and Source views. Front matter, tables, task
