@@ -869,6 +869,8 @@ export default function App() {
             <Icon name="plus" size={18} />
           </button>
         </div>
+        {/* always some empty strip to grab the window by, however many tabs are open */}
+        <div className="tab-drag" />
         <div className="strip-actions">
           {update && (
             <button className="strip-btn update" title={`gauzzaDocs ${update} is ready: restart to update`} onClick={async () => {
