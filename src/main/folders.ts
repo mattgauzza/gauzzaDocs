@@ -5,9 +5,11 @@ import { IGNORED } from '../core/projects'
 /**
  * Watches the project folders the window is showing and tells it when something inside changes, so the folder
  * browser and the explorer refresh by themselves. Only folders in view are watched (the window says which), and
- * watchers are closed as soon as they are not needed. Events are debounced per folder.
+ * watchers are closed as soon as they are not needed. Events are debounced per folder; when a folder settles, `send`
+ * is called once for each file (or subfolder) in it that changed, all in one go, so a caller can refresh the folder
+ * once and look at each file (version history keeps changes made by other programs).
  */
-type Send = (root: string, dir: string) => void
+type Send = (root: string, dir: string, file: string) => void
 
 const watchers = new Map<string, { w: fs.FSWatcher; timers: Map<string, NodeJS.Timeout> }>()
 const key = (p: string) => path.resolve(p).toLowerCase()
@@ -25,13 +27,21 @@ export function watchFolders(roots: string[], send: Send) {
     if (watchers.has(k)) continue
     try {
       const timers = new Map<string, NodeJS.Timeout>()
+      const changed = new Map<string, Set<string>>()
       const w = fs.watch(root, { recursive: true }, (_ev, file) => {
         const rel = typeof file === 'string' ? file : ''
         const parts = rel.split(/[\\/]/)
         if (parts.some(p => IGNORED.has(p) || p.startsWith('.'))) return // build output and dot folders churn constantly
         const dir = path.join(root, path.dirname(rel))
+        const files = changed.get(dir) ?? new Set<string>()
+        files.add(path.join(root, rel))
+        changed.set(dir, files)
         clearTimeout(timers.get(dir))
-        timers.set(dir, setTimeout(() => (timers.delete(dir), send(root, dir)), 300))
+        timers.set(dir, setTimeout(() => {
+          timers.delete(dir)
+          changed.delete(dir)
+          for (const f of files) send(root, dir, f)
+        }, 300))
       })
       w.on('error', () => {
         w.close()

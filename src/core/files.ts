@@ -62,16 +62,16 @@ export async function saveFile(file: string, payload: FilePayload, ctx: WriteCon
   return st.mtime
 }
 
-/** A brand-new empty file of the given kind. */
-export async function createFile(file: string) {
+/** A brand-new empty file of the given kind. `ctx` says who created it (its first version's authors). */
+export async function createFile(file: string, ctx?: WriteContext) {
   const kind = kindOf(file)
-  if (kind === 'doc') await saveFile(file, { kind, html: '<p></p>' })
-  else if (kind === 'sheet') await saveFile(file, { kind, workbook: { sheets: [{ name: 'Sheet1', cells: {} }] } })
-  else if (kind === 'slides') await saveFile(file, { kind, deck: newDeck() })
+  if (kind === 'doc') await saveFile(file, { kind, html: '<p></p>' }, ctx)
+  else if (kind === 'sheet') await saveFile(file, { kind, workbook: { sheets: [{ name: 'Sheet1', cells: {} }] } }, ctx)
+  else if (kind === 'slides') await saveFile(file, { kind, deck: newDeck() }, ctx)
   else if (kind === 'pdf') {
     const { PDFDocument } = await import('pdf-lib')
     const doc = await PDFDocument.create()
     doc.addPage([612, 792])
-    await saveFile(file, { kind, bytes: await doc.save() })
-  } else await saveFile(file, { kind: 'text', text: '', eol: '\n' })
+    await saveFile(file, { kind, bytes: await doc.save() }, ctx)
+  } else await saveFile(file, { kind: 'text', text: '', eol: '\n' }, ctx)
 }

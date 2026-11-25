@@ -9,9 +9,26 @@ let worker: Worker | null = null
 let seq = 0
 const pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void; progress?(p: unknown): void }>()
 
+type WorkerEvent = (name: string, data: unknown) => void
+const eventListeners = new Set<WorkerEvent>()
+/** Things the worker reports unasked, such as `history-paused` ({ reason }). Returns a function that stops listening. */
+export function onWorkerEvent(cb: WorkerEvent): () => void {
+  eventListeners.add(cb)
+  return () => void eventListeners.delete(cb)
+}
+
 function start() {
   const w = new Worker(path.join(__dirname, 'worker.js'))
-  w.on('message', (m: { id: number; result?: unknown; error?: string; progress?: unknown }) => {
+  w.on('message', (m: { id: number; result?: unknown; error?: string; progress?: unknown; event?: string }) => {
+    if (typeof m.event === 'string') {
+      const { event, ...data } = m
+      for (const cb of eventListeners) {
+        try {
+          cb(event, data)
+        } catch { /* a listener must never break the worker's replies */ }
+      }
+      return
+    }
     const p = pending.get(m.id)
     if (!p) return
     if ('progress' in m) return p.progress?.(m.progress)
