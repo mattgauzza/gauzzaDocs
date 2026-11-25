@@ -1,5 +1,6 @@
 import type { PdfEdit } from '../types'
 import { textWidth } from './wrap'
+import { baseFontName } from './fontNames'
 
 /**
  * Lines of text on a PDF page, with their boxes, for editing text that is already in the PDF. Isomorphic: works with
@@ -23,6 +24,7 @@ export interface PdfLine {
   font: FontFamily
   bold: boolean
   italic: boolean
+  fontName?: string // the PDF's own font name, subset prefix dropped
 }
 
 interface PdfJsItem { str?: string; transform?: number[]; width?: number; height?: number; fontName?: string }
@@ -124,7 +126,8 @@ export async function pageLines(page: PdfJsPageLike, pageNo: number, opts: { loa
       const top = Math.min(...l.runs.map(r => r.top))
       const bottom = Math.max(...l.runs.map(r => r.bottom))
       const first = l.runs.find(r => r.s.trim()) || l.runs[0]
-      const g = guessFont({ ...fontInfo(page, first.fontName), family: styles[first.fontName || '']?.fontFamily })
+      const info = fontInfo(page, first.fontName)
+      const g = guessFont({ ...info, family: styles[first.fontName || '']?.fontFamily })
       return {
         page: pageNo,
         x: r2(x),
@@ -134,7 +137,8 @@ export async function pageLines(page: PdfJsPageLike, pageNo: number, opts: { loa
         base: r2(l.base),
         size: r2(Math.max(...l.runs.map(r => r.size))),
         text: text.trimEnd(),
-        ...g
+        ...g,
+        ...(baseFontName(info.name) ? { fontName: baseFontName(info.name) } : {})
       }
     })
     .filter(l => l.text.trim())
@@ -157,6 +161,7 @@ export function lineEdit(line: PdfLine, text: string, colors: { color?: string; 
     font: line.font,
     bold: line.bold,
     italic: line.italic,
+    ...(line.fontName ? { fontName: line.fontName } : {}),
     color: colors.color || '#000000',
     bg: colors.bg || '#ffffff'
   }

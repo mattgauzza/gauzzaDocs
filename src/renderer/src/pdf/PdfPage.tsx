@@ -1,9 +1,9 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormValue } from '../../../shared/pdf/forms'
 import { type PdfJsPageLike, type PdfLine, lineEdit, pageLines, paraEdits, paragraphsOf } from '../../../shared/pdf/lines'
-import { fitParagraph } from '../../../shared/pdf/wrap'
+import { loadSysFont } from './sysfont'
 import type { PdfEdit } from '../../../shared/types'
-import { type Markup, type ReplaceEdit, type Tool, bbox, cssFamily, lineTop, paraLeft, resize, sampleColors, translate } from './markup'
+import { type Markup, type ReplaceEdit, type Tool, bbox, fitOf, fontStyle, lineTop, paraLeft, resize, sampleColors, translate } from './markup'
 import { type PdfDoc, pdfjs } from './pdfjs'
 
 type TextEdit = Extract<PdfEdit, { type: 'text' }>
@@ -176,6 +176,15 @@ function PdfPage(p: PageProps) {
     }
   }, [p.tool, visible, doc, n, lines, textVersion])
 
+  // ---- the PDF's own fonts, where installed: edits are shown (and saved) in them ----
+  const [, setFontsReady] = useState(0)
+  useEffect(() => {
+    const names = new Set<string>()
+    for (const m of p.markups) if (m.e.type === 'replaceText' && m.e.fontName) names.add(m.e.fontName)
+    if (p.tool === 'edittext') for (const l of lines || []) if (l.fontName) names.add(l.fontName)
+    if (names.size) Promise.all([...names].map(loadSysFont)).then(() => setFontsReady(n => n + 1))
+  }, [p.markups, p.tool, lines])
+
   // ---- search hits in the text layer ----
   useEffect(() => {
     const q = p.query.trim().toLowerCase()
@@ -275,7 +284,8 @@ function PdfPage(p: PageProps) {
   }
 
   // ---- editing a line that is already in the PDF ----
-  const openLine = (line: PdfLine) => {
+  const openLine = async (line: PdfLine) => {
+    if (line.fontName) await loadSysFont(line.fontName) // show it in its own font from the first keystroke
     const colors = canvasRef.current ? sampleColors(canvasRef.current, line, p.size.w) : {}
     // A line in a paragraph opens the whole paragraph, so new words can flow onto the next lines.
     const para = paragraphsOf(lines || []).find(g => g.includes(line))
@@ -430,9 +440,7 @@ function PdfPage(p: PageProps) {
             left={((lineEditing.e.wrapRight != null ? paraLeft(lineEditing.e) : lineEditing.e.x) + (lineEditing.e.dx || 0)) * scale}
             top={lineTop(lineEditing.e) * scale}
             style={{
-              fontFamily: cssFamily(lineEditing.e.font),
-              fontWeight: lineEditing.e.bold ? 700 : 400,
-              fontStyle: lineEditing.e.italic ? 'italic' : 'normal',
+              ...fontStyle(lineEditing.e),
               fontSize: lineEditing.e.size * scale,
               lineHeight: `${(lineEditing.e.wrapRight != null ? lineEditing.e.lineHeight ?? lineEditing.e.size * 1.2 : lineEditing.e.size * 1.2) * scale}px`,
               minWidth: lineEditing.e.w * scale,
@@ -465,15 +473,13 @@ function MarkBody({ e, b, scale }: { e: Markup; b: { x: number; y: number; w: nu
       return <div className="mark-text-body" style={{ fontSize: (e.size || 12) * scale, color: e.color || '#000' }}>{e.text}</div>
     case 'replaceText':
       if (e.wrapRight != null) {
-        const fit = fitParagraph(e)
+        const fit = fitOf(e)
         const left = paraLeft(e)
         return (
           <div
             className="mark-text-body"
             style={{
-              fontFamily: cssFamily(e.font),
-              fontWeight: e.bold ? 700 : 400,
-              fontStyle: e.italic ? 'italic' : 'normal',
+              ...fontStyle(e),
               fontSize: fit.size * scale,
               lineHeight: `${fit.lineHeight * scale}px`,
               color: e.color || '#000'
@@ -489,9 +495,7 @@ function MarkBody({ e, b, scale }: { e: Markup; b: { x: number; y: number; w: nu
         <div
           className="mark-text-body"
           style={{
-            fontFamily: cssFamily(e.font),
-            fontWeight: e.bold ? 700 : 400,
-            fontStyle: e.italic ? 'italic' : 'normal',
+            ...fontStyle(e),
             fontSize: e.size * scale,
             lineHeight: `${e.size * 1.2 * scale}px`,
             color: e.color || '#000'

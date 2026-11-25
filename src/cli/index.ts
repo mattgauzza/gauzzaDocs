@@ -214,8 +214,8 @@ liveOptions(
     .option('-i, --ignore-case', 'ignore case')
 )
   .action(async (file: string, find: string, withText: string, o) => {
-    const r = (await ctx.run(file, { op: 'replace', find, with: withText, all: !!o.all, regex: !!o.regex, ignoreCase: !!o.ignoreCase }, o)) as { count: number }
-    out(r, () => `${r.count} replaced`)
+    const r = (await ctx.run(file, { op: 'replace', find, with: withText, all: !!o.all, regex: !!o.regex, ignoreCase: !!o.ignoreCase }, o)) as { count?: number; replaced?: number; note?: string }
+    out(r, () => `${r.count ?? r.replaced ?? 0} replaced${r.note ? `. ${r.note}` : ''}`)
   })
 
 liveOptions(

@@ -14,8 +14,8 @@ export { pdfjs }
  */
 export function openPdf(src: Uint8Array | string) {
   if (typeof src === 'string')
-    return pdfjs.getDocument({ url: src, disableAutoFetch: true, disableStream: true, rangeChunkSize: 256 * 1024, useSystemFonts: true, verbosity: 0 })
-  return pdfjs.getDocument({ data: src.slice(), useSystemFonts: true, verbosity: 0 })
+    return pdfjs.getDocument({ url: src, disableAutoFetch: true, disableStream: true, rangeChunkSize: 256 * 1024, useSystemFonts: true, fontExtraProperties: true, verbosity: 0 })
+  return pdfjs.getDocument({ data: src.slice(), useSystemFonts: true, fontExtraProperties: true, verbosity: 0 })
 }
 
 /** The whole file, fetched only when something needs every byte (saving, page changes). */

@@ -69,6 +69,8 @@ export type PdfEdit =
       // their own replaceText edits with empty text, which take their old words out.
       wrapRight?: number
       hang?: number
+      // The PDF font's name ("Calibri-Bold"): written in that font when it's installed, else the standard `font`.
+      fontName?: string
       lineHeight?: number
       maxLines?: number
     }

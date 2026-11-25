@@ -1,5 +1,6 @@
 import { parentPort } from 'node:worker_threads'
 import { createFile, loadFile, saveFile } from '../core/files'
+import { systemFontBytes } from '../core/systemFonts'
 import { findInFile, forgetIndex, indexFile, readLines } from '../core/large'
 import { runOffline } from '../core/ops'
 import * as plugins from '../core/plugins'
@@ -17,6 +18,7 @@ type Fn = (args: any[], progress: (p: unknown) => void) => unknown
 const fns: Record<string, Fn> = {
   loadFile: ([file]) => loadFile(file),
   saveFile: ([file, payload]) => saveFile(file, payload),
+  systemFont: ([name]) => systemFontBytes(name),
   createFile: ([file]) => createFile(file),
   runOffline: ([file, op]) => runOffline(file, op),
   largeIndex: async ([file], progress) => {

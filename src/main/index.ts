@@ -190,11 +190,13 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       const op = params.op as AgentOp
       if (!op?.op) throw new Error('missing op')
       // --live: open it, or bring its tab to the front, so the person can watch the edit happen.
-      if (params.live) await openInWindow(file, { focus: params.focus !== false })
+      // (Just opened counts as open: the window's tab list can arrive a moment after the editor is ready.)
+      let opened = false
+      if (params.live) opened = !!(await openInWindow(file, { focus: params.focus !== false }))
       // Replacing text in a PDF needs the page drawn to match its text and background colors: only the app can.
       else if (kindOf(file) === 'pdf' && (op.op === 'replaceText' || op.op === 'replace') && !isOpen(file) && win)
-        await openInWindow(file, { focus: false })
-      if (isOpen(file)) {
+        opened = !!(await openInWindow(file, { focus: false }))
+      if (opened || isOpen(file)) {
         const result = await askWindow('agent', { path: file, op, agent })
         return { result, live: true }
       }
@@ -317,6 +319,8 @@ const api: Record<string, (...a: any[]) => unknown> = {
   largeLines: (file: string, from: number, count: number) => work('largeLines', [file, from, count]),
   largeFind: (file: string, q: string, opts: { from?: number; limit?: number; regex?: boolean; ignoreCase?: boolean }) => work('largeFind', [file, q, opts]),
   largeForget: (file: string) => work('largeForget', [file]),
+  /** An installed font's file for a PDF font name (PDF text edits keep the PDF's own font when it's installed). */
+  systemFont: (name: string) => work('systemFont', [name]),
   save: (file: string, payload: FilePayload) => work<number>('saveFile', [file, payload]),
   newFile: (kind: Kind, ext?: string, dir?: string) => newFilePath(kind, ext, undefined, dir),
   // ---------- projects: folders on the home screen and in the explorer (listing and search run on the worker) ----------

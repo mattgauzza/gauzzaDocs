@@ -33,7 +33,9 @@ export function textWidth(text: string, e: Pick<Rep, 'font' | 'bold' | 'italic'>
   return (units * size) / 1000
 }
 
-function wrap(text: string, e: Rep, size: number) {
+type Measure = (text: string, size: number) => number
+
+function wrap(text: string, e: Rep, size: number, measure: Measure) {
   const right = e.wrapRight!
   const firstWidth = right - e.x
   const width = right - (e.hang ?? e.x)
@@ -43,7 +45,7 @@ function wrap(text: string, e: Rep, size: number) {
     for (const word of hard.split(/ +/)) {
       const room = out.length === 0 ? firstWidth : width
       const next = line ? `${line} ${word}` : word
-      if (line && textWidth(next, e, size) > room + 0.5) {
+      if (line && measure(next, size) > room + 0.5) {
         out.push(line)
         line = word
       } else line = next
@@ -55,15 +57,16 @@ function wrap(text: string, e: Rep, size: number) {
 
 /**
  * The lines a paragraph edit is drawn as, and the size and line spacing to draw them with. When the new words need
- * more lines than maxLines, the size steps down (to 80% at most) so it doesn't spill over what's below.
+ * more lines than maxLines, the size steps down (to 80% at most) so it doesn't spill over what's below. measure gives
+ * a width in points; by default the standard font's, or pass the installed font's (see edits.ts and pdf/sysfont.ts).
  */
-export function fitParagraph(e: Rep): { lines: string[]; size: number; lineHeight: number } {
+export function fitParagraph(e: Rep, measure: Measure = (t, s) => textWidth(t, e, s)): { lines: string[]; size: number; lineHeight: number } {
   const spacing = e.lineHeight ?? e.size * 1.2
   let size = e.size
-  let lines = wrap(e.text, e, size)
+  let lines = wrap(e.text, e, size, measure)
   while (e.maxLines && lines.length > e.maxLines && size > e.size * 0.8) {
     size = Math.max(e.size * 0.8, size * 0.95)
-    lines = wrap(e.text, e, size)
+    lines = wrap(e.text, e, size, measure)
   }
   return { lines, size, lineHeight: (spacing * size) / e.size }
 }

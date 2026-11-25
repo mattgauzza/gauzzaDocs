@@ -1,17 +1,23 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { PDFDocument } from 'pdf-lib'
-import { applyPdfEdits, checkEdits, displaySize, parsePages } from '../../shared/pdf/edits'
+import { applyPdfEdits as applyEdits, checkEdits, displaySize, parsePages } from '../../shared/pdf/edits'
+import type { PdfEdit } from '../../shared/types'
+import { systemFontBytes } from '../systemFonts'
 import { PDF_OPS_HELP, structuralEdits } from '../../shared/ops/pdf'
 import { allText, joinPages, type PdfJsDocLike } from '../../shared/pdf/text'
 import { type FormValue, coerceValue, fillFields, listFields } from '../../shared/pdf/forms'
 import { type PdfJsPageLike, type PdfLine, applyPlan, pageLines, planReplace } from '../../shared/pdf/lines'
 import { OpError, type OpHandler, str } from '../../shared/ops/types'
 
+
+/** Edits written with the PDF's own fonts where they're installed on this PC. */
+const applyPdfEdits = (bytes: Uint8Array, edits: PdfEdit[]) => applyEdits(bytes, edits, { fontFile: systemFontBytes })
+
 /** Opens bytes with the pdf.js legacy build (the one meant for Node). */
 async function openPdfJs(bytes: Uint8Array): Promise<{ doc: PdfJsDocLike; close(): Promise<void> }> {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-  const task = pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true, disableFontFace: true, verbosity: 0 })
+  const task = pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true, disableFontFace: true, fontExtraProperties: true, verbosity: 0 })
   const doc = (await task.promise) as unknown as PdfJsDocLike
   return { doc, close: () => task.destroy() }
 }

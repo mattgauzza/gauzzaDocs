@@ -1,5 +1,6 @@
 import type { PdfEdit } from '../../../shared/types'
 import { fitParagraph } from '../../../shared/pdf/wrap'
+import { sysFont } from './sysfont'
 
 /** Markup that stays editable on the page until saved (page structure changes are applied at once instead). */
 export type Markup = Extract<PdfEdit, { type: 'text' | 'highlight' | 'rect' | 'ink' | 'image' | 'replaceText' }>
@@ -11,19 +12,31 @@ export type Tool = 'select' | 'edittext' | 'text' | 'highlight' | 'draw' | 'whit
 /** CSS for the standard font a replaceText edit is drawn with, so what you type looks like what gets saved. */
 export const cssFamily = (f: ReplaceEdit['font']) =>
   f === 'serif' ? "'Times New Roman', Times, serif" : f === 'mono' ? "'Courier New', Courier, monospace" : 'Helvetica, Arial, sans-serif'
-export const cssFont = (e: ReplaceEdit, scale = 1) =>
-  `${e.italic ? 'italic ' : ''}${e.bold ? 'bold ' : ''}${e.size * scale}px ${cssFamily(e.font)}`
+export const cssFont = (e: ReplaceEdit, scale = 1) => {
+  const sys = sysFont(e.fontName)
+  return sys ? `${e.size * scale}px "${sys.family}"` : `${e.italic ? 'italic ' : ''}${e.bold ? 'bold ' : ''}${e.size * scale}px ${cssFamily(e.font)}`
+}
+/** The font an edit is shown in: the PDF's own font when it's installed (bold or italic is in that file), else a standard one. */
+export const fontStyle = (e: ReplaceEdit) => {
+  const sys = sysFont(e.fontName)
+  return sys
+    ? { fontFamily: `"${sys.family}"`, fontWeight: 400, fontStyle: 'normal' as const }
+    : { fontFamily: cssFamily(e.font), fontWeight: e.bold ? 700 : 400, fontStyle: (e.italic ? 'italic' : 'normal') as 'italic' | 'normal' }
+}
+/** Widths for wrapping a paragraph in the font it's shown and saved in. */
+export const fitOf = (e: ReplaceEdit) => fitParagraph(e, sysFont(e.fontName)?.measure)
 
 /**
  * Edited lines are laid out with line-height 1.2em (the spacing they are saved with). This is where the first CSS line
  * box has to start, in points, for its baseline to sit on the PDF baseline; the ratios come from the CSS fonts' metrics.
  */
 const BASELINE = { sans: 0.9465, serif: 0.9375, mono: 0.8665 }
+const baseline12 = (e: ReplaceEdit) => sysFont(e.fontName)?.baseline12 ?? BASELINE[e.font || 'sans']
 export const lineTop = (e: ReplaceEdit) => {
-  if (e.wrapRight == null) return (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - BASELINE[e.font || 'sans'] * e.size
+  if (e.wrapRight == null) return (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - baseline12(e) * e.size
   // A paragraph uses its own line spacing: the baseline moves down by half of the extra leading.
-  const fit = fitParagraph(e)
-  return (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - (BASELINE[e.font || 'sans'] + (fit.lineHeight / fit.size - 1.2) / 2) * fit.size
+  const fit = fitOf(e)
+  return (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - (baseline12(e) + (fit.lineHeight / fit.size - 1.2) / 2) * fit.size
 }
 /** Left edge of a replaced paragraph (its first line may be indented, or hang). */
 export const paraLeft = (e: ReplaceEdit) => Math.min(e.x, e.hang ?? e.x)
@@ -50,7 +63,7 @@ export function bbox(e: Markup) {
       return textBox(e)
     case 'replaceText': {
       if (e.wrapRight != null) {
-        const fit = fitParagraph(e)
+        const fit = fitOf(e)
         const left = paraLeft(e)
         return { x: left + (e.dx || 0), y: lineTop(e), w: Math.max(6, e.wrapRight - left), h: Math.max(1, fit.lines.length) * fit.lineHeight }
       }

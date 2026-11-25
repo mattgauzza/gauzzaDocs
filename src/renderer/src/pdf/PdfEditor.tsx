@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { PDF_OPS_HELP, structuralEdits } from '../../../shared/ops/pdf'
 import { applyPdfEdits, checkEdits, parsePages } from '../../../shared/pdf/edits'
+import { sysFontBytes } from './sysfont'
 import { type FormValue, coerceValue, fillFields, listFields } from '../../../shared/pdf/forms'
 import { type PdfJsPageLike, type PdfLine, applyPlan, linesToHtml, pageLines, planReplace } from '../../../shared/pdf/lines'
 import { allText, joinPages } from '../../../shared/pdf/text'
@@ -73,7 +74,7 @@ export default function PdfEditor(props: EditorProps) {
     let bytes = await bytesOf(s)
     if (Object.keys(s.form).length || s.flatten) bytes = await fillFields(bytes, s.form, { flatten: s.flatten })
     const edits = [...s.edits, ...extra]
-    return edits.length ? applyPdfEdits(bytes, edits) : bytes
+    return edits.length ? applyPdfEdits(bytes, edits, { fontFile: sysFontBytes }) : bytes
   }
 
   // ---------- loading ----------

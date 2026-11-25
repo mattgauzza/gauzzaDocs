@@ -97,6 +97,7 @@ export const api = {
   largeFind: (path: string, q: string, opts: { from?: number; limit?: number; regex?: boolean; ignoreCase?: boolean } = {}) =>
     window.gd.call<{ matches: { line: number; text: string }[]; truncated: boolean }>('largeFind', path, q, opts),
   largeForget: (path: string) => window.gd.call('largeForget', path),
+  systemFont: (name: string) => window.gd.call<Uint8Array | null>('systemFont', name),
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
   openDefaultApps: () => window.gd.call('openDefaultApps'),

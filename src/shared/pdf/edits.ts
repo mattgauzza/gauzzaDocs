@@ -35,7 +35,12 @@ export function emptiedFirst(edits: PdfEdit[]): PdfEdit[] {
   return out
 }
 
-export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[]): Promise<Uint8Array> {
+export interface ApplyOptions {
+  /** Bytes of an installed font for a PDF font name (null if not installed): edited text keeps the PDF's own font. */
+  fontFile?: (name: string) => Promise<Uint8Array | null>
+}
+
+export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[], opts: ApplyOptions = {}): Promise<Uint8Array> {
   if (!edits.length) return bytes
   const doc = await PDFDocument.load(bytes, { ignoreEncryption: true })
   let font: PDFFont | null = null
@@ -45,6 +50,30 @@ export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[]): Promis
     const name = STANDARD[family as keyof typeof STANDARD]?.[(bold ? 2 : 0) + (italic ? 1 : 0)] || StandardFonts.Helvetica
     if (!fonts.has(name)) fonts.set(name, await doc.embedFont(name))
     return fonts.get(name)!
+  }
+  // The PDF's own font, when it's installed on this PC; else the closest standard font.
+  const installed = new Map<string, PDFFont | null>()
+  let fontkitReady = false
+  const fontOf = async (e: { fontName?: string; font?: string; bold?: boolean; italic?: boolean }) => {
+    if (e.fontName && opts.fontFile) {
+      if (!installed.has(e.fontName)) {
+        let f: PDFFont | null = null
+        try {
+          const data = await opts.fontFile(e.fontName)
+          if (data) {
+            if (!fontkitReady) doc.registerFontkit((await import('@pdf-lib/fontkit')).default)
+            fontkitReady = true
+            f = await doc.embedFont(data, { subset: true })
+          }
+        } catch {
+          f = null
+        }
+        installed.set(e.fontName, f)
+      }
+      const f = installed.get(e.fontName)
+      if (f) return f
+    }
+    return standard(e.font, e.bold, e.italic)
   }
 
   const pageAt = (n: number, what: string) => {
@@ -137,8 +166,10 @@ export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[]): Promis
         // 3. Draw the new text on the same baseline, in the closest standard font.
         if (e.text.trim() && e.wrapRight != null) {
           // A paragraph: wrapped to its old width and spacing, the same way the app previews it.
-          const f = await standard(e.font, e.bold, e.italic)
-          const fit = fitParagraph({ ...e, text: sanitize(f, e.text) })
+          const f = await fontOf(e)
+          // An installed font measures by its own glyphs; the standard fonts by their metrics without kerning, as drawn.
+          const own = !!e.fontName && installed.get(e.fontName) === f
+          const fit = fitParagraph({ ...e, text: sanitize(f, e.text) }, own ? (t, s) => f.widthOfTextAtSize(t, s) : undefined)
           const base = (e.base ?? e.y + e.h * 0.8) + (e.dy || 0)
           const color = toRgb(e.color || '#000000')
           fit.lines.forEach((line, i) => {
@@ -147,7 +178,7 @@ export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[]): Promis
             page.drawText(line, { x: tx, y: ty, size: fit.size, font: f, color, rotate: degrees(angle) })
           })
         } else if (e.text.trim()) {
-          const f = await standard(e.font, e.bold, e.italic)
+          const f = await fontOf(e)
           const lines = sanitize(f, e.text).split('\n')
           const x = e.x + (e.dx || 0)
           const base = (e.base ?? e.y + e.h * 0.8) + (e.dy || 0)
