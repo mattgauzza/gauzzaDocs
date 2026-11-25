@@ -21,7 +21,8 @@ test('projects: add, rename, touch, find, missing folders stay listed, remove ne
 
   p.renameProject(a, 'Alpha 2')
   assert.equal(p.findProject('alpha 2')?.path, pa.path)
-  assert.equal(p.findProject(a.toUpperCase())?.name, 'Alpha 2', 'paths match case-insensitively on Windows')
+  // Windows paths ignore case; Linux and macOS (CI) paths don't, so only Windows expects a match.
+  assert.equal(p.findProject(a.toUpperCase())?.name, process.platform === 'win32' ? 'Alpha 2' : undefined)
   assert.equal(p.projectFor(path.join(a, 'keep.md'))?.name, 'Alpha 2')
 
   p.touchProject(b)
