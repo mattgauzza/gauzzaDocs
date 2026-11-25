@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -186,6 +187,123 @@ test('write errors reject; history is not touched by them', async () => {
   await flushHistory()
   assert.deepEqual(listVersions(f), [])
   await guardedWrite(f, person, writeText(f, 'ok')) // the lock was released
+})
+
+const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex')
+/** Makes storing this content fail: a plain file where its object folder should be. Returns the undo. */
+function blockObject(text: string) {
+  const dir = path.dirname(h.objectPath(sha(text)))
+  fs.rmSync(dir, { recursive: true, force: true })
+  fs.mkdirSync(path.dirname(dir), { recursive: true })
+  fs.writeFileSync(dir, 'in the way')
+  return () => fs.rmSync(dir, { force: true })
+}
+const authorsOf = (f: string) => listVersions(f).map(x => `${x.authors[0].name}${x.baseline ? '*' : ''}`)
+
+test('first save: the write finishes before the baseline is hashed and stored, and the baseline holds the original', async () => {
+  const f = fresh()
+  const original = 'first-save-original-bytes'
+  fs.writeFileSync(f, original)
+  await guardedWrite(f, agent('Claude'), writeText(f, 'first-save-new-bytes'))
+  assert.equal(fs.existsSync(h.objectPath(sha(original))), false)
+  assert.equal(fs.readFileSync(f, 'utf8'), 'first-save-new-bytes')
+  await flushHistory()
+  assert.equal(Buffer.from((await h.getObject(sha(original)))!).toString(), original)
+  assert.deepEqual(authorsOf(f), ['outside gauzzaDocs*', 'Claude'])
+})
+
+test('a version that failed to record is recorded under its real author next time, never as outside', async () => {
+  const f = fresh()
+  const reasons: string[] = []
+  onHistoryPaused(r => reasons.push(r))
+  await guardedWrite(f, person, writeText(f, 'rec-one'))
+  await flushHistory()
+  const unblock = blockObject('rec-two-by-claude')
+  await guardedWrite(f, agent('Claude'), writeText(f, 'rec-two-by-claude'))
+  await flushHistory()
+  assert.equal(reasons.length, 1)
+  assert.deepEqual(authorsOf(f), ['Matt']) // not recorded yet
+  unblock()
+  await guardedWrite(f, person, writeText(f, 'rec-three'))
+  await flushHistory()
+  assert.deepEqual(authorsOf(f), ['Matt', 'Claude', 'Matt'])
+  assert.equal(Buffer.from((await h.getObject(listVersions(f)[1].hash))!).toString(), 'rec-two-by-claude')
+})
+
+test('a failed baseline is kept and recorded first next time; the agent edit is never taken for the baseline', async () => {
+  const f = fresh()
+  const reasons: string[] = []
+  onHistoryPaused(r => reasons.push(r))
+  fs.writeFileSync(f, 'base-original')
+  const unblock = blockObject('base-original')
+  await guardedWrite(f, agent('Claude'), writeText(f, 'base-edit'))
+  await flushHistory()
+  assert.equal(reasons.length, 1)
+  assert.deepEqual(listVersions(f), [])
+  unblock()
+  await guardedWrite(f, person, writeText(f, 'base-later'))
+  await flushHistory()
+  assert.deepEqual(authorsOf(f), ['outside gauzzaDocs*', 'Claude', 'Matt'])
+  assert.equal(Buffer.from((await h.getObject(listVersions(f)[0].hash))!).toString(), 'base-original')
+})
+
+test('a write made while the lock was unavailable is later recorded under its real author', async () => {
+  const f = fresh()
+  onHistoryPaused(() => {})
+  await guardedWrite(f, person, writeText(f, 'lk-one'))
+  await flushHistory()
+  let release!: () => void
+  const held = withLock(historyKey(f), () => new Promise<void>(r => (release = r)))
+  await new Promise(r => setTimeout(r, 100))
+  const p = guardedWrite(f, agent('Claude'), writeText(f, 'lk-two'))
+  await new Promise(r => setTimeout(r, 150))
+  Date.now = () => realNow() + 11_000
+  try {
+    await p
+  } finally {
+    Date.now = realNow
+    release()
+    await held
+  }
+  await flushHistory()
+  await guardedWrite(f, person, writeText(f, 'lk-three'))
+  await flushHistory()
+  assert.deepEqual(authorsOf(f), ['Matt', 'Claude', 'Matt'])
+})
+
+test('adoption needs the old folder to be reachable: a missing folder is not a move', async () => {
+  const a = fresh('gone.md')
+  const b = fresh('here.md')
+  await guardedWrite(a, agent('Claude'), writeText(a, 'ruling-three'))
+  await flushHistory()
+  const before = listVersions(a).length
+  fs.rmSync(path.dirname(a), { recursive: true }) // like a disconnected drive: the folder is not there
+  fs.writeFileSync(b, 'ruling-three')
+  const moves: string[] = []
+  historyHooks.onMoved = o => moves.push(o)
+  await guardedWrite(b, agent('Codex'), writeText(b, 'ruling-three-edited'))
+  await flushHistory()
+  historyHooks.onMoved = () => {}
+  assert.deepEqual(moves, [])
+  assert.deepEqual(authorsOf(b), ['outside gauzzaDocs*', 'Codex'])
+  assert.equal(listVersions(a).length, before) // old history untouched
+})
+
+test('an empty file never adopts a moved history', async () => {
+  const a = fresh('was-empty.md')
+  const b = fresh('new-empty.md')
+  await guardedWrite(a, person, writeText(a, ''))
+  await flushHistory()
+  fs.rmSync(a) // folder still there, file gone
+  fs.writeFileSync(b, '')
+  const moves: string[] = []
+  historyHooks.onMoved = o => moves.push(o)
+  await guardedWrite(b, person, writeText(b, 'now not empty'))
+  await flushHistory()
+  historyHooks.onMoved = () => {}
+  assert.deepEqual(moves, [])
+  assert.deepEqual(authorsOf(b), ['outside gauzzaDocs*', 'Matt'])
+  assert.equal(listVersions(a).length, 1)
 })
 
 test('lock unavailable: the file is still written and paused is reported once', async () => {

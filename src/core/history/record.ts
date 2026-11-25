@@ -94,7 +94,7 @@ export async function recordVersion(
   bytes: Uint8Array,
   stat: { size: number; mtime: number },
   ctx: WriteContext,
-  extra?: { restoredFrom?: number; beforeRestore?: boolean; baseline?: boolean; noFold?: boolean },
+  extra?: { restoredFrom?: number; beforeRestore?: boolean; baseline?: boolean; noFold?: boolean; at?: number },
 ): Promise<HistoryVersion | null> {
   if (isExcluded(file) || bytes.length > LARGE_BYTES) return null
   const key = historyKey(file)
@@ -104,7 +104,7 @@ export async function recordVersion(
   const latest = idx.versions[idx.versions.length - 1]
   const noFold = !!extra?.noFold
   if (!noFold && latest && latest.hash === hash) return null
-  const now = Date.now()
+  const now = extra?.at ?? Date.now()
   await putObject(bytes, path.extname(file)) // the object exists before any index points at it
   const canFold =
     !noFold &&
@@ -153,12 +153,16 @@ export function markBeforeRestore(file: string): HistoryVersion | null {
   return latest
 }
 
-// ---- detection (caller holds the file's lock) ----
+
+// ---- detection and deferred work (caller holds the file's lock) ----
+/** A file is only "missing" when its drive and folder are reachable and it is not there (a disconnected drive is not a move). */
+const reallyMissing = (p: string) => fs.existsSync(path.parse(p).root) && fs.existsSync(path.dirname(p)) && !fs.existsSync(p)
+
 /** A missing file's history whose latest version has this hash moves to `canon`. Returns whether one was adopted. */
 async function adoptMoved(canon: string, key: string, hash: string): Promise<boolean> {
   let best: { oldKey: string; oldPath: string; at: number } | null = null
   for (const p of listHistoryPaths()) {
-    if (samePath(p, canon) || fs.existsSync(p)) continue
+    if (samePath(p, canon) || !reallyMissing(p)) continue
     const oldKey = historyKey(p)
     if (oldKey === key) continue
     let old
@@ -175,7 +179,7 @@ async function adoptMoved(canon: string, key: string, hash: string): Promise<boo
   return withLock(oldKey, async () => {
     const old = readIndex(oldKey, oldPath)
     const last = old?.versions[old.versions.length - 1]
-    if (!old || !last || last.hash !== hash || fs.existsSync(oldPath)) return false // changed while we looked
+    if (!old || !last || last.hash !== hash || !reallyMissing(oldPath)) return false // changed while we looked
     writeIndex(key, { path: canon, versions: old.versions })
     const oldIndex = indexPath(oldKey)
     const oldLog = oldIndex.replace(/\.json$/, '.log.jsonl')
@@ -194,11 +198,71 @@ async function adoptMoved(canon: string, key: string, hash: string): Promise<boo
   })
 }
 
+/** The file as it was before gauzzaDocs first wrote it. Only the bytes are taken before the write; the rest waits. */
+interface Captured {
+  bytes: Uint8Array
+  mtime: number
+}
+interface Own {
+  bytes: Uint8Array
+  stat: { size: number; mtime: number }
+  ctx: WriteContext
+  at: number // when it was written, not when it got recorded
+}
+interface Pending {
+  baseline?: Captured
+  own: Own[]
+}
+/** Work that could not be recorded yet (history trouble). The next locked job for the file does it first, in order. */
+const pending = new Map<string, Pending>()
+const MAX_PENDING_OWN = 20
+
+function stash(key: string, own?: Own, baseline?: Captured) {
+  const p = pending.get(key) ?? { own: [] }
+  if (baseline) p.baseline = baseline
+  if (own && own.bytes.length <= LARGE_BYTES) {
+    p.own.push(own)
+    if (p.own.length > MAX_PENDING_OWN) p.own.shift()
+  }
+  if (p.baseline || p.own.length) pending.set(key, p)
+}
+
+/** Keeps the original as the baseline, or lets it take over a moved file's history. Hashing and compressing happen here. */
+async function baselineStep(file: string, cap: Captured): Promise<void> {
+  const key = historyKey(file)
+  const canon = canonicalPath(file)
+  if (readIndex(key, canon)?.versions.length) return // history appeared meanwhile: not a first write any more
+  if (cap.bytes.length > 0 && (await adoptMoved(canon, key, sha256(cap.bytes)))) return
+  await recordVersion(file, cap.bytes, { size: cap.bytes.length, mtime: cap.mtime }, { authors: [OUTSIDE] }, { baseline: true, noFold: true })
+}
+
+/** Records what an earlier failure left unrecorded. Returns true when something is still stuck (do not record or inspect now). */
+async function flushPending(file: string, key: string): Promise<boolean> {
+  const p = pending.get(key)
+  if (!p) return false
+  try {
+    if (p.baseline) {
+      await baselineStep(file, p.baseline)
+      p.baseline = undefined
+    }
+    while (p.own.length) {
+      const o = p.own[0]
+      await recordVersion(file, o.bytes, o.stat, o.ctx, { at: o.at })
+      p.own.shift()
+    }
+  } catch (e) {
+    pause(e)
+    return true
+  }
+  pending.delete(key)
+  return false
+}
+
 /**
- * Looks at the file on disk before it is written over. With `baseline`, a file without history is kept as it is
- * (or takes over a moved file's history). Otherwise records an outside change. The caller holds the file's lock.
+ * Looks at the file on disk before it is written over and records an outside change. With `onBaseline`, a file
+ * without history hands its current bytes to the callback instead (to be kept after the write). Caller holds the lock.
  */
-async function inspect(file: string, baseline: boolean): Promise<HistoryVersion | null> {
+async function inspect(file: string, onBaseline?: (c: Captured) => void): Promise<HistoryVersion | null> {
   if (isExcluded(file)) return null
   let st: fs.Stats
   try {
@@ -209,25 +273,18 @@ async function inspect(file: string, baseline: boolean): Promise<HistoryVersion 
   }
   if (!st.isFile() || st.size > LARGE_BYTES) return null
   const key = historyKey(file)
-  const canon = canonicalPath(file)
-  let idx = readIndex(key, canon)
-  let latest = idx?.versions[idx.versions.length - 1]
-  if (!latest) {
-    if (!baseline) return null // opening or watching records nothing for a file with no history
-    const bytes = await fs.promises.readFile(file)
-    if (!(await adoptMoved(canon, key, sha256(bytes)))) {
-      return recordVersion(file, bytes, { size: bytes.length, mtime: st.mtimeMs }, { authors: [OUTSIDE] }, { baseline: true, noFold: true })
-    }
-    idx = readIndex(key, canon)
-    latest = idx?.versions[idx.versions.length - 1]
-    if (!idx || !latest) return null
+  const idx = readIndex(key, canonicalPath(file))
+  const latest = idx?.versions[idx.versions.length - 1]
+  if (!idx || !latest) {
+    if (onBaseline) onBaseline({ bytes: await fs.promises.readFile(file), mtime: st.mtimeMs }) // opening or watching records nothing
+    return null
   }
   if (latest.size === st.size && latest.mtime === st.mtimeMs) return null
   const bytes = await fs.promises.readFile(file)
   if (sha256(bytes) === latest.hash) {
     latest.size = st.size // same content, touched only: remember it so it is not hashed again
     latest.mtime = st.mtimeMs
-    writeIndex(key, idx!)
+    writeIndex(key, idx)
     return null
   }
   return recordVersion(file, bytes, { size: bytes.length, mtime: st.mtimeMs }, { authors: [OUTSIDE] })
@@ -251,7 +308,7 @@ export function checkOutside(file: string, opts: { low?: boolean } = {}): Promis
       key,
       async () => {
         try {
-          resolve(await withLock(key, () => inspect(file, false)))
+          resolve(await withLock(key, async () => ((await flushPending(file, key)) ? null : inspect(file))))
         } catch (e) {
           pause(e)
           resolve(null)
@@ -277,17 +334,22 @@ async function doWrite(file: string, write: () => Promise<Uint8Array>) {
 
 /**
  * Every save goes through here. Holds the file's lock from before the write until the version is recorded,
- * records the baseline or an outside change first, calls `write` (which writes atomically and returns the bytes),
- * and resolves as soon as the write is done. Recording continues on the file's queue (see flushHistory).
- * A history failure never rejects or delays this: it is reported through onHistoryPaused. Only `write` can reject it.
+ * checks for an outside change, calls `write` (which writes atomically and returns the bytes), and resolves as soon
+ * as the write is done. Only after that does it keep the baseline (hash, compress) and record the new version, on
+ * the file's queue (see flushHistory). A history failure never rejects or delays this: it is reported through
+ * onHistoryPaused, and whatever could not be recorded is kept in memory and recorded, credited to its real authors,
+ * by the next job for the file. Only `write` can reject it.
  */
 export function guardedWrite(file: string, ctx: WriteContext, write: () => Promise<Uint8Array>): Promise<{ size: number; mtime: number }> {
   return new Promise((resolve, reject) => {
     const direct = async () => {
       try {
-        resolve((await doWrite(file, write)).stat)
+        const done = await doWrite(file, write)
+        resolve(done.stat)
+        return done
       } catch (e) {
         reject(e)
+        return null
       }
     }
     let key: string
@@ -303,12 +365,14 @@ export function guardedWrite(file: string, ctx: WriteContext, write: () => Promi
       try {
         await withLock(key, async () => {
           locked = true
-          let ok = true
-          try {
-            await inspect(file, true)
-          } catch (e) {
-            ok = false // the index is in an unknown state: write anyway, record nothing
-            pause(e)
+          const blocked = await flushPending(file, key) // earlier writes first, so they are never taken for outside changes
+          let captured: Captured | undefined
+          if (!blocked) {
+            try {
+              await inspect(file, c => (captured = c))
+            } catch (e) {
+              pause(e)
+            }
           }
           let done: { bytes: Uint8Array; stat: { size: number; mtime: number } }
           try {
@@ -317,17 +381,33 @@ export function guardedWrite(file: string, ctx: WriteContext, write: () => Promi
             reject(e)
             return
           }
+          const at = Date.now()
           resolve(done.stat)
-          if (!ok) return
+          await new Promise<void>(r => setImmediate(r)) // let the caller carry on before the heavy work
+          const own: Own = { bytes: done.bytes, stat: done.stat, ctx, at }
+          if (blocked) return stash(key, own)
+          const cap = captured as Captured | undefined
+          if (cap) {
+            try {
+              await baselineStep(file, cap)
+            } catch (e) {
+              pause(e)
+              return stash(key, own, cap) // the baseline must come first when it is retried
+            }
+          }
           try {
-            await recordVersion(file, done.bytes, done.stat, ctx)
+            await recordVersion(file, own.bytes, own.stat, ctx, { at })
           } catch (e) {
             pause(e)
+            stash(key, own)
           }
         })
       } catch (e) {
         pause(e)
-        if (!locked) await direct() // no lock to be had: the save still happens
+        if (!locked) {
+          const done = await direct() // no lock to be had: the save still happens
+          if (done) stash(key, { bytes: done.bytes, stat: done.stat, ctx, at: Date.now() })
+        }
       }
     })
   })
