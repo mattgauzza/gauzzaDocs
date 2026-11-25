@@ -40,17 +40,26 @@ export function propertiesHtml(yaml: string, open = false) {
   return `<details class="md-props"${open ? ' open' : ''}><summary>Properties <span>${rows.length || ''}</span></summary>${body}</details>`
 }
 
-const DROP = 'script,iframe,object,embed,style,link,meta,base,form,frame,frameset'
-/** Markdown may carry raw HTML; keep the formatting, drop anything that could run or load code. */
+// SVG animation elements can rewrite an href after cleaning (<animate attributeName="href" values="javascript:...">);
+// SVG element names are case-sensitive, so the camelCase ones are listed as written.
+const DROP = 'script,iframe,object,embed,style,link,meta,base,form,frame,frameset,animate,set,animateMotion,animateTransform,discard'
+const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'poster', 'background'])
+/**
+ * Markdown may carry raw HTML; keep the formatting, drop anything that could run or load code. (The window's
+ * Content-Security-Policy also blocks inline scripts and javascript: links; this is the first line.)
+ */
 function sanitize(root: HTMLElement) {
   root.querySelectorAll(DROP).forEach(el => el.remove())
   root.querySelectorAll('*').forEach(el => {
     for (const a of Array.from(el.attributes)) {
       const name = a.name.toLowerCase()
-      const v = a.value.trim().toLowerCase()
+      // Browsers ignore tabs, newlines and control characters inside a URL scheme ("java\tscript:").
+      const v = a.value.replace(/[\u0000- \u007f-\u009f]/g, '').toLowerCase()
       if (name.startsWith('on') || name === 'srcdoc') el.removeAttribute(a.name)
-      else if ((name === 'href' || name === 'src' || name === 'xlink:href' || name === 'action') && (/^(javascript|vbscript):/.test(v) || (v.startsWith('data:') && !(name === 'src' && v.startsWith('data:image/')))))
+      else if (URL_ATTRS.has(name) && (/^(javascript|vbscript):/.test(v) || (v.startsWith('data:') && !(name === 'src' && v.startsWith('data:image/')))))
         el.removeAttribute(a.name)
+      // <use> may only point inside this document.
+      else if (el.localName === 'use' && (name === 'href' || name === 'xlink:href') && !v.startsWith('#')) el.removeAttribute(a.name)
     }
   })
 }

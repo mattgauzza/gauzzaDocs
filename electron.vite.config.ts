@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 // Built app only. Plugins load from the gdplugin: scheme, which main serves from ~/.gauzzadocs/plugins.
 const CSP =
   "default-src 'self'; script-src 'self' gdplugin:; style-src 'self' 'unsafe-inline' gdplugin:; img-src * data: blob:; " +
-  "font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' gdplugin: gdfile: blob: data:; object-src 'none'; base-uri 'none'"
+  "font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' gdplugin: gdfile: blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'"
 
 export default defineConfig({
   // worker.ts runs file work off the main thread (src/main/work.ts).
