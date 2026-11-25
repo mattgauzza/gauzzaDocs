@@ -13,6 +13,7 @@ import * as comments from '../core/comments'
 import { type Bridge, startBridge } from './server'
 import { attachContextMenu, setupSpelling } from './contextMenu'
 import { stopWorker, warmUp, work } from './work'
+import { stopWatching, watchFolders } from './folders'
 import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
 
@@ -76,11 +77,11 @@ async function openInWindow(file: string, opts: { focus?: boolean } = {}) {
   return p
 }
 
-async function newFilePath(kind: Kind, ext?: string, name?: string) {
+async function newFilePath(kind: Kind, ext?: string, name?: string, dir?: string) {
   const s = getSettings()
   const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf' }[kind]
   const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled' }[kind]
-  const file = freeName(s.docsDir, base, e)
+  const file = freeName(dir || s.docsDir, base, e)
   await work('createFile', [file])
   return file
 }
@@ -233,7 +234,40 @@ const api: Record<string, (...a: any[]) => unknown> = {
   largeFind: (file: string, q: string, opts: { from?: number; limit?: number; regex?: boolean; ignoreCase?: boolean }) => work('largeFind', [file, q, opts]),
   largeForget: (file: string) => work('largeForget', [file]),
   save: (file: string, payload: FilePayload) => work<number>('saveFile', [file, payload]),
-  newFile: (kind: Kind, ext?: string) => newFilePath(kind, ext),
+  newFile: (kind: Kind, ext?: string, dir?: string) => newFilePath(kind, ext, undefined, dir),
+  // ---------- projects: folders on the home screen and in the explorer (listing and search run on the worker) ----------
+  projectsList: () => work('projectsList'),
+  projectsAdd: (dir: string, name?: string) => work('projectsAdd', [dir, name]),
+  projectsRemove: (dir: string) => work('projectsRemove', [dir]),
+  projectsRename: (dir: string, name: string) => work('projectsRename', [dir, name]),
+  projectsTouch: (dir: string) => work('projectsTouch', [dir]),
+  projectFor: (file: string) => work('projectFor', [file]),
+  listFolder: (dir: string) => work('listFolder', [dir]),
+  searchFolder: (root: string, q: string) => work('searchFolder', [root, q, { limit: 300 }]),
+  pickFolder: async () => {
+    const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory'] })
+    return r.canceled ? null : r.filePaths[0]
+  },
+  isFolder: (p: string) => fs.promises.stat(p).then(s => s.isDirectory(), () => false),
+  /** Folder browser rename: the full name (with extension) of a file or folder. Keeps recent files, comments and instructions with it. */
+  renameEntry: async (p: string, name: string) => {
+    const clean = name.replace(/[\\/:*?"<>|]/g, '').trim()
+    if (!clean) throw new Error('Name cannot be empty')
+    const to = path.join(path.dirname(p), clean)
+    if (samePath(to, p)) return p
+    if (fs.existsSync(to)) throw new Error(`${clean} already exists`)
+    await fs.promises.rename(p, to)
+    renameRecent(p, to)
+    renameInstructions(p, to)
+    comments.renameComments(p, to)
+    return to
+  },
+  /** To the Recycle Bin (or the OS trash), never a hard delete. */
+  trash: (p: string) => shell.trashItem(p),
+  /** Files gauzzaDocs does not edit (images, zips, ...) open in their usual app. */
+  openWithSystem: (p: string) => shell.openPath(p),
+  /** The window says which project folders it is showing; only those are watched. */
+  watchFolders: (roots: string[]) => watchFolders(roots, (root, dir) => win?.webContents.send('folder-changed', root, dir)),
   openDialog: async () => {
     const r = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], filters: OPEN_FILTERS })
     return r.canceled ? [] : r.filePaths
@@ -488,6 +522,7 @@ else {
   app.on('before-quit', () => {
     forceQuit = true
     stopWorker()
+    stopWatching()
     bridge?.close()
   })
   app.on('window-all-closed', () => app.quit())

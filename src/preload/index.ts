@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('gd', {
     ipcRenderer.on(channel, h)
     return () => ipcRenderer.removeListener(channel, h)
   },
-  on: (channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'update' | 'context-command', cb: (...a: any[]) => void) => {
+  on: (channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'update' | 'context-command' | 'folder-changed', cb: (...a: any[]) => void) => {
     const h = (_e: unknown, ...a: any[]) => cb(...a)
     ipcRenderer.on(channel, h)
     return () => ipcRenderer.removeListener(channel, h)

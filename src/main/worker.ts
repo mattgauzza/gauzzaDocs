@@ -3,6 +3,7 @@ import { createFile, loadFile, saveFile } from '../core/files'
 import { findInFile, forgetIndex, indexFile, readLines } from '../core/large'
 import { runOffline } from '../core/ops'
 import * as plugins from '../core/plugins'
+import * as projects from '../core/projects'
 import { detectAgents, installSkills, refreshInstalledSkills, removeSkills } from '../core/agentSkills'
 
 /**
@@ -35,7 +36,16 @@ const fns: Record<string, Fn> = {
   pluginsInstall: ([id, fallback]) => plugins.install(id, fallback),
   pluginsUpdateAll: ([fallback]) => plugins.updateAll(fallback),
   pluginsRemove: ([id]) => plugins.remove(id),
-  pluginsSetEnabled: ([id, on]) => plugins.setEnabled(id, on)
+  pluginsSetEnabled: ([id, on]) => plugins.setEnabled(id, on),
+  // Projects (folders on the home screen and in the explorer). Listing and search never block the window.
+  projectsList: () => projects.listProjects(),
+  projectsAdd: ([dir, name]) => projects.addProject(dir, name),
+  projectsRemove: ([key]) => projects.removeProject(key),
+  projectsRename: ([dir, name]) => projects.renameProject(dir, name),
+  projectsTouch: ([dir]) => projects.touchProject(dir),
+  projectFor: ([file]) => projects.projectFor(file) || null,
+  listFolder: ([dir]) => projects.listFolder(dir),
+  searchFolder: ([root, q, opts]) => projects.searchFolder(root, q, opts)
 }
 
 parentPort!.on('message', async (msg: { id: number; fn: string; args: unknown[] }) => {

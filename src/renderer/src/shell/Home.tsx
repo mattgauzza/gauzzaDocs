@@ -1,22 +1,86 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { type Kind, baseName, kindOf } from '../../../shared/kinds'
 import type { RecentFile, Settings } from '../../../shared/types'
-import { api, shortDir, when } from '../lib'
+import { type Project, api, shortDir, when } from '../lib'
+import { FolderBrowser, ProjectRail } from './Projects'
 import { Icon, KindIcon } from './icons'
 
-/** The start page, like the Docs/Sheets/Drive home: new-file templates on top, recent files below. */
+/**
+ * The start page, like Drive: a rail on the left with Recent and the person's projects (folders), and the main area
+ * showing either recent files under the new-file templates or the selected project's folder browser.
+ */
 export function Home(props: {
+  settings: Settings
+  home: string
+  onOpen(path: string): void
+  onNew(kind: Kind, ext?: string, dir?: string): void
+  onOpenDialog(): void
+  refreshKey: number
+  say(msg: string): void
+}) {
+  const [projects, setProjects] = useState<Project[]>([])
+  const [sel, setSelState] = useState<string>(() => {
+    try {
+      return localStorage.getItem('homeView') || 'recent'
+    } catch {
+      return 'recent'
+    }
+  })
+  const select = (v: string) => {
+    setSelState(v)
+    try { localStorage.setItem('homeView', v) } catch { /* storage off */ }
+  }
+  const loadProjects = useCallback(() => api.projectsList().then(setProjects, () => setProjects([])), [])
+  useEffect(() => void loadProjects(), [props.refreshKey])
+  const project = projects.find(p => p.path === sel)
+  const [view, setView] = useState<'list' | 'grid'>('list')
+
+  // Dropping a folder adds it as a project; dropping files opens them.
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault()
+    for (const f of Array.from(e.dataTransfer.files)) {
+      const p = window.gd.pathFor(f)
+      if (await api.isFolder(p)) {
+        const proj = await api.projectsAdd(p)
+        await loadProjects()
+        select(proj.path)
+        props.say(`Added ${proj.name} to Projects`)
+      } else props.onOpen(p)
+    }
+  }
+
+  return (
+    <div className="home-shell" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
+      <ProjectRail projects={projects} selected={project ? sel : 'recent'} onSelect={select} onChanged={loadProjects} say={props.say} />
+      <div className="home-main">
+        {project ? (
+          <div className="home-inner home-files">
+            <FolderBrowser key={project.path} project={project} view={view} onView={setView} onOpen={props.onOpen}
+              onNew={(k, ext, dir) => props.onNew(k, ext, dir)} onChanged={loadProjects} say={props.say} />
+          </div>
+        ) : (
+          <RecentView {...props} view={view} onView={setView} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function RecentView(props: {
   settings: Settings
   home: string
   onOpen(path: string): void
   onNew(kind: Kind, ext?: string): void
   onOpenDialog(): void
   refreshKey: number
+  view: 'list' | 'grid'
+  onView(v: 'list' | 'grid'): void
 }) {
+  const view = props.view
+  const setView = props.onView
   const [recent, setRecent] = useState<RecentFile[]>([])
   const [filter, setFilter] = useState<'all' | Kind>('all')
   const [q, setQ] = useState('')
-  const [view, setView] = useState<'list' | 'grid'>('list')
   const [folder, setFolder] = useState<{ name: string; path: string; dir: boolean; mtime: number }[]>([])
 
   useEffect(() => {
@@ -42,14 +106,7 @@ export function Home(props: {
   ]
 
   return (
-    <div
-      className="home"
-      onDragOver={e => e.preventDefault()}
-      onDrop={e => {
-        e.preventDefault()
-        for (const f of Array.from(e.dataTransfer.files)) props.onOpen(window.gd.pathFor(f))
-      }}
-    >
+    <div className="home">
       <section className="home-new">
         <div className="home-inner">
           <div className="home-new-head">
@@ -93,7 +150,7 @@ export function Home(props: {
 
         {shown.length === 0 && inFolder.length === 0 && (
           <div className="empty">
-            <p>No files yet. Start a new one above, open a file, or drop files here.</p>
+            <p>No files yet. Start a new one above, open a file, or drop files or folders here.</p>
           </div>
         )}
 

@@ -12,6 +12,7 @@ import { type Kind, kindOf, languageOf } from '../shared/kinds'
 import type { AgentOp } from '../shared/types'
 import { type Ctx, call, liveOptions, runOp } from './common'
 import { registerCommentCommands } from './comments'
+import { registerProjectCommands } from './projects'
 import { registerDocCommands } from './doc'
 import { registerPdfCommands } from './pdf'
 import { registerSheetCommands } from './sheet'
@@ -411,6 +412,7 @@ program
   .action(() => out({ home: HOME, docsDir: getSettings().docsDir, plugins: path.join(HOME, 'plugins') }, () =>
     `app data: ${HOME}\nnew files: ${getSettings().docsDir}\nplugins:   ${path.join(HOME, 'plugins')}`))
 
+registerProjectCommands(program, ctx)
 registerCommentCommands(program, ctx, () => program.opts().agent || process.env.GDOCS_AGENT || 'Agent')
 registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)

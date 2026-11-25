@@ -8,6 +8,7 @@ import { AgentDialog, Confirm, InstructionsDialog, PluginsDialog, SettingsDialog
 import { Home } from './shell/Home'
 import { StatusBar } from './shell/StatusBar'
 import { Onboarding } from './shell/Onboarding'
+import { Explorer } from './shell/Explorer'
 import { TabBoundary } from './shell/TabBoundary'
 import { CommentsPanel } from './shell/Comments'
 import { diffLines } from './shell/diff'
@@ -90,6 +91,18 @@ export default function App() {
   const cur = tabs.find(t => t.id === active) || null
   // Whether the file in focus carries its own agent instructions (shown as a chip in the header).
   const [hasInstructions, setHasInstructions] = useState(false)
+  // The project explorer beside the editor (View > Explorer, Ctrl+Shift+E); remembered between sessions.
+  const [explorer, setExplorerState] = useState(() => {
+    try {
+      return localStorage.getItem('explorerOpen') === '1'
+    } catch {
+      return false
+    }
+  })
+  const setExplorer = (on: boolean) => {
+    setExplorerState(on)
+    try { localStorage.setItem('explorerOpen', on ? '1' : '0') } catch { /* storage off */ }
+  }
   // First run: the setup screen (default app, AI agents, writing voice). Also Help > Set up gauzzaDocs.
   const [welcome, setWelcome] = useState(false)
   useEffect(() => void api.welcomed().then(w => !w && setWelcome(true), () => {}), [])
@@ -316,9 +329,9 @@ export default function App() {
   }, [])
   const open = (path: string) => openFile(path).catch(e => say((e as Error).message))
   const openDialog = async () => (await api.openDialog()).forEach(open)
-  const newFile = async (kind: Kind, ext?: string) => {
+  const newFile = async (kind: Kind, ext?: string, dir?: string) => {
     try {
-      await open(await api.newFile(kind, ext))
+      await open(await api.newFile(kind, ext, dir))
     } catch (e) {
       say((e as Error).message)
     }
@@ -622,6 +635,7 @@ export default function App() {
       else if (key === '/') go(() => setDialog('shortcuts'))
       else if (key === 'm' && e.altKey && t) go(addComment)
       else if (key === 'f' && e.shiftKey && t) go(() => runFormatter())
+      else if (key === 'e' && e.shiftKey) go(() => setExplorer(!explorer))
       else if (key === 'tab') {
         const ids = [HOME, ...tabsRef.current.map(x => x.id)]
         const i = ids.indexOf(activeRef.current)
@@ -678,6 +692,8 @@ export default function App() {
       ...(ed('Edit').length ? [sep, ...ed('Edit')] : [])
     ]
     const view: MenuItem[] = [
+      { label: 'Explorer', shortcut: 'Ctrl+Shift+E', checked: explorer, run: () => setExplorer(!explorer) },
+      sep,
       ...ed('View'),
       ...(cur.kind === 'doc' || cur.kind === 'text'
         ? [{ label: 'Check spelling', checked: settings?.spellcheck !== false, run: () => api.setSettings({ spellcheck: settings?.spellcheck === false }).then(setSettingsState) }, sep]
@@ -722,7 +738,7 @@ export default function App() {
       { name: 'Insert', items: [...ed('Insert'), ...(ed('Insert').length ? [sep] : []), { label: 'Comment', shortcut: 'Ctrl+Alt+M', run: addComment }] }, { name: 'Format', items: ed('Format') }, { name: 'Tools', items: tools },
       { name: 'Plugins', items: pluginMenu }, { name: 'Help', items: help }
     ]
-  }, [cur, h, plugins, preview, settings, tabs])
+  }, [cur, h, plugins, preview, settings, tabs, explorer])
 
   if (!settings) return <div className="boot" />
 
@@ -804,7 +820,7 @@ export default function App() {
             <button className="icon-btn" title="Plugins" onClick={() => setDialog('plugins')}><Icon name="puzzle" /></button>
             <button className="icon-btn" title="Settings" onClick={() => setDialog('settings')}><Icon name="settings" /></button>
           </div>
-          <Home settings={settings} home={homeDir} onOpen={open} onNew={newFile} onOpenDialog={openDialog} refreshKey={homeKey + (active === HOME ? 1 : 0)} />
+          <Home settings={settings} home={homeDir} onOpen={open} onNew={newFile} onOpenDialog={openDialog} refreshKey={homeKey + (active === HOME ? 1 : 0)} say={say} />
         </>
       ) : (
         <div className="file-head">
@@ -862,6 +878,7 @@ export default function App() {
       )}
 
       <div className="workspace" style={{ display: active === HOME ? 'none' : undefined }}>
+        {explorer && active !== HOME && <Explorer activePath={cur?.path || null} onOpen={open} onClose={() => setExplorer(false)} say={say} />}
         <div className="editors">
           {tabs.map(t => {
             if (!t.payload) return t.id === active ? <div key={`${t.id}:sleep`} className="editor-placeholder">{t.error || 'Loading…'}</div> : null

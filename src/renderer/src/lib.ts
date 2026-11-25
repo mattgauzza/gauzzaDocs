@@ -15,13 +15,30 @@ export interface MarketPlugin {
   icon?: string; languages?: string[]; size?: number; installed?: string; update?: boolean; compatible?: boolean
 }
 export interface Market { source: string; name?: string; categories: string[]; plugins: MarketPlugin[]; offline?: string }
+/** Mirrors core/projects.ts. */
+export interface Project { path: string; name: string; added: number; opened: number; missing?: boolean }
+export interface Entry { name: string; path: string; dir: boolean; size: number; mtime: number }
 export interface Listener { id: number; agent: string; path?: string; since: number }
 
 /** Typed wrappers over window.gd.call (main process API in src/main/index.ts). */
 export const api = {
   load: (path: string) => window.gd.call<OpenFile>('load', path),
   save: (path: string, payload: FilePayload) => window.gd.call<number>('save', path, payload),
-  newFile: (kind: Kind, ext?: string) => window.gd.call<string>('newFile', kind, ext),
+  newFile: (kind: Kind, ext?: string, dir?: string) => window.gd.call<string>('newFile', kind, ext, dir),
+  projectsList: () => window.gd.call<Project[]>('projectsList'),
+  projectsAdd: (dir: string, name?: string) => window.gd.call<Project>('projectsAdd', dir, name),
+  projectsRemove: (dir: string) => window.gd.call('projectsRemove', dir),
+  projectsRename: (dir: string, name: string) => window.gd.call('projectsRename', dir, name),
+  projectsTouch: (dir: string) => window.gd.call('projectsTouch', dir),
+  projectFor: (file: string) => window.gd.call<Project | null>('projectFor', file),
+  listFolder: (dir: string) => window.gd.call<Entry[]>('listFolder', dir),
+  searchFolder: (root: string, q: string) => window.gd.call<{ results: Entry[]; truncated: boolean }>('searchFolder', root, q),
+  pickFolder: () => window.gd.call<string | null>('pickFolder'),
+  isFolder: (p: string) => window.gd.call<boolean>('isFolder', p),
+  renameEntry: (p: string, name: string) => window.gd.call<string>('renameEntry', p, name),
+  trash: (p: string) => window.gd.call('trash', p),
+  openWithSystem: (p: string) => window.gd.call<string>('openWithSystem', p),
+  watchFolders: (roots: string[]) => window.gd.call('watchFolders', roots),
   openDialog: () => window.gd.call<string[]>('openDialog'),
   saveAsDialog: (path: string) => window.gd.call<string | null>('saveAsDialog', path),
   exportFile: (path: string, payload: FilePayload, format: string, html?: string) => window.gd.call<string | null>('exportFile', path, payload, format, html),
@@ -74,7 +91,7 @@ export const when = (ms: number) => {
   if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
   return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' })
 }
-export const dirOf = (p: string) => p.replace(/[\/][^\/]*$/, '')
+export const dirOf = (p: string) => p.replace(/[\\/][^\\/]*$/, '')
 export const shortDir = (p: string, home: string) => {
   const d = dirOf(p)
   return home && d.toLowerCase().startsWith(home.toLowerCase()) ? '~' + d.slice(home.length) : d

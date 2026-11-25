@@ -139,6 +139,24 @@ gdocs instructions --global --set @my-rules.md
 
 `gdocs read --json` includes them too.
 
+## Projects
+
+Any folder can be a project. Click + next to Projects on the home screen, or drop a folder onto it. A project shows
+its files like Drive does, folders first, with search across the whole folder and a New button that creates the file
+right there. Right click a file to rename it, copy its path or send it to the Recycle Bin. Removing a project only takes
+it off the list and never touches the files.
+
+While you're editing, View > Explorer (Ctrl+Shift+E) opens the project as a tree beside the doc, with the file you're
+on highlighted. Both views update by themselves when files change on disk.
+
+Agents can see your projects too:
+
+```
+gdocs projects                     # your projects
+gdocs projects add ~/Clients --name Clients
+gdocs ls Clients                   # one level of a project or folder
+```
+
 ## Tabs and saving
 
 Every open file is a tab, like in a code editor. Drag tabs to reorder them, middle click to close one and right click
