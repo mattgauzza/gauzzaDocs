@@ -29,7 +29,11 @@ const fresh = (name = 'doc.md') => {
   return p
 }
 const rnd = (n = 200) => crypto.randomBytes(n)
-const logOf = (f: string) => indexPath(historyKey(f)).replace(/\.json$/, '.log.jsonl')
+const backdate = (hash: string) => {
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+  fs.utimesSync(objectPath(hash), old, old)
+}
+const logOf =(f: string) => indexPath(historyKey(f)).replace(/\.json$/, '.log.jsonl')
 
 test('restore writes the stored bytes exactly and can be undone', async () => {
   const f = fresh('plan.docx')
@@ -137,6 +141,32 @@ test('restore over a file grown past 32 MB needs discardCurrent', async () => {
   assert.equal(listVersions(f).at(-1)!.restoredFrom, 1)
 })
 
+test('restore with unsaved content over 32 MB needs discardCurrent, and keeps the file as it was', async () => {
+  const f = fresh('bigunsaved.docx')
+  fs.writeFileSync(f, rnd())
+  await save(f, rnd())
+  const onDisk = fs.readFileSync(f)
+  const unsaved = Buffer.alloc(1024 * 1024 + 10, 2)
+  await assert.rejects(restoreVersion(f, 1, { ...matt, unsaved }), /over 32 MB.*discardCurrent/)
+  assert.deepEqual(fs.readFileSync(f), onDisk)
+  assert.equal(listVersions(f).length, 2)
+  await restoreVersion(f, 1, { ...matt, unsaved, discardCurrent: true })
+  assert.equal(listVersions(f).at(-1)!.restoredFrom, 1)
+})
+
+for (const ext of ['md', 'html']) {
+  test(`restore writes .${ext} bytes exactly when the instructions are unchanged (CRLF, non-UTF-8)`, async () => {
+    const f = fresh(`exact.${ext}`)
+    const v1 = Buffer.concat([Buffer.from('  first line\r\n'), Buffer.from([0xe9]), Buffer.from('t\xe9\r\nlast  \r\n', 'latin1')])
+    fs.writeFileSync(f, v1)
+    await save(f, Buffer.from('changed\r\n'))
+    await restoreVersion(f, 1, matt)
+    assert.deepEqual(fs.readFileSync(f), v1)
+    await restoreVersion(f, 2, matt) // undo goes the same way
+    assert.deepEqual(fs.readFileSync(f), Buffer.from('changed\r\n'))
+  })
+}
+
 test('folding never merges into a restore or the state before it', async () => {
   const f = fresh('fold.docx')
   fs.writeFileSync(f, rnd())
@@ -154,11 +184,11 @@ test('nameVersion names and clears a name', async () => {
   const f = fresh('n.docx')
   fs.writeFileSync(f, rnd())
   await save(f, rnd())
-  nameVersion(f, 2, 'Sent to client')
+  await nameVersion(f, 2, 'Sent to client')
   assert.equal(listVersions(f)[1].name, 'Sent to client')
-  nameVersion(f, 2, '')
+  await nameVersion(f, 2, '')
   assert.equal(listVersions(f)[1].name, undefined)
-  assert.throws(() => nameVersion(f, 9, 'x'), /9/)
+  await assert.rejects(nameVersion(f, 9, 'x'), /9/)
   await assert.rejects(showVersion(f, 9), /9/)
 })
 
@@ -173,8 +203,7 @@ test('forget removes index, log and unshared objects', async () => {
   const va = listVersions(a)
   const vb = listVersions(b)
   fs.writeFileSync(logOf(a), '{"x":1}\n')
-  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-  fs.utimesSync(objectPath(va[0].hash), old, old) // old and unreferenced: deleted
+  for (const v of [...va, ...vb]) backdate(v.hash) // only the "another index uses it" rule may keep the shared one
   await forgetHistory(a)
   assert.deepEqual(listVersions(a), [])
   for (const f of [indexPath(historyKey(a)), `${indexPath(historyKey(a))}.bak`, logOf(a)]) assert.ok(!fs.existsSync(f), f)
@@ -189,8 +218,7 @@ test('forget leaves an unshared object touched in the last day, for cleanup to r
   fs.writeFileSync(a, rnd())
   await save(a, rnd())
   const va = listVersions(a)
-  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-  fs.utimesSync(objectPath(va[0].hash), old, old)
+  backdate(va[0].hash)
   await forgetHistory(a)
   assert.deepEqual(listVersions(a), [])
   assert.ok(!fs.existsSync(objectPath(va[0].hash)), 'old unreferenced object deleted')
@@ -205,6 +233,7 @@ test('forget keeps every object when another index cannot be read', async () => 
   fs.writeFileSync(b, rnd())
   await save(b, rnd())
   const va = listVersions(a)
+  for (const v of [...va, ...listVersions(b)]) backdate(v.hash) // only the unreadable-index rule may keep them
   fs.writeFileSync(indexPath(historyKey(b)), '{ not json')
   await forgetHistory(a)
   assert.deepEqual(listVersions(a), [])
@@ -220,7 +249,7 @@ test('moveHistory follows a file rename', async () => {
   fs.writeFileSync(logOf(f), '{"x":1}\n')
   const to = path.join(path.dirname(f), 'new.docx')
   fs.renameSync(f, to)
-  moveHistory(f, to)
+  await moveHistory(f, to)
   assert.deepEqual(listVersions(to), versions)
   assert.deepEqual(listVersions(f), [])
   assert.ok(fs.existsSync(logOf(to)))
@@ -243,7 +272,7 @@ test('moveHistory follows a folder rename', async () => {
   const oBefore = listVersions(o)
   const to = path.join(dir, 'renamed')
   fs.renameSync(sub, to)
-  moveHistory(sub, to)
+  await moveHistory(sub, to)
   assert.deepEqual(listVersions(path.join(to, 'a.docx')), before[0])
   assert.deepEqual(listVersions(path.join(to, 'deep', 'b.docx')), before[1])
   assert.deepEqual(listVersions(files[0]), [])
@@ -261,7 +290,7 @@ test('moveHistory refuses to overwrite an existing history', async () => {
   }
   const va = listVersions(a)
   const vb = listVersions(b)
-  assert.throws(() => moveHistory(a, b), /already has a history/)
+  await assert.rejects(moveHistory(a, b), /already has a history/)
   assert.deepEqual(listVersions(a), va)
   assert.deepEqual(listVersions(b), vb)
 })

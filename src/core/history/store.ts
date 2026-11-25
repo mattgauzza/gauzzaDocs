@@ -291,26 +291,11 @@ export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   }
 }
 
-/** The same lock for short synchronous jobs (naming a version, moving a history). Blocks while waiting. */
-export function withLockSync<T>(keys: string | string[], fn: () => T): T {
-  const held: [string, string][] = []
-  fs.mkdirSync(FILES_DIR, { recursive: true })
-  try {
-    for (const key of [...new Set(Array.isArray(keys) ? keys : [keys])].sort()) {
-      // a fixed order, so two movers never wait on each other
-      const file = lockPath(key)
-      const until = Date.now() + LOCK_WAIT_MS
-      let mine: string | null
-      while (!(mine = tryAcquire(file))) {
-        if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock (${key})`)
-        sleepSync(LOCK_RETRY_MS)
-      }
-      held.push([file, mine])
-    }
-    return fn()
-  } finally {
-    for (const [file, mine] of held.reverse()) release(file, mine)
-  }
+/** Several histories' locks at once, taken in sorted key order so two movers never wait on each other. */
+export async function withLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+  const [first, ...rest] = [...new Set(keys)].sort()
+  if (first === undefined) return fn()
+  return withLock(first, () => (rest.length ? withLocks(rest, fn) : fn()))
 }
 
 const globToRegExp = (g: string) => new RegExp(`^${g.split('*').map(s => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 'i')

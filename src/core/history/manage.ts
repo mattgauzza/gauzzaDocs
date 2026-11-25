@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { getDocInstructions, inFile, withInstructions } from '../instructions'
+import { getDocInstructions, inFile, splitInstructions, withInstructions } from '../instructions'
 import { LARGE_BYTES } from '../large'
 import { discardPending, flushHistory, historyHooks, markBeforeRestore, recordVersion } from './record'
 import {
@@ -15,7 +15,7 @@ import {
   objectPath,
   readIndex,
   withLock,
-  withLockSync,
+  withLocks,
   writeAtomic,
   writeIndex,
   type Author,
@@ -44,9 +44,9 @@ export async function showVersion(file: string, n: number): Promise<Uint8Array> 
 }
 
 /** Gives a version a name (kept for good by cleanup). An empty name clears it. */
-export function nameVersion(file: string, n: number, name: string): void {
+export async function nameVersion(file: string, n: number, name: string): Promise<void> {
   const key = historyKey(file)
-  withLockSync(key, () => {
+  await withLock(key, async () => {
     const { idx, version } = find(file, n)
     const t = name.trim()
     if (t) version.name = t
@@ -106,7 +106,7 @@ const inside = (root: string, p: string): string | null => {
 const hasHistory = (key: string) => fs.existsSync(indexPath(key)) || fs.existsSync(bakPath(key))
 
 /** Moves the history of a file, or of every file under a folder, to follow a rename. Refuses to overwrite a history at the destination. */
-export function moveHistory(from: string, to: string): void {
+export async function moveHistory(from: string, to: string): Promise<void> {
   const src = canonicalPath(from)
   const dst = canonicalPath(to)
   const jobs: { oldKey: string; oldPath: string; newKey: string; newPath: string }[] = []
@@ -123,7 +123,7 @@ export function moveHistory(from: string, to: string): void {
     if (hasHistory(j.newKey) && !moving.has(j.newKey)) throw new Error(`${j.newPath} already has a history, so ${j.oldPath} can't be moved onto it.`)
   }
   for (const j of jobs) {
-    withLockSync([j.oldKey, j.newKey], () => {
+    await withLocks([j.oldKey, j.newKey], async () => {
       const old = readIndex(j.oldKey, j.oldPath)
       if (!old) return
       if (hasHistory(j.newKey)) throw new Error(`${j.newPath} already has a history, so ${j.oldPath} can't be moved onto it.`)
@@ -166,13 +166,15 @@ export async function restoreVersion(
     const stored = await getObject(version.hash)
     if (!stored) throw new Error(`Version ${n} of ${file} can't be read: its stored content is missing or damaged.`)
 
+    const tooBig = `${file} is over 32 MB, so its current content can't be kept. Restore anyway with discardCurrent.`
+    if (opts.unsaved && opts.unsaved.length > LARGE_BYTES && !opts.discardCurrent) throw new Error(tooBig) // would be dropped unrecorded
     let disk: Buffer | null = null
     let mtime = Date.now()
     try {
       const st = await fs.promises.stat(file)
       if (st.isFile()) {
         if (st.size > LARGE_BYTES) {
-          if (!opts.discardCurrent) throw new Error(`${file} is over 32 MB, so its current content can't be kept. Restore anyway with discardCurrent.`)
+          if (!opts.discardCurrent) throw new Error(tooBig)
         } else {
           disk = await fs.promises.readFile(file)
           mtime = st.mtimeMs
@@ -186,7 +188,12 @@ export async function restoreVersion(
     if (opts.unsaved) await recordVersion(file, opts.unsaved, { size: opts.unsaved.length, mtime: Date.now() }, { authors: opts.authors }, { noFold: true })
 
     let out: Uint8Array = stored
-    if (inFile(file)) out = Buffer.from(withInstructions(file, Buffer.from(stored).toString('utf8'), getDocInstructions(file)))
+    if (inFile(file)) {
+      // Only re-encode when the standing instructions actually change; otherwise the stored bytes go back untouched.
+      const text = Buffer.from(stored).toString('utf8')
+      const current = getDocInstructions(file)
+      if (splitInstructions(file, text).instructions !== current) out = Buffer.from(withInstructions(file, text, current))
+    }
 
     const after = readIndex(historyKey(file), canonicalPath(file))
     const latest = after?.versions[after.versions.length - 1]
