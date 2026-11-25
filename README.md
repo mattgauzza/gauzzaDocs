@@ -281,6 +281,11 @@ gauzzaDocs has no server, so sharing works the way it does for any file on your 
 like OneDrive, Dropbox or Google Drive, or in a git repository, and open tabs reload when the synced copy changes.
 Comments are saved on your PC, so they don't travel with the file yet.
 
+I'm thinking about a small server for sharing. You'd get a link to a doc, and the people you send it to could read
+it, comment and edit with you live. It would come with a small monthly subscription to pay for the server. If you'd
+use it, [open an issue](https://github.com/mattgauzza/gauzzaDocs/issues/new) and say so. I'll build it once enough
+people ask.
+
 ## Contributing
 
 gauzzaDocs is free and open source under the [MIT license](LICENSE). Issues and pull requests are welcome. See
