@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { type Listener, type Thread, api, when } from '../lib'
 import { Icon } from './icons'
 import { usePanelSize } from './resize'
-import { docId } from '../../../shared/docId'
+import { JoinChip } from './JoinChip'
 import { agentColor } from '../../../shared/agentColors'
 
 /** Open threads that quote some text, for highlighting in the editor. Reloads whenever the file's threads change. */
@@ -47,7 +47,6 @@ export function CommentsPanel(props: {
   const [showResolved, setShowResolved] = useState(false)
   const [draft, setDraft] = useState('')
   const [quote, setQuote] = useState(props.draftQuote)
-  const [copied, setCopied] = useState(false)
   const box = useRef<HTMLTextAreaElement>(null)
   const fresh = useRef(new Set<string>()) // threads/replies that just arrived from an agent, highlighted briefly
 
@@ -101,8 +100,6 @@ export function CommentsPanel(props: {
     setQuote('')
     load()
   }
-  const id = docId(props.path)
-  const listenCmd = `gdocs listen ${id}`
   const shown = threads.filter(t => showResolved || !t.resolved)
 
   return (
@@ -127,9 +124,7 @@ export function CommentsPanel(props: {
         ) : (
           <span>
             No agent is listening. Use Add agent above, or have your agent run{' '}
-            <button className="cm-cmd" title="Copy the command" onClick={() => navigator.clipboard.writeText(listenCmd).then(() => (setCopied(true), setTimeout(() => setCopied(false), 1500)))}>
-              {copied ? 'copied' : listenCmd}
-            </button>{' '}
+            <JoinChip path={props.path} />{' '}
             to hear your comments and edits.
           </span>
         )}

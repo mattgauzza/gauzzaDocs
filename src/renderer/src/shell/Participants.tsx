@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AGENT_COLORS } from '../../../shared/agentColors'
 import { type AgentStatus, type Listener, api } from '../lib'
-import { docId } from '../../../shared/docId'
+import { JoinChip } from './JoinChip'
 import { Modal } from './Dialogs'
 import { Icon } from './icons'
 
@@ -9,31 +9,6 @@ const COLORS: Record<AgentStatus['agent'], string> = AGENT_COLORS as Record<Agen
 const LABELS: Record<AgentStatus['agent'], string> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', copilot: 'GitHub Copilot CLI' }
 const DEFAULT_NAMES: Record<AgentStatus['agent'], string> = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini', copilot: 'Copilot' }
 const STATE_TEXT: Record<AgentStatus['state'], string> = { idle: 'idle', working: 'working', waiting: 'waiting for a turn', paused: 'paused', error: 'last run failed' }
-/** What the role means, said to the agent itself (the pasted prompt). */
-const ROLE_FOR_AGENT: Record<AgentStatus['role'], string> = {
-  writer: 'You are the writer: you write and own the content, and act on review comments.',
-  reviewer: 'You are a reviewer: read what others write and leave comments that quote the exact words. Fix only small things yourself.',
-  editor: 'You are the editor: improve clarity and flow with small edits.',
-  custom: ''
-}
-
-/** The prompt to paste into an agent that's already open (Claude Code, Codex...) so it joins this document. */
-export function joinPrompt(path: string, name: string, role: AgentStatus['role'], brief: string) {
-  const id = docId(path)
-  const who = name.trim() || 'Agent'
-  return [
-    `Work on this document with me in gauzzaDocs: "${path}" (${id}).`,
-    `Use the gdocs command line tool and sign your work as ${who}: add --agent ${who} to every gdocs command.`,
-    '',
-    `1. Run \`gdocs instructions ${id}\` and follow what it says.`,
-    `2. Read it with \`gdocs read ${id}\` and see open comments with \`gdocs comments ${id}\`.`,
-    `3. ${[ROLE_FOR_AGENT[role], brief.trim()].filter(Boolean).join(' ') || 'Do what my comments ask.'}`,
-    `4. Then loop: run \`gdocs listen ${id} --once --agent ${who}\` (it waits for my next comment or edit), do what it asks with small edits, answer in the comment thread with \`gdocs reply ${id} <id> "what you did" --resolve\`, and listen again. Keep going until I say stop.`,
-    '',
-    `After big changes, check how it looks with \`gdocs look ${id}\`. If I disconnect you, stop and don't reconnect.`
-  ].join('\n')
-}
-
 const ROLE_HINT: Record<AgentStatus['role'], string> = {
   writer: 'Writes and owns the content, and acts on review comments.',
   reviewer: 'Reads what others write and leaves comments. Fixes only small things.',
@@ -125,22 +100,19 @@ function AddAgent({ path, taken, onClose, say }: { path: string; taken: string[]
   const [brief, setBrief] = useState('')
   const [start, setStart] = useState(true)
   const [busy, setBusy] = useState(false)
-  // 'run': gauzzaDocs runs the agent in the background. 'paste': a prompt for an agent you already have open.
-  const [mode, setMode] = useState<'run' | 'paste'>('run')
-  const [copied, setCopied] = useState(false)
-  const [joined, setJoined] = useState(false)
-  const prompt = joinPrompt(path, name, role, brief)
-  const copy = () => navigator.clipboard.writeText(prompt).then(() => (setCopied(true), setTimeout(() => setCopied(false), 2000)))
-  // Tell the person when the pasted agent shows up (it starts listening under the name in the prompt).
+  // An agent the person already has open joins with the copied command; say so when one shows up.
+  const [joined, setJoined] = useState('')
   useEffect(() => {
-    if (mode !== 'paste') return
-    setJoined(false)
-    const want = name.trim().toLowerCase()
-    const check = (ls: Listener[]) =>
-      setJoined(ls.some(l => !l.virtual && l.agent.toLowerCase() === want && (!l.path || l.path.toLowerCase() === path.toLowerCase())))
+    let before: Set<number> | null = null
+    const mine = (ls: Listener[]) => ls.filter(l => !l.virtual && (!l.path || l.path.toLowerCase() === path.toLowerCase()))
+    const check = (ls: Listener[]) => {
+      if (!before) before = new Set(mine(ls).map(l => l.id))
+      const fresh = mine(ls).find(l => !before!.has(l.id))
+      if (fresh) setJoined(fresh.agent)
+    }
     api.listeners().then(check, () => {})
     return window.gd.on('listeners', check)
-  }, [mode, name, path])
+  }, [path])
   useEffect(() => {
     api.agentsDetect().then(list => {
       setFound(list)
@@ -167,29 +139,22 @@ function AddAgent({ path, taken, onClose, say }: { path: string; taken: string[]
   }
   const detected = found?.filter(a => a.detected) || []
   return (
-    <Modal title="Add an agent to this document" onClose={onClose} footer={mode === 'run' ? <>
+    <Modal title="Add an agent to this document" onClose={onClose} footer={<>
       <button className="btn" onClick={onClose}>Cancel</button>
       <button className="btn primary" disabled={!agent || !name.trim() || busy} onClick={add}>{busy ? 'Adding...' : 'Add agent'}</button>
-    </> : <>
-      <button className="btn" onClick={onClose}>Done</button>
-      <button className="btn primary" disabled={!name.trim()} onClick={copy}>{copied ? 'Copied' : 'Copy prompt'}</button>
     </>}>
-      <div className="seg pt-mode" role="tablist">
-        <button role="tab" aria-selected={mode === 'run'} className={mode === 'run' ? 'on' : ''} onClick={() => setMode('run')}>gauzzaDocs runs it</button>
-        <button role="tab" aria-selected={mode === 'paste'} className={mode === 'paste' ? 'on' : ''} onClick={() => setMode('paste')}>Paste into my agent</button>
-      </div>
-      {mode === 'run' ? (
-        <p className="muted small">
-          gauzzaDocs runs the agent in the background with its own login when there is something for it to do: a comment, an
-          @mention, a reply to it or, for reviewers and editors, new edits. Its edits and comments show up live under its name.
-        </p>
-      ) : (
-        <p className="muted small">
-          For an agent you already have open, like Claude Code or Codex in a terminal. Copy the prompt below and paste it in.
-          It joins under the name you pick and hears your comments and edits as you make them.
-        </p>
-      )}
-      {mode === 'run' && found && !detected.length && <p className="error small">No agents found on this PC. Install Claude Code, Codex, Gemini CLI or Copilot CLI first.</p>}
+      <p className="pt-join small">
+        {joined ? (
+          <span className="pt-joined">{joined} joined and is listening.</span>
+        ) : (
+          <>Already have an agent open? Paste this into it: <JoinChip path={path} /></>
+        )}
+      </p>
+      <p className="muted small">
+        Or let gauzzaDocs run one in the background with its own login when there is something for it to do: a comment, an
+        @mention, a reply to it or, for reviewers and editors, new edits. Its edits and comments show up live under its name.
+      </p>
+      {found && !detected.length && <p className="error small">No agents found on this PC. Install Claude Code, Codex, Gemini CLI or Copilot CLI first.</p>}
       <div className="form">
         <div className="pt-agents">
           {detected.map(a => (
@@ -210,21 +175,11 @@ function AddAgent({ path, taken, onClose, say }: { path: string; taken: string[]
         </label>
         <p className="muted small" style={{ margin: '-6px 0 0' }}>{ROLE_HINT[role]}</p>
         <label>Brief
-          <textarea className="instructions" rows={mode === 'paste' ? 2 : 4} value={brief} onChange={e => setBrief(e.target.value)}
+          <textarea className="instructions" rows={4} value={brief} onChange={e => setBrief(e.target.value)}
             placeholder={role === 'reviewer' ? 'e.g. Review for clarity and accuracy. Leave at most three comments per turn.' : 'e.g. Write a one page plan for moving our docs to gauzzaDocs. Use headings and a short summary at the top.'} />
         </label>
-        {mode === 'run' && <label className="row"><input type="checkbox" checked={start} onChange={e => setStart(e.target.checked)} /> Start now</label>}
-        {mode === 'run' && agent === 'gemini' && <p className="muted small">Gemini CLI runs with Full access (it approves its own commands), because it has no narrow allow list.</p>}
-        {mode === 'paste' && (
-          <>
-            <label>Prompt to paste
-              <textarea className="instructions pt-prompt" rows={9} readOnly value={prompt} onFocus={e => e.currentTarget.select()} />
-            </label>
-            <p className={`small ${joined ? 'pt-joined' : 'muted'}`}>
-              {joined ? `${name.trim()} joined and is listening.` : `Waiting for ${name.trim() || 'the agent'} to join...`}
-            </p>
-          </>
-        )}
+        <label className="row"><input type="checkbox" checked={start} onChange={e => setStart(e.target.checked)} /> Start now</label>
+        {agent === 'gemini' && <p className="muted small">Gemini CLI runs with Full access (it approves its own commands), because it has no narrow allow list.</p>}
       </div>
     </Modal>
   )
