@@ -226,6 +226,9 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     }
     case 'historyName':
       return work('historyName', [file, params.n, String(params.name ?? ''), agent.name])
+    case 'historyForget':
+      await work('historyForget', [file])
+      return { ok: true }
     default:
       throw new Error(`Unknown method "${method}"`)
   }

@@ -245,6 +245,34 @@ The status bar at the bottom works like a code editor's. Documents show words, p
 line and column, line length and the longest line. PDFs show the current page. On the right you get the format, line
 endings, encoding, size on disk and whether everything is saved.
 
+## Version history
+
+gauzzaDocs keeps earlier versions of your files, so you can see who changed what and go back. It works for every kind of
+file the app opens. Press Ctrl+Alt+Shift+H to open the panel, which has your versions and a timeline of the work on
+that file.
+
+Every save is kept for 30 days. After that I keep one version a day, and after a year one a month. The newest version,
+anything under 7 days old, the first version and any version you've named are never thinned out. History has a size cap
+of 1 GB, and you can change it in Settings. History for a file that has been gone for 90 days is removed, except the
+versions you named.
+
+Changes made outside gauzzaDocs are kept too, and they're credited to "outside gauzzaDocs". Word, git and other
+programs don't leave a name, so I can't tell who made them.
+
+Secret files are skipped. That means `.env` files, keys like `*.pem` and `*.key`, `id_rsa` and `id_ed25519` files and
+anything in `.ssh`, `.aws`, `.gnupg` or `.azure`. You can change that list in Settings.
+
+History lives in `~/.gauzzadocs/history`, and nothing is written next to your files. It's stored unencrypted.
+
+```
+gdocs history report.md                   # versions and who made them
+gdocs history diff report.md v7           # what changed since v7
+gdocs history restore report.md v7        # put v7 back
+gdocs history name report.md v7 "Sent to Dave"
+gdocs history log report.md               # the work history
+gdocs history forget report.md            # delete this file's history
+```
+
 ## Memory use
 
 Opening, saving and converting files happens on a background thread, so a big Word file or a huge log never freezes

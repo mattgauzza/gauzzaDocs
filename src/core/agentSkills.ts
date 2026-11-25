@@ -109,6 +109,8 @@ gdocs write notes.md - --format md       # whole-file replace, only when asked
 
 \`gdocs --help\`, \`gdocs <command> --help\` and \`gdocs ops\` list everything.
 
+\`gdocs history <file>\` shows who changed what; \`gdocs history diff <file> v7\` shows a change; restore only when the person asks.
+
 PDFs: \`gdocs replace contract.pdf "old words" "new words"\` changes text that's already on the page, even when the
 words run across lines of a paragraph. The paragraph is rewrapped to its old width and spacing, in the same color on
 the same background. Do it with the app running (it opens the file if needed) so the colors match; on disk alone the

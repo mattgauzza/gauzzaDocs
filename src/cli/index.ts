@@ -20,6 +20,8 @@ import { registerDocCommands } from './doc'
 import { registerPdfCommands } from './pdf'
 import { registerSheetCommands } from './sheet'
 import { registerSlidesCommands } from './slides' // slides
+import { registerHistoryCommands } from './history'
+import { flushHistory, listHistoryPaths } from '../core/history'
 
 const program = new Command()
 program
@@ -458,12 +460,15 @@ registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)
 registerPdfCommands(program, ctx)
 registerSlidesCommands(program, ctx) // slides
+registerHistoryCommands(program, ctx, () => program.opts().agent || process.env.GDOCS_AGENT || 'Agent')
 
 // Always node-style argv: installed copies run this under the app's Electron runtime (ELECTRON_RUN_AS_NODE),
 // where Commander would otherwise treat the script path as the first command.
 resolveDocIds(process.argv)
   .then(argv => program.parseAsync(argv, { from: 'node' }))
-  .catch(e => {
+  .then(() => flushHistory()) // queued version history writes finish before the process ends
+  .catch(async e => {
+  await flushHistory().catch(() => {})
   const msg = (e as Error).message || String(e)
   if (json()) console.error(JSON.stringify({ error: msg }))
   else console.error(`error: ${msg}`)
@@ -472,7 +477,7 @@ resolveDocIds(process.argv)
 
 /**
  * Lets any command take a short document ID (doc:k3x9q2, shown in the app's status bar and comments panel) instead of
- * a path. Looked up among the files open in the app first, then recent files, then files at the top of projects.
+ * a path. Looked up among the files open in the app first, then recent files, files with version history, then files at the top of projects.
  */
 async function resolveDocIds(argv: string[]): Promise<string[]> {
   if (!argv.some(a => DOC_ID.test(a))) return argv
@@ -480,6 +485,7 @@ async function resolveDocIds(argv: string[]): Promise<string[]> {
   const open = ((await call('list').catch(() => null)) as { path: string }[] | null) || []
   for (const t of open) candidates.add(t.path)
   for (const r of getRecent()) candidates.add(r.path)
+  for (const p of listHistoryPaths()) candidates.add(p) // files that no longer exist still have history
   for (const p of listProjects()) {
     try {
       for (const f of fs.readdirSync(p.path)) candidates.add(path.join(p.path, f))
