@@ -7,10 +7,12 @@ import { DONATE, EMPIRICAL_VOICE, REPO, SUBMIT_PLUGIN } from '../../shared/links
 import { AgentDialog, Confirm, InstructionsDialog, PluginsDialog, SettingsDialog, ShortcutsDialog } from './shell/Dialogs'
 import { Home } from './shell/Home'
 import { StatusBar } from './shell/StatusBar'
+import { Onboarding } from './shell/Onboarding'
 import { TabBoundary } from './shell/TabBoundary'
 import { CommentsPanel } from './shell/Comments'
 import { diffLines } from './shell/diff'
 import LargeViewer from './shell/LargeViewer'
+import { SelectionBubble } from './shell/SelectionBubble'
 import { Icon, KindIcon, Logo } from './shell/icons'
 import { MenuBar, MenuList } from './shell/Menus'
 import { type EditorAccess, type LoadedPlugins, fits, loadPlugins } from './shell/plugins'
@@ -88,6 +90,9 @@ export default function App() {
   const cur = tabs.find(t => t.id === active) || null
   // Whether the file in focus carries its own agent instructions (shown as a chip in the header).
   const [hasInstructions, setHasInstructions] = useState(false)
+  // First run: the setup screen (default app, AI agents, writing voice). Also Help > Set up gauzzaDocs.
+  const [welcome, setWelcome] = useState(false)
+  useEffect(() => void api.welcomed().then(w => !w && setWelcome(true), () => {}), [])
   // A downloaded update waiting for a restart (installed copies only).
   const [update, setUpdate] = useState('')
   useEffect(() => {
@@ -116,9 +121,64 @@ export default function App() {
     const t = tabsRef.current.find(x => x.id === activeRef.current)
     const sel = t ? handles.current.get(t.id)?.getSelection?.() || '' : ''
     setDraftQuote(sel.trim())
+    setDraftText('')
     setCommentsOpen(true)
     setFocusDraft(n => n + 1)
   }
+
+  // ---------- editing UX: right-click menu commands, "ask the agent", clicking a comment highlight ----------
+  const [draftText, setDraftText] = useState('')
+  const [focusedThread, setFocusedThread] = useState<{ id: string; n: number } | undefined>()
+  /** Puts a request to the agent on the selection, as a comment thread a listening agent picks up. */
+  const askAgent = async (prompt: string) => {
+    const t = tabsRef.current.find(x => x.id === activeRef.current)
+    const quote = t ? handles.current.get(t.id)?.getSelection?.()?.trim() || '' : ''
+    if (!t || !quote) return say('Select some text first')
+    try {
+      await api.commentAdd(t.path, { text: `@agent: ${prompt}`, quote })
+      setCommentsOpen(true)
+      say(listensTo(t.path).length
+        ? 'Sent to the agent. Its answer will show up in the comments.'
+        : 'Added to the comments. No agent is listening yet: click Agent (top right) to connect one and it will pick this up.')
+    } catch (e) {
+      say((e as Error).message)
+    }
+  }
+  useEffect(() => {
+    // Tell main what kind of editor a right-click landed in, so the native menu can offer the right actions.
+    const onContext = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null
+      window.gd.contextTarget(el?.closest('.ProseMirror') ? 'doc' : el?.closest('.cm-content') ? 'text' : 'other')
+    }
+    window.addEventListener('contextmenu', onContext, true)
+    const offCmd = window.gd.on('context-command', (c: { id: string; prompt?: string }) => {
+      const t = tabsRef.current.find(x => x.id === activeRef.current)
+      const h = t ? handles.current.get(t.id) : undefined
+      if (c.id === 'comment') addComment()
+      else if (c.id === 'ask' && c.prompt) askAgent(c.prompt)
+      else if (c.id === 'ask-custom') {
+        addComment()
+        setDraftText('@agent: ')
+      } else if (c.id === 'toggle-spelling') {
+        const on = settingsRef.current?.spellcheck !== false
+        api.setSettings({ spellcheck: !on }).then(setSettingsState)
+        say(on ? 'Spelling check off' : 'Spelling check on')
+      } else h?.command?.(c.id) // bold, italic, link, clearFormatting
+    })
+    const onFocusThread = (e: Event) => {
+      const { path, id } = (e as CustomEvent<{ path: string; id: string }>).detail
+      const t = tabsRef.current.find(x => x.id === activeRef.current)
+      if (!t || t.path.toLowerCase() !== path.toLowerCase()) return
+      setCommentsOpen(true)
+      setFocusedThread(f => ({ id, n: (f?.n || 0) + 1 }))
+    }
+    window.addEventListener('gd-focus-thread', onFocusThread)
+    return () => {
+      window.removeEventListener('contextmenu', onContext, true)
+      window.removeEventListener('gd-focus-thread', onFocusThread)
+      offCmd()
+    }
+  }, [])
   useEffect(() => {
     setHasInstructions(false)
     if (cur) api.instructions(cur.path).then(r => setHasInstructions(!!r.file), () => {})
@@ -619,6 +679,9 @@ export default function App() {
     ]
     const view: MenuItem[] = [
       ...ed('View'),
+      ...(cur.kind === 'doc' || cur.kind === 'text'
+        ? [{ label: 'Check spelling', checked: settings?.spellcheck !== false, run: () => api.setSettings({ spellcheck: settings?.spellcheck === false }).then(setSettingsState) }, sep]
+        : []),
       ...(previews.length ? [...(ed('View').length ? [sep] : []), { label: 'Preview pane', submenu: [
         { label: 'Off', checked: !preview, run: () => setPreview(null) },
         ...previews.map(p => ({ label: p.name, checked: preview === p.id, run: () => setPreview(p.id) }))
@@ -647,6 +710,7 @@ export default function App() {
     const help: MenuItem[] = [
       { label: 'Keyboard shortcuts', shortcut: 'Ctrl+/', run: () => setDialog('shortcuts') },
       { label: 'Agents and the gdocs CLI', run: () => setDialog('agent') },
+      { label: 'Set up gauzzaDocs (default app, AI agents)', run: () => setWelcome(true) },
       { label: '', sep: true },
       { label: 'Set up your writing voice (Empirical)', run: () => api.openUrl(EMPIRICAL_VOICE) },
       { label: 'Submit a plugin', run: () => api.openUrl(SUBMIT_PLUGIN) },
@@ -814,8 +878,8 @@ export default function App() {
           })}
         </div>
         {cur && commentsOpen && active !== HOME && (
-          <CommentsPanel key={cur.path} path={cur.path} listeners={listeners} draftQuote={draftQuote} focusDraft={focusDraft}
-            onClose={() => setCommentsOpen(false)} onCount={setCommentCount} />
+          <CommentsPanel key={cur.path} path={cur.path} listeners={listeners} draftQuote={draftQuote} draftText={draftText} focusDraft={focusDraft}
+            focusThread={focusedThread} onClose={() => setCommentsOpen(false)} onCount={setCommentCount} />
         )}
         {cur && previewDef && h?.getText && <PreviewPane key={`${cur.id}:${previewDef.id}`} def={previewDef} handle={h} path={cur.path} tick={cur.dirty ? Date.now() : cur.saved} onClose={() => setPreview(null)} />}
       </div>
@@ -850,6 +914,8 @@ export default function App() {
         <StatusBar path={cur.path} lossy={isLossy(cur)} payload={cur.payload} handle={h} mtime={cur.mtime} saved={cur.saved} dirty={cur.dirty} settings={settings} />
       )}
 
+      <SelectionBubble enabled={!!cur && active !== HOME && !cur.large && (cur.kind === 'doc' || cur.kind === 'text') && !dialog} onComment={addComment} />
+      {welcome && <Onboarding onClose={() => setWelcome(false)} />}
       {toast && <div className="toast">{toast}</div>}
       {dialog === 'plugins' && <PluginsDialog onClose={() => setDialog(null)} onReload={reloadPlugins} />}
       {dialog === 'settings' && <SettingsDialog settings={settings} onClose={() => setDialog(null)} onSave={saveSettings} />}

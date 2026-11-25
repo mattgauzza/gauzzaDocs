@@ -1,0 +1,10 @@
+/* Floating "add comment" button beside a selection (SelectionBubble) and comment highlights in every editor. */
+.sel-bubble { position: fixed; z-index: 60; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%;
+  background: var(--surface); color: var(--accent); box-shadow: var(--shadow); transition: transform .1s; }
+.sel-bubble:hover { transform: scale(1.08); background: var(--accent-soft); }
+
+.comment-mark, .cm-comment-mark { background: rgba(251, 188, 4, .28); border-bottom: 2px solid rgba(251, 188, 4, .9); cursor: pointer; border-radius: 1px; }
+.comment-mark:hover, .cm-comment-mark:hover { background: rgba(251, 188, 4, .45); }
+
+@keyframes cm-focus { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: var(--page-shadow); } }
+.cm-thread.focused { animation: cm-focus 1.6s ease-out; }

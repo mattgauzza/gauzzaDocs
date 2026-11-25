@@ -11,6 +11,7 @@ import { baseName, extOf, languageOf } from '../../../shared/kinds'
 import { applyTextOp } from '../../../shared/ops/text'
 import type { EditorHandle, EditorProps, MenuItem, StatusItem } from '../editor'
 import { countWords } from '../../../shared/ops/doc'
+import { focusThread, useQuotedThreads } from '../shell/Comments'
 import './text.css'
 
 const BIG = 5 * 1024 * 1024 // above this, skip syntax highlighting so huge logs stay fast
@@ -35,6 +36,31 @@ const flashField = StateField.define<DecorationSet>({
     return deco
   },
   provide: f => EditorView.decorations.from(f)
+})
+
+// ---------- comment highlights: the text each open thread quotes ----------
+type Quoted = { id: string; quote: string }
+const commentEffect = StateEffect.define<Quoted[]>()
+function commentDecos(doc: EditorState['doc'], threads: Quoted[]): DecorationSet {
+  if (!threads.length || doc.length > 2_000_000) return Decoration.none
+  const text = doc.toString()
+  const ranges = threads
+    .map(t => {
+      const at = text.indexOf(t.quote)
+      return at < 0 ? null : Decoration.mark({ class: 'cm-comment-mark', attributes: { 'data-thread': t.id } }).range(at, at + t.quote.length)
+    })
+    .filter((r): r is NonNullable<typeof r> => !!r)
+    .sort((a, b) => a.from - b.from)
+  return Decoration.set(ranges)
+}
+const commentField = StateField.define<{ threads: Quoted[]; deco: DecorationSet }>({
+  create: () => ({ threads: [], deco: Decoration.none }),
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(commentEffect)) return { threads: e.value, deco: commentDecos(tr.state.doc, e.value) }
+    if (!tr.docChanged || !value.threads.length) return value
+    return { threads: value.threads, deco: commentDecos(tr.state.doc, value.threads) }
+  },
+  provide: f => EditorView.decorations.from(f, v => v.deco)
 })
 
 /** Replaces the whole text with `next` as one minimal change (common prefix/suffix kept), so undo and cursors behave. */
@@ -120,6 +146,14 @@ export default function TextEditor(props: EditorProps) {
   const onChange = useRef(props.onChange)
   onChange.current = props.onChange
   const language = languageOf(props.path)
+  // Spelling is checked in prose (Markdown, plain text), not in code.
+  const prose = language === 'markdown' || language === 'text'
+  const pathRef = useRef(props.path)
+  pathRef.current = props.path
+  const quoted = useQuotedThreads(props.path)
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: commentEffect.of(quoted) })
+  }, [quoted])
 
   // ---------- create the view once ----------
   useEffect(() => {
@@ -139,6 +173,15 @@ export default function TextEditor(props: EditorProps) {
       ]),
       EditorState.allowMultipleSelections.of(true),
       flashField,
+      commentField,
+      EditorView.contentAttributes.of({ spellcheck: prose ? 'true' : 'false', autocorrect: 'off', autocapitalize: 'off' }),
+      EditorView.domEventHandlers({
+        mousedown: e => {
+          const id = (e.target as HTMLElement | null)?.closest?.('.cm-comment-mark')?.getAttribute('data-thread')
+          if (id) focusThread(pathRef.current, id)
+          return false
+        }
+      }),
       c.lang.of([]),
       c.wrap.of(wrap ? EditorView.lineWrapping : []),
       c.theme.of(isDark() ? oneDark : []),

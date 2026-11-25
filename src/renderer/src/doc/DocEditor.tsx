@@ -6,7 +6,8 @@ import { htmlToMarkdown, markdownToHtml, wrapHtml } from '../../../shared/conver
 import { extOf, stem } from '../../../shared/kinds'
 import { countWords } from '../../../shared/ops/doc'
 import type { EditorHandle, EditorProps, MenuItem, StatusItem } from '../editor'
-import { AgentFlash, FindMatches, findKey } from './extensions'
+import { AgentFlash, CommentMarks, FindMatches, commentKey, findKey } from './extensions'
+import { focusThread, useQuotedThreads } from '../shell/Comments'
 import { FrontMatter, schemaExtensions } from './schema'
 import { MODES, type MdMode, MdReader, MdSource, ModeSwitch, FrontMatterView, type ReaderApi, type SourceApi, loadMode, saveMode } from './MdViews'
 import { GAP, PAGE_H, type PageInfo, Pagination, pageAt, setPageless } from './pagination'
@@ -159,6 +160,8 @@ function WordCount({ editor, onClose }: { editor: Editor; onClose: () => void })
 
 export default function DocEditor(props: EditorProps) {
   const isMd = ['md', 'markdown'].includes(extOf(props.path))
+  const pathRef = useRef(props.path) // the tab's file can be renamed while it is open
+  pathRef.current = props.path
   const [zoom, setZoom] = useState(100)
   const [find, setFind] = useState<null | 'find' | 'replace'>(null)
   const [linkOpen, setLinkOpen] = useState(false)
@@ -228,6 +231,7 @@ export default function DocEditor(props: EditorProps) {
       Placeholder.configure({ placeholder: 'Type here, or ask an agent: gdocs append <file> --md "..."' }),
       AgentFlash,
       FindMatches,
+      CommentMarks.configure({ onOpen: id => focusThread(pathRef.current, id) }),
       Pagination.configure({ onPages: info => setPageInfo(info) })
     ],
     content: props.payload.kind === 'doc' ? props.payload.html : '',
@@ -254,6 +258,15 @@ export default function DocEditor(props: EditorProps) {
     },
     editorProps: { attributes: { spellcheck: 'true', class: 'doc-prose' } }
   })
+
+  // Highlight the text open comment threads quote.
+  const quoted = useQuotedThreads(props.path)
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    try {
+      editor.view.dispatch(editor.state.tr.setMeta(commentKey, { threads: quoted }).setMeta('addToHistory', false))
+    } catch { /* view not mounted yet */ }
+  }, [editor, quoted])
 
   useEffect(() => {
     if (editor) setHeads(outline(editor.state.doc))
@@ -382,6 +395,11 @@ export default function DocEditor(props: EditorProps) {
         else if (id === 'replace') setFind('replace')
         else if (id === 'selectAll') c.selectAll().run()
         else if (id === 'cut' || id === 'copy' || id === 'paste') document.execCommand(id)
+        else if (id === 'bold') c.toggleBold().run()
+        else if (id === 'italic') c.toggleItalic().run()
+        else if (id === 'underline') c.toggleUnderline().run()
+        else if (id === 'link') setLinkOpen(true)
+        else if (id === 'clearFormatting') c.unsetAllMarks().clearNodes().run()
       },
       menus: () => {
         const r = (fn: (c: ReturnType<Editor['chain']>) => ReturnType<Editor['chain']>) => () => fn(editor.chain().focus()).run()

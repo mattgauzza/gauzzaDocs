@@ -5,7 +5,8 @@
   "description": "A fast, Google Docs-style local editor for docs, sheets, PDFs and any text file, with a live CLI for agents",
   "main": "out/main/index.js",
   "bin": {
-    "gdocs": "dist/cli.mjs"
+    "gdocs": "dist/cli.mjs",
+    "gauzzadocs": "dist/cli.mjs"
   },
   "scripts": {
     "dev": "electron-vite dev",

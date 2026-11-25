@@ -7,7 +7,8 @@ const CSP =
   "font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' gdplugin: gdfile: blob: data:; object-src 'none'; base-uri 'none'"
 
 export default defineConfig({
-  main: { build: { externalizeDeps: true } },
+  // worker.ts runs file work off the main thread (src/main/work.ts).
+  main: { build: { externalizeDeps: true, rollupOptions: { input: { index: 'src/main/index.ts', worker: 'src/main/worker.ts' } } } },
   preload: {},
   renderer: {
     plugins: [

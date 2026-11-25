@@ -20,7 +20,8 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
   registry: DEFAULT_REGISTRY,
   textWrap: false,
-  fontSize: 14
+  fontSize: 14,
+  spellcheck: true
 }
 
 const readJson = <T>(file: string, fallback: T): T => {

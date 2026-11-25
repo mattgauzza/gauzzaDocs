@@ -102,6 +102,7 @@ export interface Settings {
   registry: string // plugin library URL (registry.json) or local folder
   textWrap: boolean
   fontSize: number
+  spellcheck?: boolean // check spelling in documents and prose files (default on)
 }
 
 export interface PluginManifest {

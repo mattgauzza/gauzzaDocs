@@ -59,6 +59,10 @@ export const api = {
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
   openDefaultApps: () => window.gd.call('openDefaultApps'),
+  agentsDetect: () => window.gd.call<{ id: string; label: string; detected: boolean; installed: boolean }[]>('agentsDetect'),
+  agentsInstall: (ids: string[]) => window.gd.call<{ id: string; label: string; detected: boolean; installed: boolean }[]>('agentsInstall', ids),
+  welcomed: () => window.gd.call<boolean>('welcomed'),
+  setWelcomed: () => window.gd.call('setWelcomed'),
   openUrl: (url: string) => window.gd.call('openUrl', url),
   quit: () => window.gd.call('quit')
 }

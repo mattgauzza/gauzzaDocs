@@ -1,6 +1,7 @@
 import { Extension, Node, mergeAttributes } from '@tiptap/core'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { searchDoc } from './live' // used only inside functions, so the import cycle with live.ts is harmless
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -128,6 +129,56 @@ export const AgentFlash = Extension.create({
           }
         },
         props: { decorations: state => flashKey.getState(state) }
+      })
+    ]
+  }
+})
+
+// ---------- comment highlights: the text each open thread quotes ----------
+export const commentKey = new PluginKey<{ threads: { id: string; quote: string }[]; deco: DecorationSet }>('commentMarks')
+
+/** Ranges for each quote: its first match in the document (the first line of a multi-line quote). */
+function commentDecos(doc: Parameters<typeof searchDoc>[0], threads: { id: string; quote: string }[]) {
+  const decos: Decoration[] = []
+  for (const t of threads) {
+    const q = t.quote.split('\n').map(s => s.trim()).find(Boolean)
+    if (!q) continue
+    const hit = searchDoc(doc, q.slice(0, 300))[0]
+    if (hit) decos.push(Decoration.inline(hit[0], hit[1], { class: 'comment-mark', 'data-thread': t.id }))
+  }
+  return DecorationSet.create(doc, decos)
+}
+
+/**
+ * Soft yellow marks on text that open comment threads quote, like Google Docs. Set meta { threads } on commentKey;
+ * marks follow edits and are found again when the text changes. Clicking one calls onOpen with the thread id.
+ */
+export const CommentMarks = Extension.create<{ onOpen: (id: string) => void }>({
+  name: 'commentMarks',
+  addOptions: () => ({ onOpen: () => {} }),
+  addProseMirrorPlugins() {
+    const onOpen = this.options.onOpen
+    return [
+      new Plugin<{ threads: { id: string; quote: string }[]; deco: DecorationSet }>({
+        key: commentKey,
+        state: {
+          init: () => ({ threads: [], deco: DecorationSet.empty }),
+          apply(tr, value) {
+            const meta = tr.getMeta(commentKey) as { threads: { id: string; quote: string }[] } | undefined
+            if (meta) return { threads: meta.threads, deco: commentDecos(tr.doc, meta.threads) }
+            if (!tr.docChanged || !value.threads.length) return value
+            return { threads: value.threads, deco: commentDecos(tr.doc, value.threads) }
+          }
+        },
+        props: {
+          decorations: state => commentKey.getState(state)?.deco,
+          handleClick: (_view, _pos, event) => {
+            const mark = (event.target as HTMLElement | null)?.closest?.('.comment-mark') as HTMLElement | null
+            const id = mark?.getAttribute('data-thread')
+            if (id) onOpen(id)
+            return false
+          }
+        }
       })
     ]
   }

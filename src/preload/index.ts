@@ -16,12 +16,14 @@ contextBridge.exposeInMainWorld('gd', {
     ipcRenderer.on(channel, h)
     return () => ipcRenderer.removeListener(channel, h)
   },
-  on: (channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'update', cb: (...a: any[]) => void) => {
+  on: (channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'update' | 'context-command', cb: (...a: any[]) => void) => {
     const h = (_e: unknown, ...a: any[]) => cb(...a)
     ipcRenderer.on(channel, h)
     return () => ipcRenderer.removeListener(channel, h)
   },
   tabs: (list: unknown[]) => ipcRenderer.send('tabs', list),
   changed: (file: string, info: Record<string, unknown> = {}) => ipcRenderer.send('changed', file, info),
+  /** Tells main what kind of editor a right-click landed in, just before the native menu is built. */
+  contextTarget: (kind: 'doc' | 'text' | 'other') => ipcRenderer.send('context-target', { kind }),
   pathFor: (file: File) => webUtils.getPathForFile(file)
 })

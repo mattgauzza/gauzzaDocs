@@ -2,6 +2,29 @@ import { useEffect, useRef, useState } from 'react'
 import { type Listener, type Thread, api, when } from '../lib'
 import { Icon } from './icons'
 
+/** Open threads that quote some text, for highlighting in the editor. Reloads whenever the file's threads change. */
+export function useQuotedThreads(path: string) {
+  const [threads, setThreads] = useState<{ id: string; quote: string }[]>([])
+  useEffect(() => {
+    let alive = true
+    const load = () =>
+      api.commentsList(path).then(
+        ts => alive && setThreads(ts.filter(t => !t.resolved && t.quote?.trim()).slice(0, 100).map(t => ({ id: t.id, quote: t.quote!.trim() }))),
+        () => {}
+      )
+    load()
+    const off = window.gd.on('comments-changed', (file: string) => file.toLowerCase() === path.toLowerCase() && load())
+    return () => {
+      alive = false
+      off()
+    }
+  }, [path])
+  return threads
+}
+
+/** Asks the shell to open the comments panel on one thread (clicking a highlight in the editor). */
+export const focusThread = (path: string, id: string) => window.dispatchEvent(new CustomEvent('gd-focus-thread', { detail: { path, id } }))
+
 /**
  * Comment threads beside the file, like Google Docs. Comments, replies and resolves made here are streamed to any
  * agent listening on the file (`gdocs listen`), and the agent's replies appear here as they arrive.
@@ -10,9 +33,11 @@ export function CommentsPanel(props: {
   path: string
   listeners: Listener[]
   draftQuote: string // the selection when "Add comment" was used
+  draftText?: string // text to start the new comment with (e.g. "@agent: ")
   onClose(): void
   onCount(n: number): void
   focusDraft: number // bumped to focus the new-comment box
+  focusThread?: { id: string; n: number } // bumped to scroll to and flash one thread
 }) {
   const [threads, setThreads] = useState<Thread[]>([])
   const [showResolved, setShowResolved] = useState(false)
@@ -38,8 +63,31 @@ export function CommentsPanel(props: {
   }, [props.path])
   useEffect(() => {
     setQuote(props.draftQuote)
-    if (props.focusDraft) setTimeout(() => box.current?.focus(), 0)
+    if (props.draftText) setDraft(props.draftText)
+    if (props.focusDraft)
+      setTimeout(() => {
+        const b = box.current
+        if (!b) return
+        b.focus()
+        b.setSelectionRange(b.value.length, b.value.length)
+      }, 0)
   }, [props.focusDraft])
+  // Clicking a highlight in the editor brings its thread into view.
+  const listRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const id = props.focusThread?.id
+    if (!id) return
+    if (threads.find(t => t.id === id)?.resolved) setShowResolved(true)
+    const t = setTimeout(() => {
+      const el = listRef.current?.querySelector(`[data-thread="${id}"]`) as HTMLElement | null
+      if (!el) return
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      el.classList.remove('focused')
+      void el.offsetWidth
+      el.classList.add('focused')
+    }, 60)
+    return () => clearTimeout(t)
+  }, [props.focusThread?.n, threads.length])
 
   const listening = props.listeners.filter(l => !l.path || l.path.toLowerCase() === props.path.toLowerCase())
   const add = async () => {
@@ -102,7 +150,7 @@ export function CommentsPanel(props: {
         )}
       </div>
 
-      <div className="cm-list">
+      <div className="cm-list" ref={listRef}>
         {!shown.length && <p className="muted small cm-empty">No comments yet. Select something and press Ctrl+Alt+M, or write above.</p>}
         {[...shown].reverse().map(t => (
           <ThreadCard key={t.id} t={t} path={props.path} fresh={fresh.current} onChange={load} />
@@ -131,7 +179,7 @@ function ThreadCard({ t, path, fresh, onChange }: { t: Thread; path: string; fre
     return true
   }
   return (
-    <div className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}`} onClick={() => setOpen(true)}>
+    <div data-thread={t.id} className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}`} onClick={() => setOpen(true)}>
       <div className="cm-head">
         <Avatar name={t.author} by={t.by} />
         <div className="grow">

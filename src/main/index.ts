@@ -2,19 +2,17 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
-import { createFile, loadFile, saveFile } from '../core/files'
 import { instructionsFor, renameInstructions, setDocInstructions, setGlobal } from '../core/instructions'
-import { findInFile, forgetIndex, indexFile, readLines } from '../core/large'
-import { runOffline } from '../core/ops'
 import {
-  PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
+  HOME, PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
 } from '../core/paths'
-import * as plugins from '../core/plugins'
 import { wrapHtml } from '../shared/convert'
 import { type Kind, OPEN_FILTERS, extOf, kindOf, stem } from '../shared/kinds'
-import type { AgentInfo, AgentOp, FilePayload } from '../shared/types'
+import type { AgentInfo, AgentOp, FilePayload, OpenFile } from '../shared/types'
 import * as comments from '../core/comments'
 import { type Bridge, startBridge } from './server'
+import { attachContextMenu, setupSpelling } from './contextMenu'
+import { stopWorker, warmUp, work } from './work'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
 
 app.setAppUserModelId('app.gauzzadocs.desktop')
@@ -82,7 +80,7 @@ async function newFilePath(kind: Kind, ext?: string, name?: string) {
   const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf' }[kind]
   const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled' }[kind]
   const file = freeName(s.docsDir, base, e)
-  await createFile(file)
+  await work('createFile', [file])
   return file
 }
 
@@ -135,7 +133,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         return { result, live: true }
       }
       if (op.op === 'save') return { result: { ok: true, note: 'not open; nothing to save' }, live: false }
-      return { result: await runOffline(file, op), live: false }
+      return { result: await work('runOffline', [file, op]), live: false }
     }
     default:
       throw new Error(`Unknown method "${method}"`)
@@ -178,6 +176,7 @@ function createWindow() {
     tabs = []
   })
   // Links in documents open in the browser, never inside the app.
+  attachContextMenu(win) // right-click menu with spelling suggestions (see contextMenu.ts)
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:|^mailto:/i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
@@ -222,18 +221,17 @@ const api: Record<string, (...a: any[]) => unknown> = {
       addRecent(p)
       return { path: p, kind: 'pdf', payload: { kind: 'pdf', bytes: new Uint8Array(0), url: fileUrl(p, st.mtimeMs) }, mtime: st.mtimeMs }
     }
-    const f = await loadFile(p)
+    const f = await work<OpenFile>('loadFile', [p])
     addRecent(f.path)
     return f
   },
   largeIndex: async (file: string) => {
-    const i = await indexFile(file, f => win?.webContents.send('large-progress', file, f))
-    return { lines: i.lines, size: i.size, crlf: i.crlf }
+    return work('largeIndex', [file], f => win?.webContents.send('large-progress', file, f))
   },
-  largeLines: (file: string, from: number, count: number) => readLines(file, from, count),
-  largeFind: (file: string, q: string, opts: { from?: number; limit?: number; regex?: boolean; ignoreCase?: boolean }) => findInFile(file, q, opts),
-  largeForget: (file: string) => forgetIndex(file),
-  save: (file: string, payload: FilePayload) => saveFile(file, payload),
+  largeLines: (file: string, from: number, count: number) => work('largeLines', [file, from, count]),
+  largeFind: (file: string, q: string, opts: { from?: number; limit?: number; regex?: boolean; ignoreCase?: boolean }) => work('largeFind', [file, q, opts]),
+  largeForget: (file: string) => work('largeForget', [file]),
+  save: (file: string, payload: FilePayload) => work<number>('saveFile', [file, payload]),
   newFile: (kind: Kind, ext?: string) => newFilePath(kind, ext),
   openDialog: async () => {
     const r = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], filters: OPEN_FILTERS })
@@ -257,7 +255,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
     })
     if (r.canceled || !r.filePath) return null
     if (format === 'pdf' && payload.kind !== 'pdf') fs.writeFileSync(r.filePath, await htmlToPdf(html || '', stem(file)))
-    else await saveFile(r.filePath, payload)
+    else await work('saveFile', [r.filePath, payload])
     return r.filePath
   },
   print: async (html: string, title: string) => {
@@ -308,15 +306,28 @@ const api: Record<string, (...a: any[]) => unknown> = {
     try { return fs.statSync(file).mtimeMs } catch { return 0 }
   },
   settings: () => getSettings(),
-  setSettings: (patch: Record<string, unknown>) => setSettings(patch),
+  setSettings: (patch: Record<string, unknown>) => {
+    const next = setSettings(patch)
+    if ('spellcheck' in patch) setupSpelling(next.spellcheck !== false) // View > Check spelling
+    return next
+  },
   reveal: (file: string) => shell.showItemInFolder(file),
   openExternal: (url: string) => (/^https?:/i.test(url) ? shell.openExternal(url) : undefined),
-  pluginsInstalled: () => plugins.installed(),
-  pluginsLibrary: () => plugins.library(BUNDLED_PLUGINS),
-  pluginsInstall: (id: string) => plugins.install(id, BUNDLED_PLUGINS),
-  pluginsUpdateAll: () => plugins.updateAll(BUNDLED_PLUGINS),
-  pluginsRemove: (id: string) => plugins.remove(id),
-  pluginsSetEnabled: (id: string, on: boolean) => plugins.setEnabled(id, on),
+  agentsDetect: () => work('agentsDetect'),
+  agentsInstall: (ids: string[]) => work('agentsInstall', [ids, app.getVersion()]),
+  agentsRemove: (ids: string[]) => work('agentsRemove', [ids]),
+  /** First run: the welcome screen shows until it has been closed once. */
+  welcomed: () => fs.existsSync(path.join(HOME, 'welcomed')),
+  setWelcomed: () => {
+    fs.mkdirSync(HOME, { recursive: true })
+    fs.writeFileSync(path.join(HOME, 'welcomed'), app.getVersion())
+  },
+  pluginsInstalled: () => work('pluginsInstalled'),
+  pluginsLibrary: () => work('pluginsLibrary', [BUNDLED_PLUGINS]),
+  pluginsInstall: (id: string) => work('pluginsInstall', [id, BUNDLED_PLUGINS]),
+  pluginsUpdateAll: () => work('pluginsUpdateAll', [BUNDLED_PLUGINS]),
+  pluginsRemove: (id: string) => work('pluginsRemove', [id]),
+  pluginsSetEnabled: (id: string, on: boolean) => work('pluginsSetEnabled', [id, on]),
   // Comments made in the window are the person's.
   commentsList: (file: string, all?: boolean) => comments.list(file, { all }),
   commentAdd: (file: string, c: { text: string; quote?: string; anchor?: comments.Thread['anchor'] }) => {
@@ -372,23 +383,36 @@ ipcMain.on('tabs', (_e, list: TabInfo[]) => {
 ipcMain.on('changed', (_e, file: string, info: Record<string, unknown>) => bridge?.emit({ type: 'changed', path: file, ...info }))
 
 // ---------- CLI launcher (installed copies only), like quickMail ----------
+/**
+ * Installed copies put the CLI on PATH: `gauzzadocs` always, and the short `gdocs` too unless another program already
+ * owns that name (a launcher we did not write is left alone; the long name still works). Rewritten on start so they
+ * follow app updates. Windows: the per-user WindowsApps folder, already on PATH. macOS/Linux: ~/.local/bin.
+ */
 function installCli() {
   if (!app.isPackaged || /[\\/]release[\\/]/i.test(process.execPath)) return
   const cli = path.join(app.getAppPath(), 'dist', 'cli.mjs')
-  try {
-    if (process.platform === 'win32') {
-      if (!process.env.LOCALAPPDATA) return
-      const file = path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'gdocs.cmd')
-      const body = `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "${cli}" %*\r\n`
-      if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== body) fs.writeFileSync(file, body)
-    } else if (!process.env.APPIMAGE) {
-      const bin = path.join(os.homedir(), '.local', 'bin')
-      const file = path.join(bin, 'gdocs')
-      const sh = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cli}" "$@"\n`
-      fs.mkdirSync(bin, { recursive: true })
-      if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== sh) fs.writeFileSync(file, sh, { mode: 0o755 })
-    }
-  } catch { /* no launcher; the app still works */ }
+  const ours = (text: string) => text.includes('ELECTRON_RUN_AS_NODE') && /gauzzadocs/i.test(text)
+  const put = (file: string, body: string, always: boolean, mode?: number) => {
+    try {
+      const cur = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null
+      if (cur === body) return
+      if (cur !== null && !always && !ours(cur)) return // someone else's gdocs: keep it
+      fs.writeFileSync(file, body, mode ? { mode } : undefined)
+    } catch { /* no launcher; the app still works */ }
+  }
+  if (process.platform === 'win32') {
+    if (!process.env.LOCALAPPDATA) return
+    const dir = path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps')
+    const body = `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "${cli}" %*\r\n`
+    put(path.join(dir, 'gauzzadocs.cmd'), body, true)
+    put(path.join(dir, 'gdocs.cmd'), body, false)
+  } else if (!process.env.APPIMAGE) {
+    const bin = path.join(os.homedir(), '.local', 'bin')
+    const sh = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cli}" "$@"\n`
+    try { fs.mkdirSync(bin, { recursive: true }) } catch { return }
+    put(path.join(bin, 'gauzzadocs'), sh, true, 0o755)
+    put(path.join(bin, 'gdocs'), sh, false, 0o755)
+  }
 }
 
 // ---------- startup ----------
@@ -445,6 +469,9 @@ else {
       )
     })
     fs.mkdirSync(getSettings().docsDir, { recursive: true })
+    warmUp()
+    if (app.isPackaged) work('agentsRefresh', [app.getVersion()]).catch(() => {}) // keep installed skills current
+    setupSpelling(getSettings().spellcheck !== false)
     bridge = await startBridge(rpc, list => win?.webContents.send('listeners', list))
     installCli()
     createWindow()
@@ -454,6 +481,7 @@ else {
   })
   app.on('before-quit', () => {
     forceQuit = true
+    stopWorker()
     bridge?.close()
   })
   app.on('window-all-closed', () => app.quit())

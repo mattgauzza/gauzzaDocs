@@ -40,7 +40,11 @@ signed with an Apple certificate, so run `xattr -cr /Applications/gauzzaDocs.app
 
 On Linux, install `gauzzaDocs-x.y.z-linux-amd64.deb` with `sudo apt install ./gauzzaDocs-*.deb`, or use the AppImage.
 
-The first time it starts, the app puts the `gdocs` command on your PATH. Nothing else needs installing.
+The first time it starts, the app puts the `gdocs` command on your PATH. If another program already uses that name,
+gauzzaDocs leaves it alone and you can use `gauzzadocs` instead. Nothing else needs installing.
+
+The first time you open the app it walks you through three optional steps. You can pick gauzzaDocs as the default app
+for your documents, connect your AI agents and set up your writing voice. It's under Help if you skip it.
 
 Updates are automatic on Windows and with the Linux AppImage. The app checks GitHub when it starts and every half hour,
 downloads new versions in the background and shows a green download button in the tab strip. Click it to restart into
@@ -72,6 +76,12 @@ Every command takes `--json`, and errors exit non zero with `{"error": "..."}`. 
 The tool talks to the app over 127.0.0.1 with a token stored in `~/.gauzzadocs/server.json`, so only programs running
 as you can use it. In the app, the Agent button at the top right of any file shows these commands and some prompts you
 can copy.
+
+### Connecting your agents
+
+`gdocs agents install` adds a gauzzaDocs skill to Claude Code, Codex, GitHub Copilot CLI and Gemini CLI if they're on
+your PC. The skill tells the agent how to use `gdocs`, to check your standing instructions first and how to answer
+your comments. `gdocs agents` shows which ones are connected and `gdocs agents remove` takes it back out.
 
 ### Comments and edits stream back to the agent
 
@@ -146,7 +156,8 @@ endings, encoding, size on disk and whether everything is saved.
 
 ## Memory use
 
-The app only loads what you're using. Each editor loads the first time you open that kind of file, so if you never
+Opening, saving and converting files happens on a background thread, so a big Word file or a huge log never freezes
+the window. The app only loads what you're using. Each editor loads the first time you open that kind of file, so if you never
 open a PDF the PDF code never loads.
 
 Tabs you aren't using go to sleep once they're saved. The tab you're on and the last two you used stay loaded, and the

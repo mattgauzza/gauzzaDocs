@@ -3,7 +3,9 @@ import path from 'node:path'
 import { Command } from 'commander'
 import { createFile, loadFile } from '../core/files'
 import { HOME, freeName, getRecent, getSettings, readServer } from '../core/paths'
+import { type AgentTarget, detectAgents, installSkills, removeSkills } from '../core/agentSkills'
 import { getGlobal, instructionsFor, setDocInstructions, setGlobal } from '../core/instructions'
+import pkg from '../../package.json'
 import * as plugins from '../core/plugins'
 import { checkPlugin, scaffold } from '../../scripts/plugin-check.mjs'
 import { type Kind, kindOf, languageOf } from '../shared/kinds'
@@ -357,6 +359,25 @@ program
     const doc = here ? path.join(here, '..', 'src', 'shared', 'ops.md') : ''
     console.log(doc && fs.existsSync(doc) ? fs.readFileSync(doc, 'utf8') : 'See src/shared/ops.md in the gauzzaDocs repository.')
   })
+
+// ---------- teaching AI agents to use gauzzaDocs ----------
+const ag = program.command('agents').description('install the gauzzaDocs skill into AI agents (Claude Code, Codex, Copilot CLI, Gemini CLI)')
+const showAgents = (list: AgentTarget[]) =>
+  list.map(a => `${a.installed ? '✓' : a.detected ? '·' : ' '} ${a.id.padEnd(8)} ${a.label.padEnd(20)} ${a.installed ? 'skill installed' : a.detected ? 'found, not installed' : 'not found'}`).join('\n')
+ag.command('list', { isDefault: true }).description('which agents are on this PC and which have the skill').action(() => {
+  const r = detectAgents()
+  out(r, () => `${showAgents(r)}\n\nInstall with: gdocs agents install (all agents found) or gdocs agents install claude codex`)
+})
+ag.command('install [ids...]').description('install or update the skill: agent ids (claude codex copilot gemini), "all", or none for every agent found')
+  .action((ids: string[]) => {
+    const pick = !ids.length ? 'detected' : ids.includes('all') ? 'all' : (ids as AgentTarget['id'][])
+    const r = installSkills(pick, pkg.version)
+    out(r, () => (r.length ? `${showAgents(r)}\n\nAgents load it next time they start.` : 'No agents found. Name one: gdocs agents install claude'))
+  })
+ag.command('remove [ids...]').description('remove the skill (all agents when no ids)').action((ids: string[]) => {
+  const r = removeSkills(ids.length ? (ids as AgentTarget['id'][]) : 'all')
+  out(r, () => showAgents(r))
+})
 
 program
   .command('instructions [file]')

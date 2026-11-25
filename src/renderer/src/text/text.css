@@ -8,3 +8,4 @@
 .text-host .cm-textfield { background: var(--surface); border: 1px solid var(--line); color: var(--text); }
 .text-host .cm-button { background: var(--surface); background-image: none; border: 1px solid var(--line); color: var(--text); }
 .text-status { display: flex; align-items: center; gap: 18px; height: 24px; padding: 0 14px; flex: none; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line-soft); background: var(--bg); white-space: nowrap; overflow: hidden; }
+

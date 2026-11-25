@@ -253,3 +253,16 @@ textarea.instructions { min-height: 110px; padding: 10px 12px; border: 1px solid
 .strip-btn.update { color: #34a853; }
 .strip-btn.heart:hover { color: #e8457a; }
 .form .row-setting { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+
+/* ---------- first-run setup ---------- */
+.ob { display: flex; flex-direction: column; gap: 18px; }
+.ob-hero { display: flex; align-items: center; gap: 16px; }
+.ob-hero p { margin: 0; color: var(--muted); }
+.ob-step { display: flex; gap: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+.ob-step h3 { margin: 0 0 4px; font-size: 15px; font-weight: 500; }
+.ob-step p { margin: 0 0 10px; font-size: 13px; line-height: 1.5; }
+.ob-num { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 600; flex: none; }
+.ob-agents { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+.ob-agent { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--toolbar); font-size: 13px; cursor: pointer; }
+.ob-agent.missing { opacity: .6; }
+.ob-row { display: flex; align-items: center; gap: 12px; }

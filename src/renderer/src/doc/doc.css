@@ -209,3 +209,4 @@
 :root[data-theme='dark'] .md-reader :is(.hljs-number, .hljs-literal, .hljs-variable, .hljs-attr, .hljs-symbol) { color: #79c0ff; }
 :root[data-theme='dark'] .md-reader :is(.hljs-title, .hljs-section, .hljs-name) { color: #d2a8ff; }
 :root[data-theme='dark'] .md-reader :is(.hljs-type) { color: #ffa657; }
+

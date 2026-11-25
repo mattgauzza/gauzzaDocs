@@ -1,0 +1,163 @@
+import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+/**
+ * Teaches AI coding agents to use gauzzaDocs: one skill (SKILL.md) installed where each agent looks for global skills.
+ * Paths match the ones Empirical's installer uses for the same agents:
+ *   Claude Code     ~/.claude/skills/gauzzadocs/SKILL.md
+ *   Codex (+ other agents that read ~/.agents)  ~/.agents/skills/gauzzadocs/SKILL.md
+ *   GitHub Copilot  ~/.copilot/skills/gauzzadocs/SKILL.md
+ *   Gemini CLI      ~/.gemini/extensions/gauzzadocs/ (gemini-extension.json + GEMINI.md)
+ * Files we write carry a marker line, so updates rewrite them and removal never touches anything else.
+ */
+export const SKILL_NAME = 'gauzzadocs'
+const MARKER = 'installed-by: gauzzaDocs'
+
+export interface AgentTarget {
+  id: 'claude' | 'codex' | 'copilot' | 'gemini'
+  label: string
+  configDir: string
+  detected: boolean // the agent's folder exists or its command is on PATH
+  installed: boolean
+  files: string[]
+}
+
+const home = () => os.homedir()
+
+function onPath(cmd: string) {
+  try {
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], { stdio: 'ignore', timeout: 3000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const TARGETS: { id: AgentTarget['id']; label: string; dir: () => string; cmd: string; files: () => string[] }[] = [
+  { id: 'claude', label: 'Claude Code', dir: () => path.join(home(), '.claude'), cmd: 'claude', files: () => [path.join(home(), '.claude', 'skills', SKILL_NAME, 'SKILL.md')] },
+  { id: 'codex', label: 'Codex', dir: () => path.join(home(), '.codex'), cmd: 'codex', files: () => [path.join(home(), '.agents', 'skills', SKILL_NAME, 'SKILL.md')] },
+  { id: 'copilot', label: 'GitHub Copilot CLI', dir: () => path.join(home(), '.copilot'), cmd: 'copilot', files: () => [path.join(home(), '.copilot', 'skills', SKILL_NAME, 'SKILL.md')] },
+  {
+    id: 'gemini',
+    label: 'Gemini CLI',
+    dir: () => path.join(home(), '.gemini'),
+    cmd: 'gemini',
+    files: () => [path.join(home(), '.gemini', 'extensions', SKILL_NAME, 'gemini-extension.json'), path.join(home(), '.gemini', 'extensions', SKILL_NAME, 'GEMINI.md')]
+  }
+]
+
+const isOurs = (file: string) => {
+  try {
+    return fs.readFileSync(file, 'utf8').includes(MARKER) || file.endsWith('gemini-extension.json')
+  } catch {
+    return false
+  }
+}
+
+export function detectAgents(opts: { checkPath?: boolean } = {}): AgentTarget[] {
+  return TARGETS.map(t => {
+    const files = t.files()
+    return {
+      id: t.id,
+      label: t.label,
+      configDir: t.dir(),
+      detected: fs.existsSync(t.dir()) || (opts.checkPath !== false && onPath(t.cmd)),
+      installed: files.every(f => fs.existsSync(f)) && isOurs(files[files.length - 1]),
+      files
+    }
+  })
+}
+
+/** The skill itself. Agents read the front matter to decide when to load it. */
+export function skillText(version: string) {
+  return `---
+name: ${SKILL_NAME}
+description: Use when reading, writing or editing the person's documents, spreadsheets, PDFs, Markdown or text files with gauzzaDocs (the gdocs command), when they say a file is open in gauzzaDocs, ask you to work on a doc with them, or mention comments in a doc. Edits land live in the open editor while they watch, and their comments and edits stream back to you.
+---
+<!-- ${MARKER} ${version}. Reinstalled by the app on update; edit a copy under a different name to customise. -->
+
+# gauzzaDocs
+
+gauzzaDocs is the person's local editor for documents (.docx .md .html), spreadsheets (.xlsx .csv .tsv), PDFs and
+any text or code file. The \`gdocs\` command (also \`gauzzadocs\`, if \`gdocs\` is taken on this machine) reads and edits
+them. When the app is running and the file is open, your edits go into the open editor: the person watches them
+happen and can undo them. Otherwise the file on disk is edited.
+
+## Before you edit
+
+1. \`gdocs instructions <file>\` prints standing instructions from the person (for every file and for this file).
+   Follow them. They may tell you to look up their writing voice before you write in their name.
+2. \`gdocs status\` shows whether the app is running and which files are open.
+3. Read with \`gdocs read <file>\`: documents come back as Markdown, spreadsheets as CSV, PDFs as text.
+   \`--json\` on any command gives machine-readable output; errors exit non-zero with {"error": "..."}.
+
+## Editing
+
+Prefer small, targeted edits over rewriting a whole file, so the person's formatting survives:
+
+\`\`\`
+gdocs replace report.md "old text" "new text" [--all]
+gdocs doc insert report.md --after "Heading or text" --md "New paragraph"
+gdocs append report.md - --live          # content from stdin; --live opens it so they can watch
+gdocs sheet set budget.xlsx B7 "=SUM(B2:B6)"
+gdocs sheet set-range budget.xlsx A1 --values '[["Item","Cost"],["Desk",300]]'
+gdocs pdf highlight contract.pdf --page 2 --x 72 --y 140 --w 300 --h 14
+gdocs write notes.md - --format md       # whole-file replace, only when asked
+\`\`\`
+
+\`gdocs --help\`, \`gdocs <command> --help\` and \`gdocs ops\` list everything.
+
+## Working together through comments
+
+The person can comment on any selection or edit the file while you work. To hear them:
+
+\`\`\`
+gdocs listen <file> --once      # waits for their next comment, reply or edit, then exits; replays threads you missed
+gdocs comments <file> --waiting # threads still waiting for your answer
+gdocs reply <file> <id> "Done: moved it under Risks." --resolve
+gdocs comment <file> "Should this be a table?" --quote "Q4 numbers"
+\`\`\`
+
+When they ask you to work on a doc with them, loop: \`listen --once\`, do what the comment asks with small edits,
+reply in the thread (resolve it when it is done), then listen again until they tell you to stop. Comments that start
+with "@agent:" (Rewrite, Make shorter, Fix grammar, Explain) are requests about the quoted text. Your own edits and
+replies are never sent back to you.
+`
+}
+
+const extensionJson = (version: string) =>
+  JSON.stringify({ name: SKILL_NAME, version, description: 'Use gauzzaDocs (gdocs) to edit the person\'s documents live', contextFileName: 'GEMINI.md' }, null, 2) + '\n'
+
+export function installSkills(ids: AgentTarget['id'][] | 'all' | 'detected', version: string) {
+  const all = detectAgents()
+  const pick = ids === 'all' ? all : ids === 'detected' ? all.filter(a => a.detected) : all.filter(a => ids.includes(a.id))
+  for (const a of pick) {
+    for (const f of a.files) {
+      fs.mkdirSync(path.dirname(f), { recursive: true })
+      fs.writeFileSync(f, f.endsWith('.json') ? extensionJson(version) : skillText(version))
+    }
+  }
+  return detectAgents({ checkPath: false }).filter(a => pick.some(p => p.id === a.id))
+}
+
+export function removeSkills(ids: AgentTarget['id'][] | 'all') {
+  const all = detectAgents({ checkPath: false })
+  const pick = ids === 'all' ? all : all.filter(a => ids.includes(a.id))
+  for (const a of pick) {
+    const ours = a.files.filter(isOurs)
+    if (!ours.length) continue
+    for (const f of ours) fs.rmSync(f, { force: true })
+    try {
+      fs.rmdirSync(path.dirname(a.files[0])) // the skill folder, only if now empty
+    } catch { /* not empty or gone */ }
+  }
+  return detectAgents({ checkPath: false }).filter(a => pick.some(p => p.id === a.id))
+}
+
+/** On app start: bring already-installed skills up to this version (never installs new ones). */
+export function refreshInstalledSkills(version: string) {
+  const stale = detectAgents({ checkPath: false }).filter(a => a.installed && !fs.readFileSync(a.files[a.files.length - 1], 'utf8').includes(`${MARKER} ${version}`))
+  if (stale.length) installSkills(stale.map(a => a.id), version)
+}
