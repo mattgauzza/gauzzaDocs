@@ -1,5 +1,6 @@
 import type { Hunk } from '../../../shared/diff'
 import type { Author } from '../../../shared/types'
+import { describeOps } from '../../../shared/history/describe'
 
 /**
  * Pure helpers for the version history panel (History.tsx) and the per-tab authors in App.tsx: grouping by day,
@@ -91,31 +92,14 @@ export function statsText({ added, removed }: { added: number; removed: number }
 }
 
 // ---------- who changed it ----------
-/** An agent op name as words: "replaceText" becomes "replace text". */
-export const opWords = (op: string) =>
-  op
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/[._-]+/g, ' ')
-    .trim()
-    .toLowerCase()
-
-/** What a save's agent ops did, in order, counted: "replace (2), append". Undefined when there were none (the store then says "Edited"). */
-export function opsSummary(ops: string[], most = 4): string | undefined {
-  if (!ops.length) return undefined
-  const counts = new Map<string, number>()
-  for (const op of ops) {
-    const w = opWords(op)
-    if (w) counts.set(w, (counts.get(w) || 0) + 1)
-  }
-  if (!counts.size) return undefined
-  const parts = [...counts].map(([w, k]) => (k > 1 ? `${w} (${k})` : w))
-  return parts.length > most ? `${parts.slice(0, most).join(', ')} and ${parts.length - most} more` : parts.join(', ')
-}
-
-/** The ctx a save passes: who changed the tab since its last save, and the agent ops' summary. Undefined when nobody did (main then credits the person). */
-export function saveContext(authors: Author[], ops: string[]): { authors: Author[]; summary?: string } | undefined {
+/**
+ * The ctx a save passes: who changed the tab since its last save, and what its agent ops did in plain words
+ * (src/shared/history/describe.ts). Undefined when nobody did (main then credits the person). With no agent ops the
+ * summary is left out and the store says "Edited".
+ */
+export function saveContext(authors: Author[], ops: string[], kind?: string): { authors: Author[]; summary?: string } | undefined {
   if (!authors.length) return undefined
-  const summary = opsSummary(ops)
+  const summary = describeOps(ops, kind)
   return summary ? { authors, summary } : { authors }
 }
 
@@ -131,12 +115,13 @@ const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
  * A work history event as a line: the names to show (a save by several authors lists each) and what they did.
  * `named` is false when the text already says who (changes made outside gauzzaDocs).
  */
-export function eventLine(e: { type: string; by: string; summary: string }): { names: string[]; text: string; named: boolean } {
+export function eventLine(e: { type: string; by: string; summary: string }, kind?: string): { names: string[]; text: string; named: boolean } {
   const names = e.by.split(', ').filter(Boolean)
   if (e.type === 'outside' || e.by === OUTSIDE) return { names: [OUTSIDE], text: cap(e.summary), named: false }
   if (e.type === 'agent-op') {
     const many = /^(\d+) edits$/.exec(e.summary)
-    return { names, text: many ? `made ${many[1]} edits` : `made an edit (${opWords(e.summary)})`, named: true }
+    const said = describeOps([e.summary], kind) // the log keeps the op's name
+    return { names, text: many ? `made ${many[1]} edits` : said.charAt(0).toLowerCase() + said.slice(1), named: true }
   }
   return { names, text: e.summary, named: true }
 }

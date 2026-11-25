@@ -3,7 +3,7 @@ interface GdBridge {
   platform: string
   call<T = any>(method: string, ...args: unknown[]): Promise<T>
   serve(channel: 'agent' | 'open' | 'close' | 'snapshot' | 'look-prepare' | 'look-shot' | 'history-restore', handler: (req: any) => Promise<unknown>): () => void
-  on(channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'agents-state' | 'update' | 'context-command' | 'folder-changed' | 'history-paused', cb: (...a: any[]) => void): () => void
+  on(channel: 'confirm-quit' | 'large-progress' | 'comments-changed' | 'listeners' | 'agents-state' | 'update' | 'context-command' | 'folder-changed' | 'history-paused' | 'history-changed', cb: (...a: any[]) => void): () => void
   tabs(list: unknown[]): void
   changed(file: string, info?: Record<string, unknown>): void
   contextTarget(kind: 'doc' | 'text' | 'other'): void

@@ -8,6 +8,7 @@ import {
   HOME, PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
 } from '../core/paths'
 import { wrapHtml } from '../shared/convert'
+import { describeOps } from '../shared/history/describe'
 import { type Kind, OPEN_FILTERS, extOf, kindOf, stem } from '../shared/kinds'
 import type { AgentInfo, AgentOp, FilePayload, OpenFile } from '../shared/types'
 import * as comments from '../core/comments'
@@ -208,7 +209,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       }
       if (op.op === 'save') return { result: { ok: true, note: 'not open; nothing to save' }, live: false }
       // The version this edit keeps is credited to the agent.
-      const offline = await work('runOffline', [file, op, { ...asAgent(agent), summary: op.op }])
+      const offline = await work('runOffline', [file, op, { ...asAgent(agent), summary: describeOps([op.op], kindOf(file)) }])
       // Other agents hear about edits made on disk too (live edits are diffed by the window instead).
       if (!READ_ONLY_OPS.has(op.op)) bridge?.emit({ type: 'edit', by: 'agent', author: agent.name, path: file, summary: `${op.op} (on disk)` })
       if (edits) logHistory(file, 'agent-op', agent.name, op.op)
@@ -274,9 +275,13 @@ const clip = (s: string, n = 80) => {
   return t.length > n ? `${t.slice(0, n - 3)}...` : t
 }
 
-/** A work history event. Main hears about these first; the worker, the app's one history writer, keeps them. */
+/**
+ * A work history event. Main hears about these first; the worker, the app's one history writer, keeps them. Once
+ * kept, the window hears 'history-changed' so an open version history panel shows it.
+ */
 function logHistory(file: string, type: HistoryEventType, by: string, summary: string, at = Date.now()) {
-  work('historyEvent', [path.resolve(file), { at, type, by, summary }]).catch(() => {})
+  const p = path.resolve(file)
+  work('historyEvent', [p, { at, type, by, summary }]).then(() => win?.webContents.send('history-changed', p), () => {})
 }
 
 /** A rename in the app takes the version history of the file (or of every file in the folder) with it, credited to the person. Never fails the rename. */
@@ -438,8 +443,12 @@ const api: Record<string, (...a: any[]) => unknown> = {
   historyList: (file: string) => work('historyList', [file]),
   historyLog: (file: string) => work('historyLog', [file]),
   historyDiff: (file: string, a: number, b?: number) => work('historyDiff', [file, a, b]),
-  /** opts: { unsavedPayload?, discardCurrent?, authors? }; authors default to the person. */
-  historyRestore: (file: string, n: number, opts: { unsavedPayload?: FilePayload; discardCurrent?: boolean; authors?: WriteContext['authors'] } = {}) =>
+  /** opts: { unsavedPayload?, unsavedAuthors?, discardCurrent?, authors? }; authors (who asks) default to the person; unsavedAuthors (who made the unsaved edits) to authors. */
+  historyRestore: (
+    file: string,
+    n: number,
+    opts: { unsavedPayload?: FilePayload; unsavedAuthors?: WriteContext['authors']; discardCurrent?: boolean; authors?: WriteContext['authors'] } = {}
+  ) =>
     work('historyRestore', [file, n, { ...opts, authors: opts.authors?.length ? opts.authors : person().authors }]),
   historyName: (file: string, n: number, name: string) => work('historyName', [file, n, name, userName()]),
   historyForget: (file: string) => work('historyForget', [file]),

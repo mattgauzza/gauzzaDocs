@@ -133,15 +133,19 @@ export const historyJobs: Record<string, Job> = {
     }
     return compareVersions(file, await showVersion(file, na), now)
   },
-  /** opts: { unsavedPayload?, discardCurrent?, authors } (unsaved editor content arrives as a payload and is turned into bytes here). */
+  /**
+   * opts: { unsavedPayload?, unsavedAuthors?, discardCurrent?, authors } (unsaved editor content arrives as a payload
+   * and is turned into bytes here; unsavedAuthors made it, authors asked for the restore).
+   */
   historyRestore: async ([file, n, opts]) => {
-    const o = (opts ?? {}) as { unsavedPayload?: FilePayload; discardCurrent?: boolean; authors?: Author[] }
+    const o = (opts ?? {}) as { unsavedPayload?: FilePayload; unsavedAuthors?: Author[]; discardCurrent?: boolean; authors?: Author[] }
     if (!Array.isArray(o.authors) || !o.authors.length) throw new Error('A restore needs to say who asked for it (authors).')
     const p = path.resolve(file)
     const v = versionNo(n)
     let unsaved = o.unsavedPayload ? await payloadBytes(p, o.unsavedPayload) : undefined
     if (unsaved && unsaved.length === 0 && o.unsavedPayload?.kind === 'pdf') unsaved = undefined // a PDF streamed from disk holds no bytes of its own
-    return onQueue(p, () => restoreVersion(p, v, { authors: o.authors!, unsaved, discardCurrent: !!o.discardCurrent }))
+    const unsavedAuthors = Array.isArray(o.unsavedAuthors) && o.unsavedAuthors.length ? o.unsavedAuthors : undefined
+    return onQueue(p, () => restoreVersion(p, v, { authors: o.authors!, unsaved, unsavedAuthors, discardCurrent: !!o.discardCurrent }))
   },
   historyName: ([file, n, name, by]) => {
     if (typeof by !== 'string' || !by) throw new Error('Naming a version needs to say who named it.')

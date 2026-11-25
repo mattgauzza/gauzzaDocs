@@ -42,10 +42,11 @@ const writeJson = (file: string, data: unknown) => {
 }
 
 export const getSettings = (): Settings => ({ ...DEFAULT_SETTINGS, ...readJson<Partial<Settings>>(SETTINGS_FILE, {}) })
+/** Saves only what was set (the file plus this patch), so a setting nobody changed keeps following the app's default. */
 export function setSettings(patch: Partial<Settings>): Settings {
-  const next = { ...getSettings(), ...patch }
-  writeJson(SETTINGS_FILE, next)
-  return next
+  const saved = { ...readJson<Partial<Settings>>(SETTINGS_FILE, {}), ...patch }
+  writeJson(SETTINGS_FILE, saved)
+  return { ...DEFAULT_SETTINGS, ...saved }
 }
 
 export const norm = (p: string) => path.resolve(p)

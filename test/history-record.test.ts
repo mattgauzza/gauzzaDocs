@@ -12,7 +12,7 @@ process.env.GAUZZADOCS_LARGE_MB = '1'
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gd-rec-work-'))
 
 const h = await import('../src/core/history/index')
-const { guardedWrite, checkOutside, listVersions, flushHistory, onHistoryPaused, historyHooks, recordVersion, markBeforeRestore, writeAtomic, withLock, historyKey, HISTORY_DIR } = h
+const { guardedWrite, checkOutside, listVersions, flushHistory, onHistoryPaused, historyHooks, recordVersion, markBeforeRestore, writeAtomic, withLock, historyKey, HISTORY_DIR, pauseReasonText } = h
 
 const MIN = 60_000
 const agent = (name: string) => ({ authors: [{ name, by: 'agent' as const }] })
@@ -397,7 +397,21 @@ test('a history failure (store unavailable) still writes the file and reports pa
     assert.equal(fs.readFileSync(f, 'utf8'), 'saved twice')
     assert.equal(st.size, 'still saved'.length)
     assert.equal(reasons.length, 1)
+    assert.doesNotMatch(reasons[0], /^E[A-Z]+:/, 'the reason is a sentence, not a raw Node error')
+    assert.ok(reasons[0].includes(HISTORY_DIR), reasons[0])
   } finally {
     fs.rmSync(HISTORY_DIR, { force: true })
   }
+})
+
+test('pauseReasonText puts file system errors in plain words', () => {
+  const err = (code: string) => Object.assign(new Error(`${code}: raw message`), { code })
+  assert.equal(pauseReasonText(err('ENOSPC')), 'the disk is full')
+  assert.equal(pauseReasonText(err('EROFS')), 'the disk is read-only')
+  assert.equal(pauseReasonText(err('EACCES')), `gauzzaDocs can't write to ${HISTORY_DIR}`)
+  assert.equal(pauseReasonText(err('EPERM')), `gauzzaDocs can't write to ${HISTORY_DIR}`)
+  assert.equal(pauseReasonText(err('ENOTDIR')), `gauzzaDocs can't make its folders in ${HISTORY_DIR}: a file is in the way`)
+  assert.equal(pauseReasonText(err('EIO')), `gauzzaDocs can't write to ${HISTORY_DIR} (EIO)`)
+  assert.equal(pauseReasonText(new Error('Timed out waiting for the history lock (abc)')), 'Timed out waiting for the history lock (abc)')
+  assert.equal(pauseReasonText('already a sentence'), 'already a sentence')
 })

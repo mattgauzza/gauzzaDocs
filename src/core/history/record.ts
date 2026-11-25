@@ -6,6 +6,7 @@ import { samePath } from '../paths'
 import { appendEventLocked, type HistoryEvent } from './log'
 import { enqueue, idle } from './queue'
 import {
+  HISTORY_DIR,
   canonicalPath,
   historyKey,
   indexPath,
@@ -39,7 +40,28 @@ let pausedCb: ((reason: string) => void) | null = null
 let pausedReported = false
 let pausedReason: string | null = null
 
-const reasonOf = (e: unknown) => (e instanceof Error ? e.message : String(e))
+/**
+ * Why history paused, as a plain sentence: the app shows it after "Version history paused: " (a toast, and in
+ * Settings). File system errors say what is wrong in words; our own errors (and reasons replayed from earlier) are
+ * already sentences and pass through.
+ */
+export function pauseReasonText(e: unknown): string {
+  const code = typeof (e as NodeJS.ErrnoException)?.code === 'string' ? (e as NodeJS.ErrnoException).code! : ''
+  switch (code) {
+    case 'ENOSPC':
+      return 'the disk is full'
+    case 'EROFS':
+      return 'the disk is read-only'
+    case 'EACCES':
+    case 'EPERM':
+      return `gauzzaDocs can't write to ${HISTORY_DIR}`
+    case 'ENOTDIR':
+      return `gauzzaDocs can't make its folders in ${HISTORY_DIR}: a file is in the way`
+  }
+  if (code) return `gauzzaDocs can't write to ${HISTORY_DIR} (${code})`
+  return e instanceof Error ? e.message : String(e)
+}
+const reasonOf = pauseReasonText
 function pause(e: unknown) {
   if (pausedReported) return
   const reason = reasonOf(e)

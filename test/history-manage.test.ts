@@ -98,6 +98,26 @@ test('restore keeps unsaved editor content as a version first, without writing i
   assert.notDeepEqual(onDisk, unsaved)
 })
 
+test('restore credits unsaved content to unsavedAuthors and the restore to authors', async () => {
+  const f = fresh('who.md')
+  fs.writeFileSync(f, 'original')
+  await save(f, Buffer.from('saved by Claude'))
+  await restoreVersion(f, 1, { authors: [{ name: 'Claude', by: 'agent' }], unsaved: Buffer.from('typed by Matt'), unsavedAuthors: [{ name: 'Matt', by: 'person' }] })
+  const list = listVersions(f)
+  const kept = list.find(v => v.beforeRestore)!
+  const restored = list[list.length - 1]
+  assert.equal(Buffer.from(await showVersion(f, kept.n)).toString(), 'typed by Matt')
+  assert.deepEqual(kept.authors, [{ name: 'Matt', by: 'person' }])
+  assert.equal(restored.restoredFrom, 1)
+  assert.deepEqual(restored.authors, [{ name: 'Claude', by: 'agent' }])
+  // without unsavedAuthors the unsaved content falls back to the one restoring
+  const g = fresh('who2.md')
+  fs.writeFileSync(g, 'original')
+  await save(g, Buffer.from('saved'))
+  await restoreVersion(g, 1, { ...matt, unsaved: Buffer.from('typed') })
+  assert.deepEqual(listVersions(g).find(v => v.beforeRestore)!.authors, matt.authors)
+})
+
 for (const ext of ['md', 'html']) {
   test(`restore keeps the current standing instructions in .${ext}`, async () => {
     const f = fresh(`i.${ext}`)

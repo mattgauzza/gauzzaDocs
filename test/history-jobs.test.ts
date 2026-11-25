@@ -79,6 +79,14 @@ test('historyRestore turns an unsaved payload into bytes and keeps it before res
   assert.deepEqual(list.at(-1)!.authors, matt)
 })
 
+test('historyRestore credits the unsaved payload to unsavedAuthors, the restore to authors', async () => {
+  const f = await twoVersions()
+  await jobs.historyRestore([f, 1, { unsavedPayload: text('typed by Matt'), unsavedAuthors: matt, authors: claude.authors }])
+  const list = listVersions(f)
+  assert.deepEqual(list.at(-2)!.authors, matt)
+  assert.deepEqual(list.at(-1)!.authors, claude.authors)
+})
+
 test('historyRestore needs authors and a real version number', async () => {
   const f = await twoVersions()
   await assert.rejects(Promise.resolve().then(() => jobs.historyRestore([f, 1, {}])), /authors/)

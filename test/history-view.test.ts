@@ -9,8 +9,6 @@ import {
   groupByDay,
   mb,
   sizeText,
-  opWords,
-  opsSummary,
   saveContext,
   statsText,
   whoIs,
@@ -109,26 +107,12 @@ test('diffStats and statsText count lines in plain words', () => {
   assert.equal(statsText({ added: 0, removed: 0 }), '')
 })
 
-test('opWords turns op names into words', () => {
-  assert.equal(opWords('replaceText'), 'replace text')
-  assert.equal(opWords('replace'), 'replace')
-  assert.equal(opWords('insertRowAbove'), 'insert row above')
-  assert.equal(opWords('sheet.set'), 'sheet set')
-})
-
-test('opsSummary counts repeats in order and caps the list without an Oxford comma', () => {
-  assert.equal(opsSummary([]), undefined)
-  assert.equal(opsSummary(['replace']), 'replace')
-  assert.equal(opsSummary(['replace', 'append', 'replace']), 'replace (2), append')
-  assert.equal(opsSummary(['a', 'b', 'c', 'd', 'e', 'f']), 'a, b, c, d and 2 more')
-})
-
 test('saveContext: nobody is undefined; the person alone has no summary; agent ops give one', () => {
   const matt = { name: 'Matt', by: 'person' as const }
   const claude = { name: 'Claude', by: 'agent' as const }
   assert.equal(saveContext([], ['replace']), undefined)
   assert.deepEqual(saveContext([matt], []), { authors: [matt] })
-  assert.deepEqual(saveContext([matt, claude], ['replace', 'replace']), { authors: [matt, claude], summary: 'replace (2)' })
+  assert.deepEqual(saveContext([matt, claude], ['replace', 'replace', 'set'], 'sheet'), { authors: [matt, claude], summary: 'Replaced text and changed cells' })
 })
 
 test('whoIs tells the person, agents and outside changes apart', () => {
@@ -140,7 +124,8 @@ test('whoIs tells the person, agents and outside changes apart', () => {
 
 test('eventLine words each kind of event', () => {
   assert.deepEqual(eventLine({ type: 'save', by: 'Matt, Claude', summary: 'saved v4' }), { names: ['Matt', 'Claude'], text: 'saved v4', named: true })
-  assert.deepEqual(eventLine({ type: 'agent-op', by: 'Claude', summary: 'replace' }), { names: ['Claude'], text: 'made an edit (replace)', named: true })
+  assert.deepEqual(eventLine({ type: 'agent-op', by: 'Claude', summary: 'replace' }), { names: ['Claude'], text: 'replaced text', named: true })
+  assert.equal(eventLine({ type: 'agent-op', by: 'Claude', summary: 'merge' }, 'pdf').text, 'added pages from other PDFs')
   assert.deepEqual(eventLine({ type: 'agent-op', by: 'Claude', summary: '3 edits' }), { names: ['Claude'], text: 'made 3 edits', named: true })
   assert.deepEqual(eventLine({ type: 'outside', by: OUTSIDE, summary: 'changed outside gauzzaDocs, kept as v2' }), {
     names: [OUTSIDE],

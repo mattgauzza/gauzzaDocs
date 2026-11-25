@@ -11,6 +11,7 @@ export {
   listVersions,
   markBeforeRestore,
   onHistoryPaused,
+  pauseReasonText,
   recordVersion,
   type WriteContext,
 } from './record'

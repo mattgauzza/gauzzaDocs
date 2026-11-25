@@ -127,8 +127,11 @@ export const api = {
   historyLog: (path: string) => window.gd.call<HistoryEvent[]>('historyLog', path),
   /** Changes from version a to version b, or to the file on disk now when b is left out. */
   historyDiff: (path: string, a: number, b?: number) => window.gd.call<HistoryDiff>('historyDiff', path, a, b),
-  /** Unsaved editor content goes as unsavedPayload (kept as a version, never written); authors default to the person. */
-  historyRestore: (path: string, n: number, opts: { unsavedPayload?: FilePayload; discardCurrent?: boolean; authors?: Author[] } = {}) =>
+  /**
+   * Unsaved editor content goes as unsavedPayload (kept as a version, never written), credited to unsavedAuthors.
+   * authors: who asks for the restore (default the person); unsavedAuthors default to them.
+   */
+  historyRestore: (path: string, n: number, opts: { unsavedPayload?: FilePayload; unsavedAuthors?: Author[]; discardCurrent?: boolean; authors?: Author[] } = {}) =>
     window.gd.call<HistoryVersion>('historyRestore', path, n, opts),
   /** An empty name clears it. Main credits the person (userName). */
   historyName: (path: string, n: number, name: string) => window.gd.call('historyName', path, n, name),

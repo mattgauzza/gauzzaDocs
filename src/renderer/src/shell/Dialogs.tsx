@@ -27,10 +27,11 @@ export function Modal(props: { title: string; onClose(): void; children: React.R
   )
 }
 
-export function Confirm(props: { title: string; text: string; buttons: { label: string; primary?: boolean; run(): void }[]; onClose(): void }) {
+/** A question with buttons. `danger` marks a button that destroys something: drawn red, and never focused first. */
+export function Confirm(props: { title: string; text: string; buttons: { label: string; primary?: boolean; danger?: boolean; run(): void }[]; onClose(): void }) {
   return (
     <Modal title={props.title} onClose={props.onClose} footer={props.buttons.map(b => (
-      <button key={b.label} className={b.primary ? 'btn primary' : 'btn'} onClick={b.run} autoFocus={b.primary}>{b.label}</button>
+      <button key={b.label} className={b.danger ? 'btn danger' : b.primary ? 'btn primary' : 'btn'} onClick={b.run} autoFocus={b.primary && !b.danger}>{b.label}</button>
     ))}>
       <p>{props.text}</p>
     </Modal>
@@ -176,13 +177,21 @@ export function PluginsDialog({ onClose, onReload }: { onClose(): void; onReload
 export function SettingsDialog({ settings, onClose, onSave }: { settings: Settings; onClose(): void; onSave(s: Partial<Settings>): void }) {
   const [s, setS] = useState(settings)
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS({ ...s, [k]: v })
-  // Version history: the patterns are edited one per line, the cap in MB.
-  const [exclude, setExclude] = useState((settings.historyExclude || []).join('\n'))
+  // Version history: the patterns are edited one per line, the cap in MB. Each is saved only when changed here, so
+  // someone who never touches them keeps getting the app's defaults (new secret file patterns, for one).
+  const initialExclude = (settings.historyExclude || []).join('\n')
+  const [exclude, setExclude] = useState(initialExclude)
   const [stats, setStats] = useState<HistoryStats | null>(null)
   useEffect(() => void api.historyStats().then(setStats, () => {}), [])
   const save = () => {
-    const cap = Math.round(Number(s.historyCapMB))
-    onSave({ ...s, historyCapMB: cap > 0 ? cap : 1024, historyExclude: exclude.split(/\r?\n/).map(l => l.trim()).filter(Boolean) })
+    const { historyExclude: _exclude, historyCapMB: _cap, ...patch } = s
+    const out: Partial<Settings> = patch
+    if (exclude !== initialExclude) out.historyExclude = exclude.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    if (s.historyCapMB !== settings.historyCapMB) {
+      const cap = Math.round(Number(s.historyCapMB))
+      out.historyCapMB = cap > 0 ? cap : 1024
+    }
+    onSave(out)
     onClose()
   }
   return (

@@ -168,7 +168,7 @@ export async function moveHistory(from: string, to: string, by = 'outside gauzza
 export async function restoreVersion(
   file: string,
   n: number,
-  opts: { authors: Author[]; unsaved?: Uint8Array; discardCurrent?: boolean },
+  opts: { authors: Author[]; unsaved?: Uint8Array; unsavedAuthors?: Author[]; discardCurrent?: boolean },
 ): Promise<HistoryVersion> {
   return withLock(historyKey(file), async () => {
     const { version } = find(file, n)
@@ -194,7 +194,9 @@ export async function restoreVersion(
     }
 
     if (disk) await recordVersion(file, disk, { size: disk.length, mtime }, { authors: [OUTSIDE] }, { noFold: true })
-    if (opts.unsaved) await recordVersion(file, opts.unsaved, { size: opts.unsaved.length, mtime: Date.now() }, { authors: opts.authors }, { noFold: true })
+    // Unsaved edits are credited to whoever made them (the tab knows), not to whoever asked for the restore.
+    const unsavedBy = opts.unsavedAuthors?.length ? opts.unsavedAuthors : opts.authors
+    if (opts.unsaved) await recordVersion(file, opts.unsaved, { size: opts.unsaved.length, mtime: Date.now() }, { authors: unsavedBy }, { noFold: true })
 
     let out: Uint8Array = stored
     if (inFile(file)) {

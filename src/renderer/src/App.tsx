@@ -383,29 +383,41 @@ export default function App() {
     const now = tabAuthors.current.get(id)
     tabAuthors.current.set(id, now ? { authors: new Map([...taken.authors, ...now.authors]), ops: [...taken.ops, ...now.ops] } : taken)
   }
-  /** Tabs being restored from version history: no saves meanwhile, or the old content would land over the restore. */
-  const restoring = useRef(new Set<number>())
+  /** The ctx a save of this tab passes: its authors and what its agents did (undefined: nobody changed it, main credits the person). */
+  const ctxOf = (t: Tab, taken: { authors: Map<string, Author>; ops: string[] } | undefined) =>
+    taken ? saveContext([...taken.authors.values()], taken.ops, t.kind) : undefined
+  /** Restores under way per tab (a counter: the panel and the CLI may both ask). No saves meanwhile, or the old content would land over the restore. */
+  const restoring = useRef(new Map<number, number>())
+  const isRestoring = (id: number) => (restoring.current.get(id) || 0) > 0
+  /** The save each tab has under way, so a restore can wait for it (React state lags behind). */
+  const inFlight = useRef(new Map<number, Promise<void>>())
 
   // ---------- saving ----------
   const save = useCallback(async (id: number, opts: { explicit?: boolean } = {}) => {
     const t = tabsRef.current.find(x => x.id === id)
     const h = handles.current.get(id)
-    if (!t || !h || !t.payload || t.large || restoring.current.has(id)) return
+    if (!t || !h || !t.payload || t.large || isRestoring(id)) return
     window.clearTimeout(saveTimers.current.get(id))
     if (t.external && !opts.explicit) return // never overwrite someone else's change without being asked
     patch(id, { saving: true, error: undefined })
     const seq = changeSeq.current.get(id) || 0
     const taken = tabAuthors.current.get(id)
     tabAuthors.current.delete(id)
+    let done = () => {}
+    const flight = new Promise<void>(r => (done = r))
+    inFlight.current.set(id, flight)
     try {
       const payload = await h.getPayload()
-      const mtime = await api.save(t.path, payload, taken ? saveContext([...taken.authors.values()], taken.ops) : undefined)
+      const mtime = await api.save(t.path, payload, ctxOf(t, taken))
       patch(id, { saving: false, dirty: (changeSeq.current.get(id) || 0) !== seq, mtime, saved: Date.now(), external: false })
       window.gd.changed(t.path, { type: 'saved' })
     } catch (e) {
       if (taken) giveBack(id, taken)
       patch(id, { saving: false, error: (e as Error).message })
       say(`Could not save ${baseName(t.path)}: ${(e as Error).message}`)
+    } finally {
+      if (inFlight.current.get(id) === flight) inFlight.current.delete(id)
+      done()
     }
   }, [])
 
@@ -483,7 +495,7 @@ export default function App() {
     const h = handles.current.get(t.id)!
     const payload = await h.getPayload()
     if (kindOf(to) !== t.kind) return say('Pick a format of the same kind (use File → Download to convert)')
-    await api.save(to, payload)
+    await api.save(to, payload, ctxOf(t, tabAuthors.current.get(t.id))) // the tab's authors, when it was changed since its last save
     // Reopen as the new file so its editor follows the new format (e.g. .md vs .html).
     closeNow(t.id)
     open(to)
@@ -553,15 +565,15 @@ export default function App() {
   useEffect(() => {
     const iv = window.setInterval(async () => {
       for (const t of tabsRef.current) {
-        if (t.saving || !t.payload || restoring.current.has(t.id)) continue // asleep: it reloads from disk when woken anyway
+        if (t.saving || !t.payload || isRestoring(t.id)) continue // asleep: it reloads from disk when woken anyway
         const m = await api.mtime(t.path)
         const now = tabsRef.current.find(x => x.id === t.id)
-        if (!m || !now || now.saving || restoring.current.has(t.id) || Math.abs(m - now.mtime) < 1) continue
+        if (!m || !now || now.saving || isRestoring(t.id) || Math.abs(m - now.mtime) < 1) continue
         if (now.dirty) {
           if (!now.external) {
             patch(t.id, { external: true })
-            // Their version is kept before anything here can be saved over it.
-            api.historyCheck(t.path).catch(() => {})
+            // Their version is kept before anything here can be saved over it; an open history panel shows it.
+            api.historyCheck(t.path).then(() => historyChanged(t.path), () => {})
           }
           continue
         }
@@ -583,27 +595,46 @@ export default function App() {
     }
   }
 
+  /** Tells an open version history panel that the file's history changed without a save (see History.tsx). */
+  const historyChanged = (path: string) => window.dispatchEvent(new CustomEvent('gd-history-changed', { detail: path }))
+
   /**
    * Restores version n of an open file (from the panel, or from `gdocs history restore` while it is open). Unsaved
-   * edits go along as a payload: the store keeps them as a version, never written to the file. Then the tab reloads
-   * from disk. A sleeping tab has nothing unsaved and loads the restored file when it wakes.
+   * edits go along as a payload, credited to whoever made them: the store keeps them as a version, never written to
+   * the file. Then the tab reloads from disk, unless the person typed while the restore ran: those edits are not
+   * thrown away, the tab is marked changed outside instead and the banner lets them choose. A sleeping tab has
+   * nothing unsaved and loads the restored file when it wakes.
    */
   const restoreInTab = async (id: number, n: number, opts: { discardCurrent?: boolean; authors?: Author[] } = {}): Promise<HistoryVersion> => {
-    restoring.current.add(id)
+    restoring.current.set(id, (restoring.current.get(id) || 0) + 1)
     window.clearTimeout(saveTimers.current.get(id))
+    let taken: { authors: Map<string, Author>; ops: string[] } | undefined
     try {
-      // A save already on its way finishes first.
-      for (let i = 0; i < 100 && tabsRef.current.find(x => x.id === id)?.saving; i++) await new Promise(r => setTimeout(r, 50))
+      while (inFlight.current.has(id)) await inFlight.current.get(id) // a save already on its way finishes first
       const t = tabsRef.current.find(x => x.id === id)
       if (!t) throw new Error('That file is no longer open')
       const h = handles.current.get(id)
-      const unsavedPayload = t.dirty && h && t.payload && !t.large ? await (h.peekPayload ?? h.getPayload)() : undefined
-      const v = await api.historyRestore(t.path, n, { unsavedPayload, discardCurrent: opts.discardCurrent, authors: opts.authors })
-      tabAuthors.current.delete(id) // the unsaved edits are a version now
-      if (tabsRef.current.find(x => x.id === id)?.payload) await reloadFromDisk(id)
+      const seq = changeSeq.current.get(id) || 0
+      let unsavedPayload: FilePayload | undefined
+      let unsavedAuthors: Author[] | undefined
+      if (t.dirty && h && t.payload && !t.large) {
+        taken = tabAuthors.current.get(id) // edits from here on are not in the payload: they start a fresh set
+        tabAuthors.current.delete(id)
+        unsavedAuthors = taken?.authors.size ? [...taken.authors.values()] : [{ name: personRef.current, by: 'person' }]
+        unsavedPayload = await (h.peekPayload ?? h.getPayload)()
+      }
+      const v = await api.historyRestore(t.path, n, { unsavedPayload, unsavedAuthors, discardCurrent: opts.discardCurrent, authors: opts.authors })
+      taken = undefined // the unsaved edits are a version now
+      if (tabsRef.current.find(x => x.id === id)?.payload) {
+        if ((changeSeq.current.get(id) || 0) !== seq) patch(id, { external: true })
+        else await reloadFromDisk(id)
+      }
       return v
     } finally {
-      restoring.current.delete(id)
+      if (taken) giveBack(id, taken)
+      const left = (restoring.current.get(id) || 1) - 1
+      if (left > 0) restoring.current.set(id, left)
+      else restoring.current.delete(id)
     }
   }
 

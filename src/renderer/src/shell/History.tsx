@@ -8,7 +8,7 @@ import { Icon } from './icons'
 import { usePanelSize } from './resize'
 import { atText, diffRows, diffStats, errorText, eventLine, groupByDay, statsText, timeOf, whoIs } from './historyView'
 
-type Ask = { title: string; text: string; buttons: { label: string; primary?: boolean; run(): void }[] }
+type Ask = { title: string; text: string; buttons: { label: string; primary?: boolean; danger?: boolean; run(): void }[] }
 type DiffState = HistoryDiff | { error: string } | { first: true } | null
 
 /** The restore error the history store gives when the file on disk is over the size limit (src/core/history/manage.ts). */
@@ -49,8 +49,22 @@ export function HistoryPanel(props: {
     loadVersions()
     if (tab === 'work') loadEvents()
   }, [path, props.refreshKey, tab])
-  // Comments and replies land in the work history too.
-  useEffect(() => window.gd.on('comments-changed', (f: string) => tab === 'work' && f.toLowerCase() === path.toLowerCase() && loadEvents()), [path, tab])
+  // History that changes without a save: work history events main kept (agent edits, comments, agents connecting)
+  // and outside versions the 2-second check recorded (App.tsx sends 'gd-history-changed').
+  useEffect(() => {
+    const hit = (f: string) => {
+      if (typeof f !== 'string' || f.toLowerCase() !== path.toLowerCase()) return
+      loadVersions()
+      if (tab === 'work') loadEvents()
+    }
+    const off = window.gd.on('history-changed', hit)
+    const local = (e: Event) => hit((e as CustomEvent<string>).detail)
+    window.addEventListener('gd-history-changed', local)
+    return () => {
+      off()
+      window.removeEventListener('gd-history-changed', local)
+    }
+  }, [path, tab])
 
   // The list shrinks to make room for the selected version: keep that row in view.
   useEffect(() => {
@@ -75,7 +89,7 @@ export function HistoryPanel(props: {
       if (!discardCurrent && OVER_LIMIT.test(m))
         setAsk({
           title: 'Restore without keeping the current file?',
-          text: `${name} is over 32 MB, so I can't keep what it holds now as a version. Restoring v${v.n} replaces it for good.`,
+          text: `${name} is over 32 MB, so gauzzaDocs can't keep what it holds now as a version. Restoring v${v.n} replaces it for good.`,
           buttons: [
             { label: 'Cancel', run: () => setAsk(null) },
             { label: 'Restore anyway', primary: true, run: () => restore(v, true) },
@@ -125,7 +139,7 @@ export function HistoryPanel(props: {
         { label: 'Cancel', run: () => setAsk(null) },
         {
           label: 'Delete history',
-          primary: true,
+          danger: true,
           run: async () => {
             setAsk(null)
             try {
@@ -201,7 +215,7 @@ export function HistoryPanel(props: {
             {groupByDay(events || [], e => e.at).map(g => (
               <section key={g.key}>
                 <div className="hv-day">{g.label}</div>
-                {g.items.map((e, i) => <EventRow key={`${e.at}:${i}`} e={e} person={person} />)}
+                {g.items.map((e, i) => <EventRow key={`${e.at}:${i}`} e={e} person={person} kind={kindOf(path)} />)}
               </section>
             ))}
           </div>
@@ -261,8 +275,8 @@ function VersionRow({ v, current, on, onClick }: { v: HistoryVersion; current: b
   )
 }
 
-function EventRow({ e, person }: { e: HistoryEvent; person: string }) {
-  const l = eventLine(e)
+function EventRow({ e, person, kind }: { e: HistoryEvent; person: string; kind: string }) {
+  const l = eventLine(e, kind)
   return (
     <div className="hv-event">
       <div className="hv-avatars">
