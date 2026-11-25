@@ -13,6 +13,7 @@ import * as comments from '../core/comments'
 import { type Bridge, startBridge } from './server'
 import { attachContextMenu, setupSpelling } from './contextMenu'
 import { stopWorker, warmUp, work } from './work'
+import { closeSettings, defaultsPageUrl, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
 
 app.setAppUserModelId('app.gauzzadocs.desktop')
@@ -358,7 +359,10 @@ const api: Record<string, (...a: any[]) => unknown> = {
   },
   /** Windows only lets the person pick default apps; this opens that page (or the OS equivalent). */
   openDefaultApps: () => {
-    if (process.platform === 'win32') return shell.openExternal('ms-settings:defaultapps')
+    if (process.platform === 'win32') {
+      // Straight to gauzzaDocs' own page (every file type, one click each). Make sure the registration is in place first.
+      return (app.isPackaged ? registerWithWindows(process.execPath).catch(() => {}) : Promise.resolve()).then(closeSettings).then(() => shell.openExternal(defaultsPageUrl()))
+    }
     if (process.platform === 'darwin') return dialog.showMessageBox(win!, { message: 'In Finder, select a file, press Cmd+I, pick gauzzaDocs under "Open with" and click Change All.' })
     return dialog.showMessageBox(win!, { message: 'Right-click a file in your file manager, choose Open With, pick gauzzaDocs and set it as the default.' })
   },
@@ -470,6 +474,7 @@ else {
     })
     fs.mkdirSync(getSettings().docsDir, { recursive: true })
     warmUp()
+    if (app.isPackaged) registerWithWindows(process.execPath).catch(() => {}) // Open with + the Default apps page
     if (app.isPackaged) work('agentsRefresh', [app.getVersion()]).catch(() => {}) // keep installed skills current
     setupSpelling(getSettings().spellcheck !== false)
     bridge = await startBridge(rpc, list => win?.webContents.send('listeners', list))

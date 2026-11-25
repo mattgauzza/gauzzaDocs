@@ -57,11 +57,10 @@ export function Onboarding({ onClose }: { onClose(): void }) {
           <div className="grow">
             <h3>Open your files with gauzzaDocs</h3>
             <p className="muted">
-              gauzzaDocs is already in the Open with menu for Word, Markdown, Excel, CSV, PDF and text files. Windows only lets you
-              pick the default app yourself, so this opens the page where you choose it.
+              This opens gauzzaDocs in Windows Settings with every file type it handles. Click the ones you want it to open.
             </p>
             <button className="btn" onClick={() => (api.openDefaultApps(), setDefaultsOpened(true))}>
-              {defaultsOpened ? 'Opened Default apps' : 'Choose default apps'}
+              {defaultsOpened ? 'Opened in Settings' : 'Make gauzzaDocs the default'}
             </button>
           </div>
         </section>

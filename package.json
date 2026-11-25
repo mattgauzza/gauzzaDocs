@@ -65,7 +65,93 @@
       ],
       "category": "public.app-category.productivity",
       "icon": "resources/icon.png",
-      "artifactName": "gauzzaDocs-${version}-mac-${arch}.${ext}"
+      "artifactName": "gauzzaDocs-${version}-mac-${arch}.${ext}",
+      "fileAssociations": [
+        {
+          "ext": [
+            "docx"
+          ],
+          "name": "Word document",
+          "description": "Word document",
+          "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "md",
+            "markdown"
+          ],
+          "name": "Markdown document",
+          "description": "Markdown document",
+          "mimeType": "text/markdown",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "xlsx"
+          ],
+          "name": "Excel workbook",
+          "description": "Excel workbook",
+          "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "csv"
+          ],
+          "name": "CSV file",
+          "description": "CSV file",
+          "mimeType": "text/csv",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "tsv"
+          ],
+          "name": "TSV file",
+          "description": "TSV file",
+          "mimeType": "text/tab-separated-values",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "pdf"
+          ],
+          "name": "PDF document",
+          "description": "PDF document",
+          "mimeType": "application/pdf",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "txt",
+            "log"
+          ],
+          "name": "Text file",
+          "description": "Text file",
+          "mimeType": "text/plain",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "json"
+          ],
+          "name": "JSON file",
+          "description": "JSON file",
+          "mimeType": "application/json",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "yaml",
+            "yml"
+          ],
+          "name": "YAML file",
+          "description": "YAML file",
+          "mimeType": "application/x-yaml",
+          "role": "Editor"
+        }
+      ]
     },
     "linux": {
       "target": [
@@ -75,94 +161,94 @@
       "category": "Office",
       "icon": "resources/icon.png",
       "maintainer": "gauzzaDocs contributors <gauzzadocs@users.noreply.github.com>",
-      "artifactName": "gauzzaDocs-${version}-linux-${arch}.${ext}"
-    },
-    "fileAssociations": [
-      {
-        "ext": [
-          "docx"
-        ],
-        "name": "Word document",
-        "description": "Word document",
-        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "md",
-          "markdown"
-        ],
-        "name": "Markdown document",
-        "description": "Markdown document",
-        "mimeType": "text/markdown",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "xlsx"
-        ],
-        "name": "Excel workbook",
-        "description": "Excel workbook",
-        "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "csv"
-        ],
-        "name": "CSV file",
-        "description": "CSV file",
-        "mimeType": "text/csv",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "tsv"
-        ],
-        "name": "TSV file",
-        "description": "TSV file",
-        "mimeType": "text/tab-separated-values",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "pdf"
-        ],
-        "name": "PDF document",
-        "description": "PDF document",
-        "mimeType": "application/pdf",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "txt",
-          "log"
-        ],
-        "name": "Text file",
-        "description": "Text file",
-        "mimeType": "text/plain",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "json"
-        ],
-        "name": "JSON file",
-        "description": "JSON file",
-        "mimeType": "application/json",
-        "role": "Editor"
-      },
-      {
-        "ext": [
-          "yaml",
-          "yml"
-        ],
-        "name": "YAML file",
-        "description": "YAML file",
-        "mimeType": "application/x-yaml",
-        "role": "Editor"
-      }
-    ]
+      "artifactName": "gauzzaDocs-${version}-linux-${arch}.${ext}",
+      "fileAssociations": [
+        {
+          "ext": [
+            "docx"
+          ],
+          "name": "Word document",
+          "description": "Word document",
+          "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "md",
+            "markdown"
+          ],
+          "name": "Markdown document",
+          "description": "Markdown document",
+          "mimeType": "text/markdown",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "xlsx"
+          ],
+          "name": "Excel workbook",
+          "description": "Excel workbook",
+          "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "csv"
+          ],
+          "name": "CSV file",
+          "description": "CSV file",
+          "mimeType": "text/csv",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "tsv"
+          ],
+          "name": "TSV file",
+          "description": "TSV file",
+          "mimeType": "text/tab-separated-values",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "pdf"
+          ],
+          "name": "PDF document",
+          "description": "PDF document",
+          "mimeType": "application/pdf",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "txt",
+            "log"
+          ],
+          "name": "Text file",
+          "description": "Text file",
+          "mimeType": "text/plain",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "json"
+          ],
+          "name": "JSON file",
+          "description": "JSON file",
+          "mimeType": "application/json",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "yaml",
+            "yml"
+          ],
+          "name": "YAML file",
+          "description": "YAML file",
+          "mimeType": "application/x-yaml",
+          "role": "Editor"
+        }
+      ]
+    }
   },
   "dependencies": {
     "@turbodocx/html-to-docx": "^1.23.3",
