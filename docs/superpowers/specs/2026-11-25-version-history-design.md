@@ -1,7 +1,7 @@
 # Version history and work history
 
-Date: 2026-11-25. Status: approach agreed with Matt ("version history idea looks good"); waiting on one answer and his
-approval of this document.
+Date: 2026-11-25. Status: approach agreed with Matt ("version history idea looks good"); all review questions answered;
+this document is for his approval.
 
 ## Intent
 
@@ -130,14 +130,24 @@ restores. Each event: `{ at, type, by, summary }`.
 
 ## Decisions after review
 
-A builder read this document and raised six questions. Five are settled here as the author's calls (Matt can change
-them); one is Matt's to answer.
+A builder read this document and raised six questions. Matt answered the first by asking whether gauzzaDocs can
+know about outside changes at all; it can, as below. The other five are the author's calls (Matt can change them).
 
-- **Changes made outside gauzzaDocs (Matt to answer).** Files also change in Word, VS Code, git, and through
-  subscribed agents that edit the file directly. Proposed: when gauzzaDocs sees an open file change on disk (it already
-  watches and reloads them), that state becomes a version credited to "outside gauzzaDocs"; before saving over a file,
-  a cheap size and modified-time check against the last version decides whether to record the file on disk first.
-  Files changed while not open are caught the next time they're opened.
+- **Changes made outside gauzzaDocs (included).** Files also change in Word, VS Code, git, and through subscribed
+  agents that edit the file directly. What gauzzaDocs can know, and how:
+  - Open files: it already checks every open file's modified time every 2 seconds (src/renderer/src/App.tsx, the
+    "reload when the file changes on disk" effect). Before it reloads a changed file, or when it marks a file with
+    unsaved changes as changed outside, the new state on disk becomes a version.
+  - Files in a project that already have history: projects are already watched (src/main/folders.ts, fs.watch,
+    recursive, skipping dot folders and build output). A change to such a file records a version a few seconds later,
+    open or not.
+  - Everything else: when gauzzaDocs opens a file that has history, it compares the size and modified time with the
+    last version (hashing only when those differ) and records the file as it is now if it changed.
+  - Who changed it can't be known (Word, git and other programs leave no name), so these versions are credited to
+    "outside gauzzaDocs". Several outside saves between two checks become one version. `gdocs` writes are never
+    "outside": the CLI records its own versions under the agent's name.
+  - Before gauzzaDocs saves over a file, the same size and modified-time check runs, so an outside change is never
+    lost under the next save.
 - **What "work history" means (settled).** Matt approved the timeline as described: agent edits, comments, replies,
   resolves, agents connecting and disconnecting. The person's own saves are in it too.
 - **Cap versus "always kept" (author's call).** The size cap never deletes baselines or named versions on its own; the

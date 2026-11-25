@@ -1,7 +1,7 @@
 # Design editor: layered images, diagrams and animated text
 
 Date: 2026-11-25. Status: approach chosen by Matt (option 2: gauzzaDocs' own design file, with SVG export that keeps
-the layers); this document is for his approval.
+the layers); review questions answered; this document is for his approval.
 
 ## Intent
 
@@ -137,8 +137,8 @@ to export to SVG with the layers intact.
 
 ## Decisions after review
 
-A builder read this document and raised nine questions. Seven are settled here (one from Matt's own proposal, six as
-the author's calls he can change); two are Matt's to answer.
+A builder read this document and raised nine questions. Two were answered by Matt, one from his own proposal, and six
+are the author's calls he can change.
 
 - **What the diagrams look like (settled from the proposal).** The workflow in Matt's Dave and Partners proposal is an
   architecture sketch: one shared, tested agent, and a separate space per client, each with "Client A's job -> A's
@@ -163,13 +163,26 @@ the author's calls he can change); two are Matt's to answer.
   effects, so "one big word at a time" works. No audio track: music gets added in the social app.
 - **Thumbnails (author's call).** Shown in gauzzaDocs' own home screen and pickers. No Windows Explorer preview handler.
 
-Still Matt's to answer:
+Answered by Matt:
 
-- **Order of releases.** Proposed: (1) vector, text, layers, diagrams, SVG, PNG and PDF export, agent commands (the
-  proposal diagram and logos); (2) the animation timeline with GIF and MP4 (kinetic social posts); (3) painting, and
-  components and styles beyond the basics.
-- **One brand kit shared by many designs, or styles kept per file.** A shared kit (logo, colors, fonts, text styles)
-  that every social post links to is a different file structure and hard to add later.
+- **Order of releases ("ok fine").** (1) Vector, text, layers, diagrams, boolean operations and masks, SVG, PNG and
+  PDF export, agent commands: the proposal diagram and logos. (2) The animation timeline with GIF and MP4: kinetic
+  social posts. (3) Painting.
+- **Brand kit: both, inside a project ("it would be nice if either could work, inside a project").**
+  - Every design keeps its own styles and components, as above.
+  - A project (a folder pinned on the home screen, src/core/projects.ts) can also have a brand kit: one design in the
+    project marked as the kit (File > Use as this project's brand kit, or `gdocs design kit <file>`). The mark lives in
+    gauzzaDocs' project list, not in Matt's folder. The kit's styles (colors, text styles) and components (logo
+    lockups, diagram node styles) show up in every design in that project, next to the design's own.
+  - Designs link to kit items rather than copying them, so changing the kit updates every design that uses it: right
+    away for designs that are open, and when opened for the rest. Exports and inserts bake the linked items in, so
+    they never depend on the kit file.
+  - "Detach" copies a kit item into the design, for a one-off change. A design moved out of the project keeps working:
+    its linked items are copied in the next time it's opened without the kit.
+  - Agents see the kit in `gdocs read` (its styles and components by name) and use them by name in `gdocs design`
+    commands, so posts stay on brand without restating colors.
+  - Release (1) ships per-design styles and components; the project brand kit ships with release (2), before most
+    social posts get made. The file format leaves room for links from the start.
 
 ## Left to the builder
 
