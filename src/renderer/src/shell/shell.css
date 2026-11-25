@@ -370,3 +370,10 @@ html.look .ProseMirror { caret-color: transparent; }
 .donate p { margin: 0 0 12px; line-height: 1.5; }
 .donate-sign { font-weight: 500; }
 .dialog footer .btn.primary .icon { margin-right: 6px; vertical-align: -3px; }
+
+/* Add agent: run in the background, or paste a prompt into an agent you already have open */
+.pt-mode { display: flex; gap: 4px; padding: 3px; margin: 0 0 12px; border-radius: 10px; background: var(--hover); }
+.pt-mode button { flex: 1; height: 32px; border-radius: 8px; font-size: 13px; color: var(--muted); }
+.pt-mode button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .2); font-weight: 500; }
+.pt-prompt { font: 12px/1.45 var(--mono, Consolas, monospace); white-space: pre-wrap; }
+.pt-joined { color: #1e8e3e; font-weight: 500; }
