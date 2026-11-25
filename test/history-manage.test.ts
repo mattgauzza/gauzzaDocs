@@ -173,6 +173,8 @@ test('forget removes index, log and unshared objects', async () => {
   const va = listVersions(a)
   const vb = listVersions(b)
   fs.writeFileSync(logOf(a), '{"x":1}\n')
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+  fs.utimesSync(objectPath(va[0].hash), old, old) // old and unreferenced: deleted
   await forgetHistory(a)
   assert.deepEqual(listVersions(a), [])
   for (const f of [indexPath(historyKey(a)), `${indexPath(historyKey(a))}.bak`, logOf(a)]) assert.ok(!fs.existsSync(f), f)
@@ -180,6 +182,19 @@ test('forget removes index, log and unshared objects', async () => {
   assert.ok(fs.existsSync(objectPath(va[1].hash)), 'shared object kept')
   assert.equal(va[1].hash, vb[1].hash)
   assert.deepEqual(Buffer.from(await showVersion(b, 2)), shared)
+})
+
+test('forget leaves an unshared object touched in the last day, for cleanup to remove later', async () => {
+  const a = fresh('ra.docx')
+  fs.writeFileSync(a, rnd())
+  await save(a, rnd())
+  const va = listVersions(a)
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+  fs.utimesSync(objectPath(va[0].hash), old, old)
+  await forgetHistory(a)
+  assert.deepEqual(listVersions(a), [])
+  assert.ok(!fs.existsSync(objectPath(va[0].hash)), 'old unreferenced object deleted')
+  assert.ok(fs.existsSync(objectPath(va[1].hash)), 'recently touched object survives')
 })
 
 test('forget keeps every object when another index cannot be read', async () => {

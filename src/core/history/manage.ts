@@ -23,6 +23,7 @@ import {
   type HistoryVersion,
 } from './store'
 
+const DAY_MS = 24 * 60 * 60 * 1000
 const OUTSIDE: Author = { name: 'outside gauzzaDocs', by: 'outside' }
 const sha256 = (bytes: Uint8Array) => crypto.createHash('sha256').update(bytes).digest('hex')
 const logPath = (key: string) => indexPath(key).replace(/\.json$/, '.log.jsonl')
@@ -83,6 +84,11 @@ export async function forgetHistory(file: string): Promise<void> {
     if (!elsewhere) return
     for (const hash of mine) {
       if (elsewhere.has(hash)) continue
+      try {
+        if (Date.now() - fs.statSync(objectPath(hash)).mtimeMs < DAY_MS) continue // a writer may just have reused it: cleanup removes it later
+      } catch {
+        continue // missing already
+      }
       fs.rmSync(objectPath(hash), { force: true })
       try {
         fs.rmdirSync(path.dirname(objectPath(hash))) // only when empty
