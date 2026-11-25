@@ -1,8 +1,8 @@
 # Design editor: layered images, diagrams and animated text
 
 Date: 2026-11-25. Status: approach chosen by Matt (option 2: gauzzaDocs' own design file, with SVG export that keeps
-the layers); review questions answered; one hardening pass done. One recommendation (exports with the app closed, under
-"For agents") waits for Matt; the rest is for his approval.
+the layers); review questions answered; one hardening pass done; exports with the app closed decided ("ok"). Ready
+for Matt's approval.
 
 ## Intent
 
@@ -275,7 +275,7 @@ need converting.
   seconds, and text leaving the artboard during an animation.
 - Live edits: the design `read` op gives the shell one line per layer to diff, so listening and subscribed agents hear
   about Matt's changes; comment anchors gain `{ artboard, layer, x, y }`.
-- **Recommended, waiting for Matt:** SVG export, and every edit, works with the app closed. PNG, PDF, GIF and MP4
+- **Exports with the app closed (Matt: "ok"):** SVG export, and every edit, works with the app closed. PNG, PDF, GIF and MP4
   exports and thumbnails need the app (they rasterize in the hidden window, like `gdocs look`); with the app closed they
   fail with the same "start gauzzaDocs" message, and a save made without the app marks the thumbnail stale so the app
   redraws it next time. This narrows "agents can do everything on disk" to "edit everything on disk, render with the

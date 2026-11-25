@@ -1,8 +1,8 @@
 # Version history and work history
 
 Date: 2026-11-25. Status: approach agreed with Matt ("version history idea looks good"); review questions answered,
-outside changes confirmed ("then yes add that to version history"), one hardening pass done. One recommendation (secret
-files, under Privacy) waits for Matt; the rest is for his approval.
+outside changes confirmed ("then yes add that to version history"), one hardening pass done, secret files decided
+("yes no history for those"). Ready for Matt's approval.
 
 ## Intent
 
@@ -187,7 +187,7 @@ confirmation; the CLI needs `--discard-current`. Undoing a restore is restoring 
 - History is stored unencrypted under the home folder; the history settings say so.
 - "Delete history for this file" in the panel and `gdocs history forget <file>` remove the index, the log and every
   object no other file uses, immediately.
-- **Recommended, waiting for Matt:** by default, no history is kept for secret files: `.env` and `.env.*`, `*.pem`,
+- **Secret files (Matt: "yes no history for those"):** by default, no history is kept for `.env` and `.env.*`, `*.pem`,
   `*.key`, `*.pfx`, `*.p12`, `*.kdbx`, `id_rsa*`, `id_ed25519*`, and anything under `.ssh`, `.aws`, `.gnupg` or
   `.azure`. The patterns are a setting. Work-history summaries never quote content from these files. Without this, a key
   rotated out of a .env file stays recoverable from history and from any backup of the home folder.
