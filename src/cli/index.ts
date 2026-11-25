@@ -3,6 +3,8 @@ import path from 'node:path'
 import { Command } from 'commander'
 import { createFile, loadFile } from '../core/files'
 import { HOME, freeName, getRecent, getSettings, readServer } from '../core/paths'
+import { DOC_ID, docId } from '../shared/docId'
+import { listProjects } from '../core/projects'
 import { type AgentTarget, detectAgents, installSkills, removeSkills } from '../core/agentSkills'
 import { getGlobal, instructionsFor, setDocInstructions, setGlobal } from '../core/instructions'
 import pkg from '../../package.json'
@@ -64,7 +66,7 @@ program
     const open = ping ? ((await call('list')) as { path: string; kind: string; dirty: boolean }[]) : []
     out({ running: !!ping, ...(ping as object), open }, () =>
       ping
-        ? `gauzzaDocs is running.\n${open.length ? open.map(t => `  ${t.dirty ? '*' : ' '} ${t.path}`).join('\n') : '  (no files open)'}`
+        ? `gauzzaDocs is running.\n${open.length ? open.map(t => `  ${t.dirty ? '*' : ' '} ${docId(t.path)}  ${t.path}`).join('\n') : '  (no files open)'}`
         : 'gauzzaDocs is not running. Commands will edit files on disk.'
     )
   })
@@ -424,9 +426,36 @@ registerSlidesCommands(program, ctx) // slides
 
 // Always node-style argv: installed copies run this under the app's Electron runtime (ELECTRON_RUN_AS_NODE),
 // where Commander would otherwise treat the script path as the first command.
-program.parseAsync(process.argv, { from: 'node' }).catch(e => {
+resolveDocIds(process.argv)
+  .then(argv => program.parseAsync(argv, { from: 'node' }))
+  .catch(e => {
   const msg = (e as Error).message || String(e)
   if (json()) console.error(JSON.stringify({ error: msg }))
   else console.error(`error: ${msg}`)
   process.exit(1)
 })
+
+/**
+ * Lets any command take a short document ID (doc:k3x9q2, shown in the app's status bar and comments panel) instead of
+ * a path. Looked up among the files open in the app first, then recent files, then files at the top of projects.
+ */
+async function resolveDocIds(argv: string[]): Promise<string[]> {
+  if (!argv.some(a => DOC_ID.test(a))) return argv
+  const candidates = new Set<string>()
+  const open = ((await call('list').catch(() => null)) as { path: string }[] | null) || []
+  for (const t of open) candidates.add(t.path)
+  for (const r of getRecent()) candidates.add(r.path)
+  for (const p of listProjects()) {
+    try {
+      for (const f of fs.readdirSync(p.path)) candidates.add(path.join(p.path, f))
+    } catch { /* missing project */ }
+  }
+  return argv.map(a => {
+    if (!DOC_ID.test(a)) return a
+    const want = a.toLowerCase()
+    const hits = [...new Set([...candidates].filter(c => docId(c) === want).map(c => path.resolve(c)))]
+    if (!hits.length) throw new Error(`${a} isn't open in gauzzaDocs or in your recent files. Use the file's path instead.`)
+    if (hits.length > 1) throw new Error(`${a} matches more than one file (${hits.join(', ')}). Use the path instead.`)
+    return hits[0]
+  })
+}

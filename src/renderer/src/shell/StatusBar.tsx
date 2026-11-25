@@ -3,6 +3,7 @@ import { extOf, languageOf } from '../../../shared/kinds'
 import type { FilePayload, Settings } from '../../../shared/types'
 import type { EditorHandle, StatusItem } from '../editor'
 import { api, when } from '../lib'
+import { docId } from '../../../shared/docId'
 
 const FORMAT: Record<string, string> = {
   html: 'HTML document', htm: 'HTML document', md: 'Markdown', markdown: 'Markdown', docx: 'Word document',
@@ -52,6 +53,7 @@ export function StatusBar(props: {
   const ext = extOf(props.path)
   const large = props.payload?.kind === 'large'
   const right: StatusItem[] = [
+    { text: docId(props.path), title: 'Document ID: agents can use it instead of the path (gdocs listen ' + docId(props.path) + '). Click to copy.', run: () => void navigator.clipboard.writeText(docId(props.path)) },
     { text: FORMAT[ext] || (languageOf(props.path) === 'text' ? 'Plain text' : ext.toUpperCase() || 'Text') },
     ...(props.payload?.kind === 'text' ? [{ text: props.payload.eol === '\r\n' ? 'CRLF' : 'LF', title: 'Line endings (kept as they were)' }] : []),
     ...(['pdf', 'xlsx', 'docx', 'pptx'].includes(ext) ? [] : [{ text: 'UTF-8' }]),

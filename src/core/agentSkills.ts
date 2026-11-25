@@ -89,7 +89,7 @@ happen and can undo them. Otherwise the file on disk is edited.
 
 1. \`gdocs instructions <file>\` prints standing instructions from the person (for every file and for this file).
    Follow them. They may tell you to look up their writing voice before you write in their name.
-2. \`gdocs status\` shows whether the app is running and which files are open.
+2. \`gdocs status\` shows whether the app is running and which files are open. Each file has a short ID (doc:k3x9q2) you can use instead of its path in any command.
 3. Read with \`gdocs read <file>\`: documents and presentations come back as Markdown, spreadsheets as CSV, PDFs as text.
    \`--json\` on any command gives machine-readable output; errors exit non-zero with {"error": "..."}.
 

@@ -75,6 +75,8 @@ Every command takes `--json`, and errors exit non zero with `{"error": "..."}`. 
 (`-`) or a file (`@notes.md`). `gdocs --help` lists everything and `gdocs ops` prints every raw operation. Set
 `GDOCS_AGENT=Claude` to choose the name the app shows while the agent works.
 
+Every file has a short document ID like `doc:k3x9q2`. You'll find it in the status bar and the comments panel. Any command takes it instead of the path, so `gdocs listen doc:k3x9q2` works without pasting a long path.
+
 The tool talks to the app over 127.0.0.1 with a token stored in `~/.gauzzadocs/server.json`, so only programs running
 as you can use it. In the app, the Agent button at the top right of any file shows these commands and some prompts you
 can copy.
