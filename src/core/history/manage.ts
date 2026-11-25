@@ -107,8 +107,11 @@ const inside = (root: string, p: string): string | null => {
 }
 const hasHistory = (key: string) => fs.existsSync(indexPath(key)) || fs.existsSync(bakPath(key))
 
-/** Moves the history of a file, or of every file under a folder, to follow a rename. Refuses to overwrite a history at the destination. */
-export async function moveHistory(from: string, to: string): Promise<void> {
+/**
+ * Moves the history of a file, or of every file under a folder, to follow a rename. Refuses to overwrite a history at
+ * the destination. `by` is who renamed it (the work history's "moved from" event): the person for a rename in the app.
+ */
+export async function moveHistory(from: string, to: string, by = 'outside gauzzaDocs'): Promise<void> {
   const src = canonicalPath(from)
   const dst = canonicalPath(to)
   const jobs: { oldKey: string; oldPath: string; newKey: string; newPath: string }[] = []
@@ -145,7 +148,7 @@ export async function moveHistory(from: string, to: string): Promise<void> {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') reportHistoryFailure(e) // no log is fine; one that cannot move is a history failure
       }
       for (const f of [indexPath(j.oldKey), bakPath(j.oldKey)]) fs.rmSync(f, { force: true })
-      await logEventLocked(j.newPath, { type: 'moved', by: 'outside gauzzaDocs', summary: `moved from ${j.oldPath}` })
+      await logEventLocked(j.newPath, { type: 'moved', by, summary: `moved from ${j.oldPath}` })
     })
     try {
       historyHooks.onMoved(j.oldPath, j.newPath)

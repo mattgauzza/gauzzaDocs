@@ -6,6 +6,7 @@ import {
   COMPARE_MAX_BYTES,
   HISTORY_DIR,
   appendEvent,
+  bakPath,
   checkOutside,
   cleanupHistory,
   compareVersions,
@@ -13,6 +14,7 @@ import {
   flushHistory,
   forgetHistory,
   historyKey,
+  indexPath,
   listVersions,
   moveHistory,
   nameVersion,
@@ -148,21 +150,48 @@ export const historyJobs: Record<string, Job> = {
   },
   /** Not queued: forgetHistory first waits for every queued history job, so it would wait on itself. */
   historyForget: ([file]) => forgetHistory(file),
-  /** Waits for every queued job first: a folder move carries the history of files that may still be recording. */
-  historyMove: async ([from, to]) => {
+  /**
+   * `by`: who renamed it (the person for a rename in the app; "outside gauzzaDocs" when left out). Waits for every
+   * queued job first: a folder move carries the history of files that may still be recording.
+   */
+  historyMove: async ([from, to, by]) => {
     await flushHistory()
-    return onQueue(from, () => moveHistory(from, to))
+    return onQueue(from, () => moveHistory(from, to, typeof by === 'string' && by ? by : undefined))
   },
   historyCheck: ([file]) => checkOutside(path.resolve(file), { low: true }),
-  /** A work history event from main ({ type, by, summary, at? }). A failure is a history failure: reported, never thrown. */
-  historyEvent: ([file, ev]) =>
-    onQueue(file, async () => {
+  /**
+   * The folder watcher's changed paths, in one batch: only files that already have a history are looked at, each as a
+   * low-priority outside check. The hashing for that filter happens here, never on main's thread.
+   */
+  historyCheckChanged: async ([files]) => {
+    const checks: Promise<unknown>[] = []
+    let i = 0
+    for (const f of new Set((files as string[]) ?? [])) {
+      if (++i % 50 === 0) await new Promise(r => setImmediate(r)) // a big checkout: let saves through meanwhile
       try {
-        await appendEvent(file, { at: Date.now(), ...(ev as Omit<HistoryEvent, 'at'> & { at?: number }) })
-      } catch (e) {
-        reportHistoryFailure(e)
+        const key = historyKey(f)
+        if (fs.existsSync(indexPath(key)) || fs.existsSync(bakPath(key))) checks.push(checkOutside(path.resolve(f), { low: true }))
+      } catch {
+        /* nothing to look at */
       }
-    }),
+    }
+    await Promise.all(checks)
+    return checks.length
+  },
+  /** A work history event from main ({ type, by, summary, at? }). A failure is a history failure: reported, never thrown. */
+  historyEvent: ([file, ev]) => {
+    const e = (ev ?? {}) as Partial<HistoryEvent>
+    if (typeof e.type !== 'string' || typeof e.by !== 'string' || typeof e.summary !== 'string')
+      throw new Error('A work history event needs a type, a by and a summary.')
+    const event = { ...e, at: e.at ?? Date.now() } as HistoryEvent // an explicit at: undefined still gets stamped
+    return onQueue(file, async () => {
+      try {
+        await appendEvent(file, event)
+      } catch (err) {
+        reportHistoryFailure(err)
+      }
+    })
+  },
   historyCleanup: async () => {
     cleaning ??= cleanupHistory(Date.now(), capBytes())
       .then(r => (lastCleanup = r))

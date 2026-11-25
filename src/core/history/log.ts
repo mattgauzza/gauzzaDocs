@@ -48,28 +48,39 @@ const parse = (line: string): HistoryEvent | null => {
 
 const editCount = (e: HistoryEvent) => /^(\d+) edits$/.exec(e.summary)?.[1] ?? '1'
 
-/** Appends an event. The caller holds the file's lock (see appendEvent for everyone else). */
+/**
+ * Appends an event. The caller holds the file's lock (see appendEvent for everyone else).
+ * An agent's edits save as they go, so its ops and its saves interleave (op, save, op, save). To keep a burst to two
+ * lines, an agent op merges into that agent's last op within 60 s even when that agent's save line follows it, and a
+ * save of the same version updates that version's line even when the same author's op line follows it. Lines keep
+ * the order they first appeared in.
+ */
 export async function appendEventLocked(file: string, ev: HistoryEvent): Promise<void> {
   const target = logPath(historyKey(file))
   // Excluded (secret) files never get quoted text in their work history.
   const next: HistoryEvent = isExcluded(file) ? { ...ev, summary: ev.type === 'agent-op' ? 'edited' : ev.type } : { ...ev }
   fs.mkdirSync(path.dirname(target), { recursive: true })
-  const { size, last, lastStart, torn } = readTail(target)
-  // What the new event does to the last one: merge agent ops, or update a folded save in place.
-  let replacement: string | null = null
+  const tail = readTail(target)
+  const { size, torn } = tail
+  const mergesOp = (into: HistoryEvent) =>
+    next.type === 'agent-op' && into.type === 'agent-op' && into.by === next.by && next.at - into.at <= MERGE_MS && next.at >= into.at
+  const updatesSave = (into: HistoryEvent) => next.type === 'save' && into.type === 'save' && next.v !== undefined && into.v === next.v
+  const merged = (into: HistoryEvent) =>
+    JSON.stringify(next.type === 'agent-op' ? { ...next, summary: `${Number(editCount(into)) + 1} edits` } : next) // a save: one event per version
+  // What the new event does to the tail: rewrite the last line, or the one before it (keeping the last line as it is).
+  let rewrite: { start: number; lines: string[] } | null = null
+  const { last, prev } = tail
   if (last && !torn) {
-    if (next.type === 'agent-op' && last.type === 'agent-op' && last.by === next.by && next.at - last.at <= MERGE_MS && next.at >= last.at) {
-      replacement = JSON.stringify({ ...next, summary: `${Number(editCount(last)) + 1} edits` })
-    } else if (next.type === 'save' && last.type === 'save' && next.v !== undefined && last.v === next.v) {
-      replacement = JSON.stringify(next) // the same version saved again: one event per version
-    }
+    if (mergesOp(last) || updatesSave(last)) rewrite = { start: tail.lastStart, lines: [merged(last)] }
+    else if (prev && last.by === next.by && ((last.type === 'save' && mergesOp(prev)) || (last.type === 'agent-op' && updatesSave(prev))))
+      rewrite = { start: tail.prevStart, lines: [merged(prev), tail.lastRaw] }
   }
-  const line = replacement ?? JSON.stringify(next)
-  const base = replacement !== null ? lastStart : size // where the new line goes
-  if (base + (torn ? 1 : 0) + Buffer.byteLength(line) + 1 <= MAX_LOG_BYTES) {
+  const text = (rewrite?.lines ?? [JSON.stringify(next)]).join('\n')
+  const base = rewrite ? rewrite.start : size // where the new text goes
+  if (base + (torn ? 1 : 0) + Buffer.byteLength(text) + 1 <= MAX_LOG_BYTES) {
     const fd = fs.openSync(target, size === 0 ? 'w' : 'r+')
     try {
-      const out = Buffer.from((torn ? '\n' : '') + line + '\n')
+      const out = Buffer.from((torn ? '\n' : '') + text + '\n')
       fs.writeSync(fd, out, 0, out.length, base)
       fs.ftruncateSync(fd, base + out.length)
     } finally {
@@ -79,8 +90,8 @@ export async function appendEventLocked(file: string, ev: HistoryEvent): Promise
   }
   // A trim is due: only now is the whole file read.
   const lines = fs.readFileSync(target, 'utf8').split('\n').filter(l => l !== '')
-  if (replacement !== null) lines[lines.length - 1] = line
-  else lines.push(line)
+  if (rewrite) lines.splice(lines.length - rewrite.lines.length, rewrite.lines.length, ...rewrite.lines)
+  else lines.push(text)
   let size2 = 0
   let from = lines.length
   while (from > 0 && size2 + Buffer.byteLength(lines[from - 1]) + 1 <= MAX_LOG_BYTES / 2) size2 += Buffer.byteLength(lines[--from]) + 1
@@ -88,27 +99,45 @@ export async function appendEventLocked(file: string, ev: HistoryEvent): Promise
 }
 
 const TAIL_BYTES = 64 * 1024
-/** The size of a log and its last line, read from the end of the file only. */
-function readTail(target: string): { size: number; last: HistoryEvent | null; lastStart: number; torn: boolean } {
+interface Tail {
+  size: number
+  torn: boolean
+  /** The last line: parsed, as written, and where it starts. Null when it does not fit the window. */
+  last: HistoryEvent | null
+  lastRaw: string
+  lastStart: number
+  /** The line before it, when it fits the window too. */
+  prev: HistoryEvent | null
+  prevStart: number
+}
+/** The size of a log and its last two lines, read from the end of the file only. */
+function readTail(target: string): Tail {
+  const none = (size: number, torn = false): Tail => ({ size, torn, last: null, lastRaw: '', lastStart: size, prev: null, prevStart: size })
   let fd: number
   try {
     fd = fs.openSync(target, 'r')
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { size: 0, last: null, lastStart: 0, torn: false }
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return none(0)
     throw e
   }
   try {
     const size = fs.fstatSync(fd).size
-    if (size === 0) return { size, last: null, lastStart: 0, torn: false }
+    if (size === 0) return none(0)
     const from = Math.max(0, size - TAIL_BYTES)
     const buf = Buffer.alloc(size - from)
     fs.readSync(fd, buf, 0, buf.length, from)
     const torn = buf[buf.length - 1] !== 0x0a
     const end = torn ? buf.length : buf.length - 1
-    const nl = buf.lastIndexOf(0x0a, end - 1)
-    if (nl < 0 && from > 0) return { size, last: null, lastStart: size, torn } // a line longer than the window: leave it alone
-    const start = nl + 1
-    return { size, last: parse(buf.subarray(start, end).toString('utf8')), lastStart: from + start, torn }
+    const nl = end > 0 ? buf.lastIndexOf(0x0a, end - 1) : -1
+    if (nl < 0 && from > 0) return none(size, torn) // a line longer than the window: leave it alone
+    const lastRaw = buf.subarray(nl + 1, end).toString('utf8')
+    const tail: Tail = { size, torn, last: parse(lastRaw), lastRaw, lastStart: from + nl + 1, prev: null, prevStart: from + nl + 1 }
+    if (nl < 0) return tail // the only line
+    const nl2 = nl > 0 ? buf.lastIndexOf(0x0a, nl - 1) : -1
+    if (nl2 < 0 && from > 0) return tail // the line before does not fit the window
+    tail.prev = parse(buf.subarray(nl2 + 1, nl).toString('utf8'))
+    tail.prevStart = from + nl2 + 1
+    return tail
   } finally {
     fs.closeSync(fd)
   }

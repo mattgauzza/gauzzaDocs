@@ -50,6 +50,49 @@ test('no merge across agents, after 60 s, or past another kind of event', async 
   assert.equal(readLog(f).length, 5)
 })
 
+test("one agent's ops and saves interleaved within 60 s leave two lines: one op line, one save line", async () => {
+  const f = fresh()
+  await appendEvent(f, ev({ at: 1000, type: 'comment', by: 'Matt', summary: 'commented: x' })) // something before
+  await appendEvent(f, ev({ at: 2000 }))
+  await appendEvent(f, ev({ at: 2100, type: 'save', summary: 'saved v3', v: 3 }))
+  await appendEvent(f, ev({ at: 20_000 }))
+  await appendEvent(f, ev({ at: 20_100, type: 'save', summary: 'saved v3', v: 3 }))
+  await appendEvent(f, ev({ at: 40_000 }))
+  await appendEvent(f, ev({ at: 40_100, type: 'save', summary: 'saved v3', v: 3 }))
+  const log = readLog(f)
+  assert.deepEqual(log.map(e => `${e.type} ${e.summary}`), ['save saved v3', 'agent-op 3 edits', 'comment commented: x']) // first-seen order
+  assert.equal(log[0].at, 40_100)
+  assert.equal(log[1].at, 40_000)
+})
+
+test('a save then op order (on-disk agent edits) also stays at two lines', async () => {
+  const f = fresh()
+  for (const t of [1000, 20_000, 40_000]) {
+    await appendEvent(f, ev({ at: t, type: 'save', summary: 'saved v2', v: 2 }))
+    await appendEvent(f, ev({ at: t + 5 }))
+  }
+  assert.deepEqual(readLog(f).map(e => `${e.type} ${e.summary}`), ['agent-op 3 edits', 'save saved v2'])
+})
+
+test("another agent's op in between breaks the merge, and so does a save by someone else", async () => {
+  const f = fresh()
+  await appendEvent(f, ev({ at: 1000 }))
+  await appendEvent(f, ev({ at: 1100, type: 'save', summary: 'saved v3', v: 3 }))
+  await appendEvent(f, ev({ at: 2000, by: 'Codex' }))
+  await appendEvent(f, ev({ at: 3000 }))
+  assert.deepEqual(readLog(f).map(e => `${e.by} ${e.type} ${e.summary}`), ['Claude agent-op edited', 'Codex agent-op edited', 'Claude save saved v3', 'Claude agent-op edited'])
+  const g = fresh()
+  await appendEvent(g, ev({ at: 1000 }))
+  await appendEvent(g, ev({ at: 1100, type: 'save', by: 'Matt', summary: 'saved v3', v: 3 }))
+  await appendEvent(g, ev({ at: 2000 }))
+  assert.equal(readLog(g).length, 3)
+  const h2 = fresh() // the op line after a save only lets the same author's save of that version through
+  await appendEvent(h2, ev({ at: 1000, type: 'save', summary: 'saved v3', v: 3 }))
+  await appendEvent(h2, ev({ at: 1100, by: 'Codex' }))
+  await appendEvent(h2, ev({ at: 1200, type: 'save', summary: 'saved v3', v: 3 }))
+  assert.equal(readLog(h2).length, 3)
+})
+
 test('readLog is newest first, honours limit and skips garbage lines', async () => {
   const f = fresh()
   await appendEvent(f, ev({ at: 1, type: 'comment', summary: 'a' }))
@@ -185,7 +228,19 @@ test('moving a history logs "moved from" in the new path\'s log and the old log 
   const log = readLog(b)
   assert.equal(log[0].type, 'moved')
   assert.ok(log[0].summary.startsWith('moved from '))
+  assert.equal(log[0].by, 'outside gauzzaDocs') // nobody named
   assert.ok(log.some(e => e.type === 'save'))
+})
+
+test('a move credits whoever renamed it', async () => {
+  const a = fresh('c.md')
+  const b = fresh('d.md')
+  fs.writeFileSync(a, 'one')
+  await save(a, Buffer.from('two'))
+  await moveHistory(a, b, 'Matt')
+  const moved = readLog(b)[0]
+  assert.equal(moved.type, 'moved')
+  assert.equal(moved.by, 'Matt')
 })
 
 test('a history adopted after an outside move keeps its log and logs "moved from"', async () => {

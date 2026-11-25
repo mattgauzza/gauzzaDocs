@@ -4,7 +4,6 @@ import path from 'node:path'
 import { BrowserWindow, type WebContents, app, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
 import { inFile, instructionsFor, renameInstructions, setDocInstructions, setGlobal } from '../core/instructions'
 import type { HistoryEventType, WriteContext } from '../core/history'
-import { bakPath, historyKey, indexPath } from '../core/history/store'
 import {
   HOME, PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
 } from '../core/paths'
@@ -280,27 +279,28 @@ function logHistory(file: string, type: HistoryEventType, by: string, summary: s
   work('historyEvent', [path.resolve(file), { at, type, by, summary }]).catch(() => {})
 }
 
-/** A rename in the app takes the version history of the file (or of every file in the folder) with it. Never fails the rename. */
-const carryHistory = (from: string, to: string) => void work('historyMove', [path.resolve(from), path.resolve(to)]).catch(() => {})
+/** A rename in the app takes the version history of the file (or of every file in the folder) with it, credited to the person. Never fails the rename. */
+const carryHistory = (from: string, to: string) => void work('historyMove', [path.resolve(from), path.resolve(to), userName()]).catch(() => {})
 
-/** The folder watcher saw a file change: if gauzzaDocs keeps its history, the worker looks for an outside change (low priority). */
-function checkIfVersioned(file: string) {
-  try {
-    const key = historyKey(file)
-    if (fs.existsSync(indexPath(key)) || fs.existsSync(bakPath(key))) work('historyCheck', [file]).catch(() => {})
-  } catch { /* nothing to check */ }
-}
-
-/** folders.ts reports each changed file; the window refreshes each folder once. */
+/**
+ * folders.ts reports each changed file of a folder that settled, all in one go. The window refreshes each folder once,
+ * and the worker gets every changed path in one batch: it looks for outside changes in the ones it keeps history for
+ * (main does no per-file work here, so a big checkout into a watched folder cannot stall the window).
+ */
 const changedDirs = new Map<string, [string, string]>()
-function folderChanged(root: string, dir: string) {
-  if (!changedDirs.size) {
+const changedFiles = new Set<string>()
+function folderChanged(root: string, dir: string, file: string) {
+  if (!changedDirs.size && !changedFiles.size) {
     setImmediate(() => {
       for (const [r, d] of changedDirs.values()) win?.webContents.send('folder-changed', r, d)
+      const files = [...changedFiles]
       changedDirs.clear()
+      changedFiles.clear()
+      if (files.length) work('historyCheckChanged', [files]).catch(() => {})
     })
   }
   changedDirs.set(`${root}|${dir}`.toLowerCase(), [root, dir])
+  changedFiles.add(file)
 }
 
 // Agents connected with `gdocs listen` come and go: `listen --once` reconnects after every comment it handles. Only
@@ -443,7 +443,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
     work('historyRestore', [file, n, { ...opts, authors: opts.authors?.length ? opts.authors : person().authors }]),
   historyName: (file: string, n: number, name: string) => work('historyName', [file, n, name, userName()]),
   historyForget: (file: string) => work('historyForget', [file]),
-  historyMove: (from: string, to: string) => work('historyMove', [from, to]),
+  historyMove: (from: string, to: string) => work('historyMove', [from, to, userName()]),
   historyCheck: (file: string) => work('historyCheck', [file]),
   historyEvent: (file: string, event: { type: HistoryEventType; by: string; summary: string; at?: number }) => work('historyEvent', [file, event]),
   historyCleanup: () => work('historyCleanup'),
@@ -485,11 +485,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
   /** Files gauzzaDocs does not edit (images, zips, ...) open in their usual app. */
   openWithSystem: (p: string) => shell.openPath(p),
   /** The window says which project folders it is showing; only those are watched. */
-  watchFolders: (roots: string[]) =>
-    watchFolders(roots, (root, dir, file) => {
-      folderChanged(root, dir)
-      checkIfVersioned(file)
-    }),
+  watchFolders: (roots: string[]) => watchFolders(roots, folderChanged),
   openDialog: async () => {
     const r = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], filters: OPEN_FILTERS })
     return r.canceled ? [] : r.filePaths

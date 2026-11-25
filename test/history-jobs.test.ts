@@ -12,6 +12,7 @@ const docs = path.join(work, 'docs')
 
 const { historyJobs: jobs, copyName } = await import('../src/main/historyJobs')
 const { saveFile } = await import('../src/core/files')
+const { runOffline } = await import('../src/core/ops')
 const { flushHistory, listVersions, readLog, showVersion } = await import('../src/core/history')
 const { setSettings } = await import('../src/core/paths')
 setSettings({ docsDir: docs })
@@ -39,8 +40,12 @@ async function twoVersions(name?: string) {
 after(() => {
   for (const d of [work, home]) fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
-const within = <T>(p: Promise<T>, ms = 15_000) =>
-  Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`still waiting after ${ms} ms`)), ms))])
+/** Fails if `p` takes longer than `ms`; the timer is cleared either way, so it never keeps the process alive. */
+const within = <T>(p: Promise<T>, ms = 15_000) => {
+  let timer: NodeJS.Timeout | undefined
+  const late = new Promise<never>((_, rej) => (timer = setTimeout(() => rej(new Error(`still waiting after ${ms} ms`)), ms)))
+  return Promise.race([p, late]).finally(() => clearTimeout(timer))
+}
 
 test('copies are named <stem> (v<n>).<ext>, never over an existing file', () => {
   const dir = fs.mkdtempSync(path.join(work, 'names-'))
@@ -132,6 +137,19 @@ test('historyCheck keeps a change made by another program', async () => {
   assert.equal(Buffer.from(await showVersion(f, last.n)).toString(), 'edited in Notepad')
 })
 
+test('historyCheckChanged looks only at changed files that have a history, in one batch', async () => {
+  const kept = await twoVersions()
+  fs.writeFileSync(kept, 'changed by git')
+  const plain = fresh('plain.txt')
+  fs.writeFileSync(plain, 'never saved by gauzzaDocs')
+  const checked = await jobs.historyCheckChanged([[kept, plain, path.dirname(plain), kept, path.join(work, 'gone.txt')]])
+  assert.equal(checked, 1)
+  const last = listVersions(kept).at(-1)!
+  assert.equal(last.authors[0].by, 'outside')
+  assert.equal(Buffer.from(await showVersion(kept, last.n)).toString(), 'changed by git')
+  assert.equal(listVersions(plain).length, 0, 'no history is started for a file gauzzaDocs never wrote')
+})
+
 test('historyEvent adds to the work history, stamped now when main gives no time', async () => {
   const f = fresh()
   const before = Date.now()
@@ -141,15 +159,50 @@ test('historyEvent adds to the work history, stamped now when main gives no time
   assert.ok(ev.at >= before)
   await jobs.historyEvent([f, { type: 'connected', by: 'Claude', summary: 'started listening', at: 1234 }])
   assert.equal(readLog(f)[0].at, 1234)
+  // An explicit at: undefined still gets stamped (it used to erase the stamp, and readers then skipped the line).
+  await jobs.historyEvent([f, { type: 'reply', by: 'Matt', summary: 'replied: ok', at: undefined }])
+  const [reply] = readLog(f)
+  assert.equal(reply.summary, 'replied: ok')
+  assert.ok(reply.at >= before)
+  await assert.rejects(Promise.resolve().then(() => jobs.historyEvent([f, { by: 'Matt', summary: 'no type' }])), /needs a type/)
+  await assert.rejects(Promise.resolve().then(() => jobs.historyEvent([f, null])), /needs a type/)
+  assert.equal(readLog(f).length, 3)
+})
+
+test("an agent's burst of on-disk edits leaves at most two work history lines", async () => {
+  const f = fresh()
+  await saveFile(f, text('alpha beta gamma'), { authors: [{ name: 'Matt', by: 'person' }] })
+  await flushHistory()
+  const before = readLog(f).length
+  const asClaude = { ...claude, summary: 'replace' }
+  for (const [find, to] of [['alpha', 'one'], ['beta', 'two'], ['gamma', 'three']]) {
+    // What main's rpc `op` case does: run the op with the agent as author, then log the op.
+    await runOffline(f, { op: 'replace', find, with: to }, asClaude)
+    await jobs.historyEvent([f, { type: 'agent-op', by: 'Claude', summary: 'replace' }])
+  }
+  await flushHistory()
+  assert.equal(fs.readFileSync(f, 'utf8'), 'one two three')
+  const added = readLog(f).slice(0, readLog(f).length - before)
+  assert.ok(added.length <= 2, `added ${added.length} lines: ${JSON.stringify(added)}`)
+  assert.deepEqual(added.map(e => `${e.type} ${e.summary}`).sort(), ['agent-op 3 edits', `save saved v${listVersions(f).at(-1)!.n}`].sort())
 })
 
 test('historyMove carries a renamed file history; historyForget removes it without waiting on itself', async () => {
   const f = await twoVersions()
   const to = path.join(path.dirname(f), 'renamed.txt')
   fs.renameSync(f, to)
-  await within(Promise.resolve(jobs.historyMove([f, to])))
+  await within(Promise.resolve(jobs.historyMove([f, to, 'Matt'])))
   assert.equal(listVersions(to).length, 2)
   assert.equal(listVersions(f).length, 0)
+  const moved = readLog(to).find(e => e.type === 'moved')!
+  assert.equal(moved.by, 'Matt') // a rename in the app is the person's
+  // Left out, the mover is "outside gauzzaDocs" (moves noticed after the fact).
+  const again = path.join(path.dirname(f), 'renamed again.txt')
+  fs.renameSync(to, again)
+  await within(Promise.resolve(jobs.historyMove([to, again])))
+  assert.equal(readLog(again)[0].by, 'outside gauzzaDocs')
+  fs.renameSync(again, to)
+  await within(Promise.resolve(jobs.historyMove([again, to, 'Matt'])))
   await within(Promise.resolve(jobs.historyForget([to])))
   assert.equal(listVersions(to).length, 0)
   assert.deepEqual(await jobs.historyList([to]), [])
