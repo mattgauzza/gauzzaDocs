@@ -3,6 +3,7 @@ import {
 } from 'pdf-lib'
 import type { PdfEdit } from '../types'
 import { type Box, type Cut, applyCuts, findTextCuts } from './content'
+import { fitParagraph } from './wrap'
 
 /**
  * Applies edits to a PDF with pdf-lib. Isomorphic: the window uses it on save, the CLI on files on disk.
@@ -11,6 +12,29 @@ import { type Box, type Cut, applyCuts, findTextCuts } from './content'
  * `delete` of page 2 makes the old page 3 become page 2 for later edits. Coordinates are PDF points from the
  * top-left of the page as displayed (after its rotation); they are mapped to PDF user space here.
  */
+const isEmptied = (e: PdfEdit) => e.type === 'replaceText' && !e.text.trim()
+/**
+ * Lines being emptied go first within each run of markups (page moves, rotations and deletions stay where they are).
+ * A rewrapped paragraph draws its new words over its old lines; if those lines' own edits ran after it, they would take
+ * the new words out again.
+ */
+export function emptiedFirst(edits: PdfEdit[]): PdfEdit[] {
+  const out: PdfEdit[] = []
+  let run: PdfEdit[] = []
+  const flush = () => {
+    out.push(...run.filter(isEmptied), ...run.filter(e => !isEmptied(e)))
+    run = []
+  }
+  for (const e of edits) {
+    if (e.type === 'rotate' || e.type === 'delete' || e.type === 'move') {
+      flush()
+      out.push(e)
+    } else run.push(e)
+  }
+  flush()
+  return out
+}
+
 export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[]): Promise<Uint8Array> {
   if (!edits.length) return bytes
   const doc = await PDFDocument.load(bytes, { ignoreEncryption: true })
@@ -29,7 +53,7 @@ export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[]): Promis
     return doc.getPage(n - 1)
   }
 
-  for (const e of edits) {
+  for (const e of emptiedFirst(edits)) {
     switch (e.type) {
       case 'rotate': {
         const page = pageAt(e.page, 'rotate')
@@ -111,7 +135,18 @@ export async function applyPdfEdits(bytes: Uint8Array, edits: PdfEdit[]): Promis
         const [cx, cy] = map(e.x - pad, e.y + e.h + pad)
         page.drawRectangle({ x: cx, y: cy, width: e.w + pad * 2, height: e.h + pad * 2, color: toRgb(e.bg || '#ffffff'), borderWidth: 0, rotate: degrees(angle) })
         // 3. Draw the new text on the same baseline, in the closest standard font.
-        if (e.text.trim()) {
+        if (e.text.trim() && e.wrapRight != null) {
+          // A paragraph: wrapped to its old width and spacing, the same way the app previews it.
+          const f = await standard(e.font, e.bold, e.italic)
+          const fit = fitParagraph({ ...e, text: sanitize(f, e.text) })
+          const base = (e.base ?? e.y + e.h * 0.8) + (e.dy || 0)
+          const color = toRgb(e.color || '#000000')
+          fit.lines.forEach((line, i) => {
+            if (!line) return
+            const [tx, ty] = map((i ? (e.hang ?? e.x) : e.x) + (e.dx || 0), base + i * fit.lineHeight)
+            page.drawText(line, { x: tx, y: ty, size: fit.size, font: f, color, rotate: degrees(angle) })
+          })
+        } else if (e.text.trim()) {
           const f = await standard(e.font, e.bold, e.italic)
           const lines = sanitize(f, e.text).split('\n')
           const x = e.x + (e.dx || 0)

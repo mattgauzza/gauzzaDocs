@@ -1,4 +1,5 @@
 import type { PdfEdit } from '../types'
+import { textWidth } from './wrap'
 
 /**
  * Lines of text on a PDF page, with their boxes, for editing text that is already in the PDF. Isomorphic: works with
@@ -162,27 +163,121 @@ export function lineEdit(line: PdfLine, text: string, colors: { color?: string; 
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
+const LIST_START = /^([•◦▪‣●○■□*–-]|\d+[.)])\s/
 
 /**
- * Plans a find-and-replace on existing PDF text. Matches must sit inside one line: a match that only exists when
- * lines are joined is reported clearly instead of half-replaced.
+ * Groups a page's lines into paragraphs: lines in a column at the same size and font, with steady spacing between
+ * baselines. A list item, a change of size or a short line that ends a sentence starts a new one.
  */
-export function planReplace(lines: PdfLine[], find: string, withText: string, opts: { all?: boolean } = {}) {
+export function paragraphsOf(lines: PdfLine[]): PdfLine[][] {
+  const paras: PdfLine[][] = []
+  for (const l of [...lines].sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x)) {
+    const home = paras.find(p => {
+      const q = p[p.length - 1]
+      if (q.page !== l.page || q.font !== l.font || Math.abs(q.size - l.size) > Math.max(0.6, q.size * 0.08)) return false
+      const gap = l.base - q.base
+      if (gap < q.size * 0.9 || gap > q.size * 1.9) return false
+      if (p.length > 1 && Math.abs(gap - (p[1].base - p[0].base)) > q.size * 0.3) return false
+      const left = p.length > 1 ? Math.min(...p.slice(1).map(x => x.x)) : q.x
+      // Same left edge, or a first line indented by up to a few characters.
+      if (Math.abs(l.x - left) > q.size * 0.75 && !(p.length === 1 && l.x < q.x && q.x - l.x < q.size * 3)) return false
+      if (LIST_START.test(l.text.trim())) return false
+      const widest = Math.max(...p.map(x => x.x + x.w)) - Math.min(...p.map(x => x.x))
+      if (q.x + q.w - Math.min(...p.map(x => x.x)) < widest * 0.6 && /[.!?:"”']$/.test(q.text.trim())) return false
+      return true
+    })
+    if (home) home.push(l)
+    else paras.push([l])
+  }
+  return paras
+}
+
+export interface ReplacePlan {
+  line: PdfLine
+  text: string
+  count: number
+  para?: PdfLine[] // the whole paragraph is rewritten (and rewrapped) with text
+}
+
+/**
+ * Plans a find-and-replace on existing PDF text. A match inside one line changes that line, as long as the new words
+ * still fit the paragraph's width. A match that runs across lines, or new words that no longer fit, rewrite the whole
+ * paragraph, wrapped to its old width and spacing.
+ */
+export function planReplace(lines: PdfLine[], find: string, withText: string, opts: { all?: boolean } = {}): ReplacePlan[] {
   if (!find) throw new Error('replaceText needs "find"')
   const re = new RegExp(escapeRe(find), opts.all ? 'g' : '')
-  const out: { line: PdfLine; text: string; count: number }[] = []
+  const paras = paragraphsOf(lines)
+  const paraOf = new Map<PdfLine, PdfLine[]>()
+  for (const p of paras) for (const l of p) paraOf.set(l, p)
+  const out: ReplacePlan[] = []
+  const done = new Set<PdfLine[]>()
+  const right = (p: PdfLine[]) => Math.max(...p.map(l => l.x + l.w))
+
   for (const line of lines) {
     if (!line.text.includes(find)) continue
     const count = opts.all ? line.text.split(find).length - 1 : 1
-    out.push({ line, text: line.text.replace(re, () => withText), count })
-    if (!opts.all) break
+    const text = line.text.replace(re, () => withText)
+    const para = paraOf.get(line)
+    if (para && para.length > 1 && textWidth(text, line, line.size) > right(para) - line.x + 1) {
+      // Too long for its line now: rewrite the paragraph so the words flow onto the next lines.
+      if (!done.has(para)) {
+        done.add(para)
+        out.push({ line: para[0], para, count, text: norm(para.map(l => (l === line ? text : l.text)).join(' ')) })
+      }
+    } else out.push({ line, text, count })
+    if (!opts.all) return out
+  }
+  const f = norm(find)
+  const re2 = new RegExp(escapeRe(f), opts.all ? 'g' : '')
+  for (const para of paras) {
+    if (para.length < 2 || done.has(para) || out.some(o => para.includes(o.line))) continue
+    const joined = norm(para.map(l => l.text).join(' '))
+    if (!joined.includes(f)) continue
+    out.push({ line: para[0], para, count: opts.all ? joined.split(f).length - 1 : 1, text: joined.replace(re2, () => withText) })
+    if (!opts.all) return out
   }
   if (!out.length) {
-    const norm = (s: string) => s.replace(/\s+/g, ' ')
-    const joined = norm(lines.map(l => l.text).join(' '))
-    if (joined.includes(norm(find)))
-      throw new Error(`"${find}" runs across more than one line in the PDF. Replace each line's part separately (gdocs pdf lines shows them).`)
+    if (norm(lines.map(l => l.text).join(' ')).includes(f))
+      throw new Error(`"${find}" runs across lines that aren't one paragraph (a heading and the text under it, or two columns). Replace each part separately (gdocs pdf lines shows them).`)
     throw new Error(`"${find}" was not found${lines.length ? ` on page ${lines[0].page}` : ''}`)
+  }
+  return out
+}
+
+/** Edits that rewrite a paragraph: the first line carries the new words, wrapped; the other lines are emptied. */
+export function paraEdits(para: PdfLine[], text: string, colors: { color?: string; bg?: string } = {}): Extract<PdfEdit, { type: 'replaceText' }>[] {
+  const [first, ...rest] = para
+  const gaps = rest.map((l, i) => l.base - para[i].base).sort((a, b) => a - b)
+  return [
+    {
+      ...lineEdit(first, text, colors),
+      wrapRight: r2(Math.max(...para.map(l => l.x + l.w)) + 0.5),
+      hang: rest.length ? r2(Math.min(...rest.map(l => l.x))) : first.x,
+      lineHeight: r2(gaps.length ? gaps[Math.floor(gaps.length / 2)] : first.size * 1.2),
+      maxLines: para.length + 1
+    },
+    ...rest.map(l => lineEdit(l, '', colors))
+  ]
+}
+
+/**
+ * Applies a plan to a list of edits: lines edited before are updated in place (matched by position, keeping where
+ * they were moved to), new ones are added. colorsOf samples a line's text and background color where it can.
+ */
+export function applyPlan(edits: PdfEdit[], plan: ReplacePlan[], colorsOf: (l: PdfLine) => { color?: string; bg?: string } = () => ({})): PdfEdit[] {
+  const out = [...edits]
+  for (const p of plan) {
+    const made = p.para ? paraEdits(p.para, p.text, colorsOf(p.para[0])) : [lineEdit(p.line, p.text, colorsOf(p.line))]
+    for (const e of made) {
+      const i = out.findIndex(x => x.type === 'replaceText' && x.page === e.page && Math.abs(x.x - e.x) < 0.5 && Math.abs(x.y - e.y) < 0.5)
+      if (i < 0) out.push(e)
+      else {
+        const { wrapRight, hang, lineHeight, maxLines } = e
+        out[i] = { ...(out[i] as typeof e), text: e.text, ...(wrapRight != null ? { wrapRight, hang, lineHeight, maxLines } : {}) }
+      }
+    }
   }
   return out
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { PDF_OPS_HELP, structuralEdits } from '../../../shared/ops/pdf'
 import { applyPdfEdits, checkEdits, parsePages } from '../../../shared/pdf/edits'
 import { type FormValue, coerceValue, fillFields, listFields } from '../../../shared/pdf/forms'
-import { type PdfJsPageLike, type PdfLine, lineEdit, linesToHtml, pageLines, planReplace } from '../../../shared/pdf/lines'
+import { type PdfJsPageLike, type PdfLine, applyPlan, linesToHtml, pageLines, planReplace } from '../../../shared/pdf/lines'
 import { allText, joinPages } from '../../../shared/pdf/text'
 import type { AgentOp, PdfEdit } from '../../../shared/types'
 import type { EditorHandle, EditorProps, MenuItem, MenuName } from '../editor'
@@ -278,6 +278,10 @@ export default function PdfEditor(props: EditorProps) {
     commit({ ...s, edits: [...s.edits, e] })
     if (e.type === 'image') setSelected(s.edits.length)
   }, [commit])
+  const onAddAll = useCallback((es: Markup[]) => {
+    const s = snapRef.current
+    commit({ ...s, edits: [...s.edits, ...es] })
+  }, [commit])
   const onUpdate = useCallback((i: number, e: Markup) => {
     const s = snapRef.current
     commit({ ...s, edits: s.edits.map((x, j) => (j === i ? e : x)) })
@@ -518,6 +522,7 @@ export default function PdfEditor(props: EditorProps) {
   useEffect(() => {
     const handle: EditorHandle = {
       language: 'pdf',
+      zoomBy: dir => live.current.zoomStep(dir),
       status: () => {
         const L = live.current
         const pending = pendingCount(snapRef.current)
@@ -526,6 +531,10 @@ export default function PdfEditor(props: EditorProps) {
           ...(pending ? [{ text: `${pending} unsaved change${pending === 1 ? '' : 's'}`, title: 'Written into the PDF when you save (Ctrl+S)' }] : []),
           ...(textNow.current.length ? [{ text: `${textNow.current.reduce((n, t) => n + (t.match(/\S+/g)?.length || 0), 0).toLocaleString()} words` }] : [])
         ]
+      },
+      peekPayload: async () => {
+        const s = snapRef.current
+        return { kind: 'pdf', bytes: pendingCount(s) ? await live.current.applyAll(s) : await bytesOf(s) }
       },
       getPayload: async () => {
         const s = snapRef.current
@@ -624,13 +633,14 @@ export default function PdfEditor(props: EditorProps) {
             }
             return { lines }
           }
+          case 'replace': // the generic `gdocs replace` lands here for PDFs
           case 'replaceText': {
             const find = String(op.find ?? '')
             const withText = String(op.with ?? '')
             if (!find) throw new Error('replaceText needs find (and with)')
             const pages = op.page != null ? parsePages(op.page as number, n) : Array.from({ length: n }, (_, i) => i + 1)
             const s = snapRef.current
-            const edits = [...s.edits]
+            let edits = [...s.edits]
             const touched: number[] = []
             let count = 0
             let spans = ''
@@ -649,17 +659,13 @@ export default function PdfEditor(props: EditorProps) {
               try {
                 plan = planReplace(lines, find, withText, { all: !!op.all })
               } catch (e) {
-                if (/more than one line/.test((e as Error).message)) spans ||= (e as Error).message
+                if (/aren't one paragraph/.test((e as Error).message)) spans ||= (e as Error).message
                 continue
               }
               const { canvas, done } = await L().pageCanvas(d, pg)
               try {
-                for (const p of plan) {
-                  const i = prior.get(p.line)
-                  if (i != null) edits[i] = { ...(edits[i] as ReplaceEdit), text: p.text }
-                  else edits.push(lineEdit(p.line, p.text, sampleColors(canvas, p.line, d.sizes[pg - 1].w)))
-                  count += p.count
-                }
+                edits = applyPlan(edits, plan, l => sampleColors(canvas, l, d.sizes[pg - 1].w))
+                count += plan.reduce((n, p) => n + p.count, 0)
               } finally {
                 done()
               }
@@ -811,6 +817,7 @@ export default function PdfEditor(props: EditorProps) {
                   formValues={snap.form}
                   onSelect={setSelected}
                   onAdd={onAdd}
+                  onAddAll={onAddAll}
                   onUpdate={onUpdate}
                   onRemove={onRemove}
                   onFormChange={onFormChange}

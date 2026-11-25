@@ -261,6 +261,7 @@ export default function TextEditor(props: EditorProps) {
     }
     const handle: EditorHandle = {
       language,
+      zoomBy: dir => setSize(s => Math.max(8, Math.min(40, s + dir))),
       status: () => statusItems.current,
       getPayload: () => ({ kind: 'text', text: v().state.doc.toString(), eol }),
       agent: async op => {

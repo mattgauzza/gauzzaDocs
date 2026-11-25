@@ -208,9 +208,11 @@ gdocs ls Clients                   # one level of a project or folder
 ## Editing PDFs
 
 I wanted to fix a typo in a PDF without hunting down the Word file it came from. Press E for Edit text and click any
-line to change it. The new words go in the same spot at the same size and color, in the closest standard font, and the
-old words are taken out of the file instead of just painted over. Forms fill in right on the page and Sign lets you
-draw your signature and drop it on the line. Agents do the same with `gdocs pdf replace-text` and `gdocs pdf fill`.
+line to change it. A line that's part of a paragraph opens the whole paragraph, and what you type wraps to the same
+width and line spacing. The new words go in the same spot at the same size and color, in the closest standard font, and
+the old words are taken out of the file instead of just painted over. Forms fill in right on the page and Sign lets you
+draw your signature and drop it on the line. Agents do the same with `gdocs replace` and `gdocs pdf fill`, even when the
+words they're changing run across lines. With the app running they edit the open file live, so the colors match.
 Open as document in the Tools menu turns a PDF into a Word file you can rewrite, but you get the text, headings and
 lists, not the layout. Scanned pages have no text to edit.
 

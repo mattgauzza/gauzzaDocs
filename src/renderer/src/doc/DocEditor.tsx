@@ -14,6 +14,7 @@ import { GAP, PAGE_H, type PageInfo, Pagination, pageAt, setPageless } from './p
 import { Icon } from './icons'
 import { flash, outline, replaceRanges, runDocOp, searchDoc } from './live'
 import { FONTS, Toolbar, ZOOMS, applyStyle, currentSize } from './Toolbar'
+import { stepZoom } from '../shell/zoom'
 import './doc.css'
 import { usePanelSize } from '../shell/resize'
 
@@ -366,6 +367,7 @@ export default function DocEditor(props: EditorProps) {
     if (!editor) return
     const handle: EditorHandle = {
       language: isMd ? 'markdown' : 'html',
+      zoomBy: dir => setZoom(z => stepZoom(ZOOMS, z, dir)),
       status: () => statusItems.current,
       getPayload: () => (live.current.flushSource(), { kind: 'doc', html: editor.getHTML() }),
       getPrintHtml: () => wrapHtml(editor.getHTML(), title).replace('</style>', `${PRINT_CSS}</style>`),

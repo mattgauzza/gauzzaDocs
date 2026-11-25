@@ -63,6 +63,8 @@ function EditBox(props: { el: SlideElement; deck: Deck; editing: Editing; editRe
 }
 
 interface Props {
+  /** Percent of the size that fits the window (Ctrl+scroll). Above 100 the view scrolls. */
+  zoom?: number
   deck: Deck
   slide: Slide
   sel: string[]
@@ -86,7 +88,8 @@ const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 export function Canvas(p: Props) {
   const viewRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
-  const [scale, setScale] = useState(0.5)
+  const [fitScale, setScale] = useState(0.5)
+  const scale = fitScale * ((p.zoom || 100) / 100)
   const [guides, setGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] })
   const [box, setBox] = useState<{ x: number; y: number; w: number; h: number; kind: 'marquee' | 'draw' } | null>(null)
   const pr = useRef(p)
@@ -322,7 +325,7 @@ export function Canvas(p: Props) {
   return (
     <div
       ref={viewRef}
-      className={`sl-view${p.tool !== 'select' ? ' drawing' : ''}`}
+      className={`sl-view${p.tool !== 'select' ? ' drawing' : ''}${(p.zoom || 100) > 100 ? ' zoomed' : ''}`}
       tabIndex={-1}
       onPointerDown={onPointerDown}
       onDoubleClick={onDoubleClick}

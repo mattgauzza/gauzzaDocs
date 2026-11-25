@@ -1,8 +1,9 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormValue } from '../../../shared/pdf/forms'
-import { type PdfJsPageLike, type PdfLine, lineEdit, pageLines } from '../../../shared/pdf/lines'
+import { type PdfJsPageLike, type PdfLine, lineEdit, pageLines, paraEdits, paragraphsOf } from '../../../shared/pdf/lines'
+import { fitParagraph } from '../../../shared/pdf/wrap'
 import type { PdfEdit } from '../../../shared/types'
-import { type Markup, type ReplaceEdit, type Tool, bbox, cssFamily, lineTop, resize, sampleColors, translate } from './markup'
+import { type Markup, type ReplaceEdit, type Tool, bbox, cssFamily, lineTop, paraLeft, resize, sampleColors, translate } from './markup'
 import { type PdfDoc, pdfjs } from './pdfjs'
 
 type TextEdit = Extract<PdfEdit, { type: 'text' }>
@@ -23,6 +24,8 @@ export interface PageProps {
   formValues: Record<string, FormValue>
   onSelect(i: number | null): void
   onAdd(e: Markup): void
+  /** Several edits as one undo step (a paragraph: its first line with the new words, the rest emptied). */
+  onAddAll(es: Markup[]): void
   onUpdate(i: number, e: Markup): void
   onRemove(i: number): void
   onFormChange(name: string, value: FormValue): void
@@ -62,7 +65,7 @@ function PdfPage(p: PageProps) {
   const [textVersion, setTextVersion] = useState(0)
   const [drag, setDrag] = useState<Drag | null>(null)
   const [editing, setEditing] = useState<{ i: number | null; x: number; y: number; text: string; size: number; color: string } | null>(null)
-  const [lineEditing, setLineEditing] = useState<{ i: number | null; e: ReplaceEdit; original: string } | null>(null)
+  const [lineEditing, setLineEditing] = useState<{ i: number | null; e: ReplaceEdit; original: string; rest?: ReplaceEdit[] } | null>(null)
   const [lines, setLines] = useState<PdfLine[] | null>(null)
   const [widgets, setWidgets] = useState<Widget[] | null>(null)
   const W = p.size.w * scale
@@ -274,6 +277,13 @@ function PdfPage(p: PageProps) {
   // ---- editing a line that is already in the PDF ----
   const openLine = (line: PdfLine) => {
     const colors = canvasRef.current ? sampleColors(canvasRef.current, line, p.size.w) : {}
+    // A line in a paragraph opens the whole paragraph, so new words can flow onto the next lines.
+    const para = paragraphsOf(lines || []).find(g => g.includes(line))
+    if (para && para.length > 1 && !para.some(covered)) {
+      const text = para.map(l => l.text).join(' ').replace(/\s+/g, ' ').trim()
+      const [first, ...rest] = paraEdits(para, text, colors)
+      return setLineEditing({ i: null, e: first, original: text, rest })
+    }
     setLineEditing({ i: null, e: lineEdit(line, line.text, colors), original: line.text })
   }
   const finishLine = (text: string | null) => {
@@ -282,11 +292,24 @@ function PdfPage(p: PageProps) {
     if (!ed || text == null) return // cancelled
     const value = text.replace(/ /g, ' ').replace(/\n+$/, '')
     if (ed.i == null) {
-      if (value !== ed.original) p.onAdd({ ...ed.e, text: value })
+      if (value !== ed.original) p.onAddAll([{ ...ed.e, text: value }, ...(ed.rest || [])])
     } else if (value !== ed.e.text) p.onUpdate(ed.i, { ...ed.e, text: value })
   }
   // Lines already edited (pending) are reached through their edit, not the original line.
   const covered = (l: PdfLine) => p.markups.some(m => m.e.type === 'replaceText' && Math.abs(m.e.x - l.x) < 0.5 && Math.abs(m.e.y - l.y) < 0.5)
+  /** The pending paragraph edit a line was emptied for (it opens that paragraph instead). */
+  const paragraphOf = (l: PdfLine) => {
+    const emptied = p.markups.some(m => m.e.type === 'replaceText' && !m.e.text && Math.abs(m.e.x - l.x) < 0.5 && Math.abs(m.e.y - l.y) < 0.5)
+    if (!emptied) return null
+    let best: { i: number; e: ReplaceEdit } | null = null
+    for (const m of p.markups) {
+      if (m.e.type !== 'replaceText' || m.e.wrapRight == null || m.e.y >= l.y) continue
+      if (Math.abs((m.e.hang ?? m.e.x) - l.x) > m.e.size && Math.abs(m.e.x - l.x) > m.e.size) continue
+      if (l.y - m.e.y > (m.e.maxLines || 1) * (m.e.lineHeight ?? m.e.size * 1.2) + 1) continue
+      if (!best || m.e.y > best.e.y) best = { i: m.i, e: m.e }
+    }
+    return best
+  }
 
   // Live preview of a move / resize in progress.
   const shown = (i: number, e: Markup): Markup => {
@@ -326,20 +349,24 @@ function PdfPage(p: PageProps) {
           ) : null
         )}
         {p.tool === 'edittext' &&
-          lines?.filter(l => !covered(l)).map(l => (
-            <div
-              key={l.id}
-              className="pdf-line"
-              title="Click to edit this line"
-              style={{ left: l.x * scale - 2, top: l.y * scale - 1, width: l.w * scale + 4, height: l.h * scale + 2 }}
-              onPointerDown={ev => {
-                if (ev.button !== 0) return
-                ev.preventDefault()
-                ev.stopPropagation()
-                openLine(l)
-              }}
-            />
-          ))}
+          lines
+            ?.map(l => ({ l, para: covered(l) ? paragraphOf(l) : null }))
+            .filter(({ l, para }) => !covered(l) || para)
+            .map(({ l, para }) => (
+              <div
+                key={l.id}
+                className="pdf-line"
+                title={para ? 'Click to edit this paragraph' : 'Click to edit this line'}
+                style={{ left: l.x * scale - 2, top: l.y * scale - 1, width: l.w * scale + 4, height: l.h * scale + 2 }}
+                onPointerDown={ev => {
+                  if (ev.button !== 0) return
+                  ev.preventDefault()
+                  ev.stopPropagation()
+                  if (para) setLineEditing({ i: para.i, e: para.e, original: para.e.text })
+                  else openLine(l)
+                }}
+              />
+            ))}
         {p.markups.map(({ i, e: raw }) => {
           if (editing?.i === i || lineEditing?.i === i) return null
           const e = shown(i, raw)
@@ -348,7 +375,7 @@ function PdfPage(p: PageProps) {
           return (
             <div
               key={i}
-              className={`pdf-mark mark-${e.type}${sel ? ' selected' : ''}`}
+              className={`pdf-mark mark-${e.type}${sel ? ' selected' : ''}${e.type === 'replaceText' && !e.text ? ' emptied' : ''}`}
               style={{ left: b.x * scale, top: b.y * scale, width: b.w * scale, height: b.h * scale }}
               onPointerDown={ev => onItemDown(i, raw, ev)}
               onDoubleClick={() => (e.type === 'text' ? startEditText(i, e) : e.type === 'replaceText' ? setLineEditing({ i, e: raw as ReplaceEdit, original: (raw as ReplaceEdit).text }) : undefined)}
@@ -387,27 +414,38 @@ function PdfPage(p: PageProps) {
             onDone={t => finishEditing(t ?? editing.text)}
           />
         )}
-        {lineEditing?.i == null && lineEditing && (
-          <div
-            className="pdf-cover"
-            style={{ left: (lineEditing.e.x - 0.6) * scale, top: (lineEditing.e.y - 0.6) * scale, width: (lineEditing.e.w + 1.2) * scale, height: (lineEditing.e.h + 1.2) * scale, background: lineEditing.e.bg || '#fff' }}
-          />
-        )}
+        {lineEditing?.i == null &&
+          lineEditing &&
+          [lineEditing.e, ...(lineEditing.rest || [])].map((c, k) => (
+            <div
+              key={`lc${k}`}
+              className="pdf-cover"
+              style={{ left: (c.x - 0.6) * scale, top: (c.y - 0.6) * scale, width: (c.w + 1.2) * scale, height: (c.h + 1.2) * scale, background: c.bg || '#fff' }}
+            />
+          ))}
         {lineEditing && (
           <TextBox
             key={`line-${lineEditing.i}-${lineEditing.e.x}-${lineEditing.e.y}`}
             className="pdf-linebox"
-            left={(lineEditing.e.x + (lineEditing.e.dx || 0)) * scale}
+            left={((lineEditing.e.wrapRight != null ? paraLeft(lineEditing.e) : lineEditing.e.x) + (lineEditing.e.dx || 0)) * scale}
             top={lineTop(lineEditing.e) * scale}
             style={{
               fontFamily: cssFamily(lineEditing.e.font),
               fontWeight: lineEditing.e.bold ? 700 : 400,
               fontStyle: lineEditing.e.italic ? 'italic' : 'normal',
               fontSize: lineEditing.e.size * scale,
-              lineHeight: `${lineEditing.e.size * 1.2 * scale}px`,
+              lineHeight: `${(lineEditing.e.wrapRight != null ? lineEditing.e.lineHeight ?? lineEditing.e.size * 1.2 : lineEditing.e.size * 1.2) * scale}px`,
               minWidth: lineEditing.e.w * scale,
               color: lineEditing.e.color,
-              background: lineEditing.e.bg
+              background: lineEditing.e.bg,
+              // A paragraph wraps at its old right edge while you type, its first line indented as before.
+              ...(lineEditing.e.wrapRight != null
+                ? {
+                    width: (lineEditing.e.wrapRight - paraLeft(lineEditing.e)) * scale,
+                    whiteSpace: 'pre-wrap',
+                    textIndent: (lineEditing.e.x - paraLeft(lineEditing.e)) * scale
+                  }
+                : {})
             }}
             initial={lineEditing.e.text}
             selectAll={lineEditing.i == null}
@@ -426,6 +464,27 @@ function MarkBody({ e, b, scale }: { e: Markup; b: { x: number; y: number; w: nu
     case 'text':
       return <div className="mark-text-body" style={{ fontSize: (e.size || 12) * scale, color: e.color || '#000' }}>{e.text}</div>
     case 'replaceText':
+      if (e.wrapRight != null) {
+        const fit = fitParagraph(e)
+        const left = paraLeft(e)
+        return (
+          <div
+            className="mark-text-body"
+            style={{
+              fontFamily: cssFamily(e.font),
+              fontWeight: e.bold ? 700 : 400,
+              fontStyle: e.italic ? 'italic' : 'normal',
+              fontSize: fit.size * scale,
+              lineHeight: `${fit.lineHeight * scale}px`,
+              color: e.color || '#000'
+            }}
+          >
+            {fit.lines.map((l, k) => (
+              <div key={k} style={{ paddingLeft: ((k ? (e.hang ?? e.x) : e.x) - left) * scale }}>{l || ' '}</div>
+            ))}
+          </div>
+        )
+      }
       return (
         <div
           className="mark-text-body"

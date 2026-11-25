@@ -1,4 +1,5 @@
 import type { PdfEdit } from '../../../shared/types'
+import { fitParagraph } from '../../../shared/pdf/wrap'
 
 /** Markup that stays editable on the page until saved (page structure changes are applied at once instead). */
 export type Markup = Extract<PdfEdit, { type: 'text' | 'highlight' | 'rect' | 'ink' | 'image' | 'replaceText' }>
@@ -18,7 +19,14 @@ export const cssFont = (e: ReplaceEdit, scale = 1) =>
  * box has to start, in points, for its baseline to sit on the PDF baseline; the ratios come from the CSS fonts' metrics.
  */
 const BASELINE = { sans: 0.9465, serif: 0.9375, mono: 0.8665 }
-export const lineTop = (e: ReplaceEdit) => (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - BASELINE[e.font || 'sans'] * e.size
+export const lineTop = (e: ReplaceEdit) => {
+  if (e.wrapRight == null) return (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - BASELINE[e.font || 'sans'] * e.size
+  // A paragraph uses its own line spacing: the baseline moves down by half of the extra leading.
+  const fit = fitParagraph(e)
+  return (e.base ?? e.y + e.h * 0.8) + (e.dy || 0) - (BASELINE[e.font || 'sans'] + (fit.lineHeight / fit.size - 1.2) / 2) * fit.size
+}
+/** Left edge of a replaced paragraph (its first line may be indented, or hang). */
+export const paraLeft = (e: ReplaceEdit) => Math.min(e.x, e.hang ?? e.x)
 
 export const DEFAULT_COLORS: Record<string, string> = { text: '#000000', highlight: '#ffeb3b', draw: '#1a73e8', rect: '#d93025' }
 
@@ -41,6 +49,11 @@ export function bbox(e: Markup) {
     case 'text':
       return textBox(e)
     case 'replaceText': {
+      if (e.wrapRight != null) {
+        const fit = fitParagraph(e)
+        const left = paraLeft(e)
+        return { x: left + (e.dx || 0), y: lineTop(e), w: Math.max(6, e.wrapRight - left), h: Math.max(1, fit.lines.length) * fit.lineHeight }
+      }
       measureCtx ??= document.createElement('canvas').getContext('2d')
       let w = e.w
       if (measureCtx) {

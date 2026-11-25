@@ -3,10 +3,11 @@ import { test } from 'node:test'
 import { PDFDocument, PDFName, PDFRawStream, StandardFonts, decodePDFRawStream, rgb } from 'pdf-lib'
 import { pdfLines, pdfOps, pdfText, replaceTextEdits } from '../src/core/ops/pdf'
 import { removeTextInBoxes, tokenize } from '../src/shared/pdf/content'
-import { applyPdfEdits, standardFontName } from '../src/shared/pdf/edits'
+import { applyPdfEdits, emptiedFirst, standardFontName } from '../src/shared/pdf/edits'
 import { fillFields, listFields } from '../src/shared/pdf/forms'
-import { guessFont, lineEdit, linesToHtml, planReplace } from '../src/shared/pdf/lines'
-import type { FilePayload } from '../src/shared/types'
+import { applyPlan, guessFont, lineEdit, linesToHtml, paragraphsOf, planReplace } from '../src/shared/pdf/lines'
+import { fitParagraph } from '../src/shared/pdf/wrap'
+import type { FilePayload, PdfEdit } from '../src/shared/types'
 
 async function letter() {
   const doc = await PDFDocument.create()
@@ -71,11 +72,11 @@ test('replaceText removes the old words from the file and draws the new ones', a
   assert.doesNotMatch((await pdfText(gone))[0].text, /shipped the editor/)
 })
 
-test('replaceText op: find within a line, all, and a clear error across lines', async () => {
+test('replaceText op: find within a line, all, and a clear error across paragraphs', async () => {
   const payload: FilePayload = { kind: 'pdf', bytes: await letter() }
   const r = await pdfOps(payload, { op: 'replaceText', page: 1, find: 'Q3', with: 'Q4' }, { path: 'x.pdf' })
   assert.match((await pdfText((r.payload as { bytes: Uint8Array }).bytes))[0].text, /percent in Q4\./)
-  await assert.rejects(async () => pdfOps(payload, { op: 'replaceText', find: 'editor on time', with: 'x' }, { path: 'x.pdf' }), /more than one line/)
+  await assert.rejects(async () => pdfOps(payload, { op: 'replaceText', find: 'Report Revenue', with: 'x' }, { path: 'x.pdf' }), /aren't one paragraph/)
   await assert.rejects(async () => pdfOps(payload, { op: 'replaceText', find: 'nowhere', with: 'x' }, { path: 'x.pdf' }), /not found/)
   const all = await replaceTextEdits(payload.bytes, 'e', 'E', { all: true })
   assert.ok(all.count > 5 && all.edits.length >= 3)
@@ -83,6 +84,45 @@ test('replaceText op: find within a line, all, and a clear error across lines', 
   assert.equal(tl.lines[0].id, '1:0')
   const lines = (await pdfLines(payload.bytes, 1))[0]
   assert.throws(() => planReplace(lines, 'budget. extra', 'x'), /not found/)
+})
+
+test('paragraphs: a match across lines, or words that outgrow their line, rewrite and rewrap the paragraph', async () => {
+  const bytes = await letter()
+  const [lines] = await pdfLines(bytes, 1)
+  const paras = paragraphsOf(lines)
+  assert.deepEqual(paras.map(p => p.length), [1, 3, 1], 'title, the three body lines, the second column')
+  // The left column's text in reading order (the "Total" column sits on the first body line's baseline).
+  const flat = async (b: Uint8Array) => (await pdfLines(b, 1))[0].filter(l => l.x < 300).map(l => l.text).join(' ').replace(/\s+/g, ' ')
+  const all = (b: Uint8Array) => pdfText(b).then(t => t[0].text)
+
+  // Across two lines.
+  const payload: FilePayload = { kind: 'pdf', bytes }
+  const r = await pdfOps(payload, { op: 'replaceText', find: 'editor on time', with: 'new app ahead of time' }, { path: 'x.pdf' })
+  const out = (r.payload as { bytes: Uint8Array }).bytes
+  assert.match(await flat(out), /Revenue grew 12 percent in Q3\. The team shipped the new app ahead of time and under budget\./)
+  assert.doesNotMatch(await flat(out), /editor/)
+  assert.match(await all(out), /Total: 1,200/, 'the other column is untouched')
+
+  // Inside one line, but too long for it now: the paragraph rewraps within its old width, more lines if it needs them.
+  const plan = planReplace(lines, 'Q3', 'the third quarter, ahead of every forecast we made')
+  assert.equal(plan[0].para?.length, 3)
+  const right = Math.max(...plan[0].para!.map(l => l.x + l.w))
+  const edits = applyPlan([], plan)
+  const first = edits[0] as Extract<PdfEdit, { type: 'replaceText' }>
+  const fit = fitParagraph(first)
+  assert.ok(fit.lines.length >= 3 && fit.lines.length <= 4)
+  const wrapped = await applyPdfEdits(bytes, edits)
+  const after = (await pdfLines(wrapped, 1))[0].filter(l => l.x < 300 && l.size < 20) // the body, not the title
+  assert.ok(after.every(l => l.x + l.w <= right + 1), 'no line runs past the old right edge')
+  assert.match(await flat(wrapped), /in the third quarter, ahead of every forecast we made\. The team shipped the editor on time and under budget\./)
+
+  // The emptied lines are written before the paragraph's new words, or they'd paint over them.
+  const order = emptiedFirst([edits[0], ...edits.slice(1), { type: 'rotate', page: 1, degrees: 90 }, edits[0]])
+  assert.deepEqual(order.map(e => (e.type === 'replaceText' ? (e.text ? 'para' : 'empty') : e.type)), ['empty', 'empty', 'para', 'rotate', 'para'])
+
+  // A short change that still fits keeps every other line as it was.
+  const small = planReplace(lines, 'Q3', 'Q4')
+  assert.equal(small[0].para, undefined)
 })
 
 test('forms: list, fill, read back, flatten', async () => {

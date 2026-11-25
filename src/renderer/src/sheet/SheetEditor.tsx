@@ -10,6 +10,7 @@ import type { EditorHandle, EditorProps, MenuItem } from '../editor'
 import { CfPanel, ChartBox, ChartPanel } from './Panels'
 import { CH, DEF_H, DEF_W, REF_COLORS, RH, type Snap, applySnap, bumpDecimals, dims, hasFormulas, makeAxis, makeSnap, used } from './layout'
 import './sheet.css'
+import { SHEET_ZOOMS, stepZoom } from '../shell/zoom'
 
 type Pos = { r: number; c: number }
 interface EditState { r: number; c: number; text: string; mode: 'type' | 'edit'; bar?: boolean; orig: string }
@@ -108,6 +109,7 @@ export default function SheetEditor(props: EditorProps) {
   const [edit, setEdit] = useState<EditState | null>(null)
   const [scroll, setScroll] = useState({ x: 0, y: 0 })
   const [view, setView] = useState({ w: 900, h: 600 })
+  const [zoom, setZoom] = useState(100) // Ctrl+scroll
   const [flash, setFlash] = useState<{ sheet: number; range: Range; key: number } | null>(null)
   const [menu, setMenu] = useState<CtxMenu | null>(null)
   const [find, setFind] = useState<{ q: string; rep: string; showRep: boolean; idx: number } | null>(null)
@@ -980,6 +982,7 @@ export default function SheetEditor(props: EditorProps) {
   ensureVisibleRef.current = ensureVisible
   useEffect(() => {
     const handle: EditorHandle = {
+      zoomBy: dir => setZoom(z => stepZoom(SHEET_ZOOMS, z, dir)),
       getPayload: () => api.current.getPayload(),
       agent: (op, who) => api.current.agent(op, who),
       getPrintHtml: () => api.current.getPrintHtml!(),
@@ -1308,6 +1311,7 @@ export default function SheetEditor(props: EditorProps) {
         <div
           ref={scrollRef}
           className={'sg-scroll' + (editingFormula ? ' pointing' : '')}
+          style={zoom !== 100 ? { zoom: zoom / 100 } : undefined}
           tabIndex={0}
           onScroll={onScroll}
           onKeyDown={onGridKey}

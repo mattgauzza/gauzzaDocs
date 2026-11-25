@@ -21,6 +21,8 @@ export type MenuName = 'Edit' | 'View' | 'Insert' | 'Format' | 'Tools'
 export interface EditorHandle {
   /** Current content, for Save / autosave / export. */
   getPayload(): FilePayload | Promise<FilePayload>
+  /** The same content without the side effects of saving (a PDF folds its pending edits into the page on save). */
+  peekPayload?(): FilePayload | Promise<FilePayload>
   /**
    * An agent op on the live editor (routed here from the CLI when the file is open). Implement 'read', 'write',
    * 'info' and the kind's ops (src/shared/ops.md). Edits must go through the editor so they are undoable and visible,
@@ -41,6 +43,8 @@ export interface EditorHandle {
   /** Extra menu items the editor adds to the shell's menu bar. */
   menus?(): Partial<Record<MenuName, MenuItem[]>>
   focus?(): void
+  /** Ctrl+scroll (and trackpad pinch) over the editor: one zoom step in (1) or out (-1). */
+  zoomBy?(dir: 1 | -1): void
   /**
    * Live facts for the status bar at the bottom of the window (Ln/Col, words, pages, ...). The shell calls this
    * several times a second while the tab is in focus, so return values cached on change, never computed here.

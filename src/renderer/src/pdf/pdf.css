@@ -110,3 +110,6 @@ select.pdf-field { padding: 0 1px; }
 .pdf-search .muted { font-size: 12px; min-width: 64px; text-align: right; }
 
 .pdf-toast { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 6; padding: 10px 18px; border-radius: 6px; background: #303134; color: #fff; font-size: 13px; box-shadow: var(--shadow); }
+
+/* a line emptied because its paragraph was rewritten: nothing to show or click (its cover still paints) */
+.pdf-mark.mark-replaceText.emptied { display: none; }

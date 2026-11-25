@@ -64,6 +64,13 @@ export type PdfEdit =
       bg?: string
       dx?: number
       dy?: number
+      // A whole paragraph (shared/pdf/wrap.ts): `text` is wrapped to end at wrapRight (display x); lines after the
+      // first start at hang; lineHeight is the old baseline-to-baseline spacing. The paragraph's other lines carry
+      // their own replaceText edits with empty text, which take their old words out.
+      wrapRight?: number
+      hang?: number
+      lineHeight?: number
+      maxLines?: number
     }
   | { type: 'rotate'; page: number; degrees: number } // added to the page's current rotation
   | { type: 'delete'; page: number }

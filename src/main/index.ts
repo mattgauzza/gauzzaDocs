@@ -191,6 +191,9 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       if (!op?.op) throw new Error('missing op')
       // --live: open it, or bring its tab to the front, so the person can watch the edit happen.
       if (params.live) await openInWindow(file, { focus: params.focus !== false })
+      // Replacing text in a PDF needs the page drawn to match its text and background colors: only the app can.
+      else if (kindOf(file) === 'pdf' && (op.op === 'replaceText' || op.op === 'replace') && !isOpen(file) && win)
+        await openInWindow(file, { focus: false })
       if (isOpen(file)) {
         const result = await askWindow('agent', { path: file, op, agent })
         return { result, live: true }

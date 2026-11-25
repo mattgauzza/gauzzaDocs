@@ -13,6 +13,7 @@ import { Present } from './Present'
 import { type Fmt, Toolbar, type ToolbarActions } from './Toolbar'
 import { caretStyle, parseEdit, selectedBlocks, setSelectionSize } from './textEdit'
 import './slides.css'
+import { SLIDE_ZOOMS, stepZoom } from '../shell/zoom'
 
 /**
  * Presentation editor (.pptx), in the style of Google Slides: filmstrip on the left, the slide on a canvas, speaker
@@ -66,6 +67,7 @@ export default function SlidesEditor(props: EditorProps) {
   const [sel, setSelState] = useState<string[]>([])
   const selRef = useRef<string[]>([])
   const [editing, setEditingState] = useState<Editing | null>(null)
+  const [zoom, setZoom] = useState(100) // percent of the size that fits the window (Ctrl+scroll)
   const editingRef = useRef<Editing | null>(null)
   const editRef = useRef<HTMLDivElement | null>(null)
   const editN = useRef(0)
@@ -716,6 +718,7 @@ export default function SlidesEditor(props: EditorProps) {
     const L = () => live.current
     const handle: EditorHandle = {
       language: 'slides',
+      zoomBy: dir => setZoom(z => stepZoom(SLIDE_ZOOMS, z, dir)),
       getPayload: () => {
         L().flushEdit(false, true)
         return { kind: 'slides', deck: deckRef.current, ...(loaded ? { lossy: loaded.lossy, lossyReasons: loaded.lossyReasons } : {}) }
@@ -822,6 +825,7 @@ export default function SlidesEditor(props: EditorProps) {
         <Filmstrip deck={deck} cur={cur} flash={flash} onPick={go} onMove={moveSlide} onContext={filmMenu} />
         <div className="sl-main">
           <Canvas
+            zoom={zoom}
             deck={deck}
             slide={slide}
             sel={sel}

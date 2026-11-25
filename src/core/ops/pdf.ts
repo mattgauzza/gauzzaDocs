@@ -5,7 +5,7 @@ import { applyPdfEdits, checkEdits, displaySize, parsePages } from '../../shared
 import { PDF_OPS_HELP, structuralEdits } from '../../shared/ops/pdf'
 import { allText, joinPages, type PdfJsDocLike } from '../../shared/pdf/text'
 import { type FormValue, coerceValue, fillFields, listFields } from '../../shared/pdf/forms'
-import { type PdfJsPageLike, type PdfLine, lineEdit, pageLines, planReplace } from '../../shared/pdf/lines'
+import { type PdfJsPageLike, type PdfLine, applyPlan, pageLines, planReplace } from '../../shared/pdf/lines'
 import { OpError, type OpHandler, str } from '../../shared/ops/types'
 
 /** Opens bytes with the pdf.js legacy build (the one meant for Node). */
@@ -41,7 +41,7 @@ export async function pdfLines(bytes: Uint8Array, spec?: string | number): Promi
 }
 
 /**
- * Replaces text that is already in the PDF (within single lines). Without a page, searches every page and stops at the
+ * Replaces text that is already in the PDF (a line, or a paragraph rewrapped). Without a page, searches every page and stops at the
  * first match unless `all`. Returns the edits it made, so the live editor can show them the same way.
  */
 export async function replaceTextEdits(bytes: Uint8Array, find: string, withText: string, opts: { page?: number; all?: boolean }) {
@@ -53,11 +53,11 @@ export async function replaceTextEdits(bytes: Uint8Array, find: string, withText
       plan.push(...planReplace(lines, find, withText, { all: opts.all }))
       if (!opts.all) break
     } catch (e) {
-      if (/more than one line/.test((e as Error).message)) spans ||= (e as Error).message
+      if (/aren't one paragraph/.test((e as Error).message)) spans ||= (e as Error).message
     }
   }
   if (!plan.length) throw new OpError(spans || `"${find}" was not found${opts.page ? ` on page ${opts.page}` : ''}`)
-  return { edits: plan.map(p => lineEdit(p.line, p.text)), count: plan.reduce((n, p) => n + p.count, 0) }
+  return { edits: applyPlan([], plan), count: plan.reduce((n, p) => n + p.count, 0) }
 }
 
 export async function pdfText(bytes: Uint8Array, spec?: string) {
@@ -107,9 +107,18 @@ export const pdfOps: OpHandler = async (payload, op, ctx) => {
       const pages = await pdfLines(bytes, op.page as number | undefined)
       return { result: { lines: pages.flat() } }
     }
+    case 'replace': // the generic `gdocs replace`
     case 'replaceText': {
       const { edits, count } = await replaceTextEdits(bytes, String(op.find ?? ''), String(op.with ?? ''), { page: op.page as number | undefined, all: !!op.all })
-      return { result: { ok: true, replaced: count, lines: edits.length }, payload: changed(await applyPdfEdits(bytes, edits)) }
+      return {
+        result: {
+          ok: true,
+          replaced: count,
+          lines: edits.length,
+          note: 'Edited on disk without gauzzaDocs open, so the new words are black on white. With the app running they match the page colors.'
+        },
+        payload: changed(await applyPdfEdits(bytes, edits))
+      }
     }
     case 'formFields':
       return { result: { fields: await listFields(bytes) } }

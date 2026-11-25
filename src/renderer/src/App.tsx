@@ -598,9 +598,32 @@ export default function App() {
         patch(t.id, { agent: { ...req.agent, color, reading: true, until: Date.now() + 6000 } })
         window.setTimeout(() => force(n => n + 1), 6100)
       }
-      return { kind: t.kind, payload: await h.getPayload() }
+      return { kind: t.kind, payload: await (h.peekPayload ?? h.getPayload)() }
     })
     return () => (offOpen(), offClose(), offAgent(), offSnapshot())
+  }, [])
+
+  // ---------- Ctrl+scroll zooms the document in focus (trackpad pinch arrives as Ctrl+wheel too) ----------
+  useEffect(() => {
+    let acc = 0
+    let last = 0
+    const wheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return
+      const host = (e.target as HTMLElement).closest?.('.editor-host[data-tab]') as HTMLElement | null
+      if (!host) return
+      e.preventDefault()
+      const h = handles.current.get(Number(host.dataset.tab))
+      if (!h?.zoomBy) return
+      // A mouse notch is about 100; trackpads send many small deltas. One step per notch's worth, at most every 60 ms.
+      if (Date.now() - last > 400) acc = 0
+      acc += e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY
+      if (Math.abs(acc) < 50 || Date.now() - last < 60) return
+      h.zoomBy(acc < 0 ? 1 : -1)
+      acc = 0
+      last = Date.now()
+    }
+    window.addEventListener('wheel', wheel, { passive: false, capture: true })
+    return () => window.removeEventListener('wheel', wheel, { capture: true })
   }, [])
 
   // ---------- editor handles ----------
@@ -664,7 +687,7 @@ export default function App() {
   const exportAs = async (t: Tab, format: string) => {
     const hh = handles.current.get(t.id)
     if (!hh) return
-    const payload = await hh.getPayload()
+    const payload = await (hh.peekPayload ?? hh.getPayload)()
     const out = await api.exportFile(t.path, payload, format, hh.getPrintHtml?.())
     if (out) say(`Saved ${baseName(out)}`)
   }
