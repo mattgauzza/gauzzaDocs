@@ -2,11 +2,20 @@
   "id": "writing-tools",
   "name": "Writing tools",
   "version": "1.0.0",
-  "description": "Readability score, reading level, long sentences, passive voice, adverbs and repeated words, live beside your document.",
+  "description": "Readability, long sentences, passive voice, adverbs and repeated words beside your document.",
   "author": "gauzzaDocs",
   "category": "Writing",
-  "tags": ["readability", "style", "grammar", "docs"],
+  "tags": [
+    "readability",
+    "style",
+    "grammar",
+    "docs"
+  ],
   "icon": "✍️",
   "main": "index.js",
-  "languages": ["markdown", "html", "text"]
+  "languages": [
+    "markdown",
+    "html",
+    "text"
+  ]
 }

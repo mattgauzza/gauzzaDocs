@@ -1,45 +1,56 @@
 # gauzzaDocs
 
-A fast, local editor that feels like Google Docs and Sheets: documents, spreadsheets, PDFs and any text or code file,
-in tabs, in one lightweight app. A command-line tool (`gdocs`) lets AI agents and scripts read and edit the same files,
-live in the open editor while you watch.
+gauzzaDocs is a desktop editor for documents, spreadsheets, PDFs and any text or code file. It works like Google Docs
+and Sheets and keeps everything in tabs on your own PC. It comes with a command line tool, `gdocs`, that AI agents use to
+read and edit the same files while you watch. You can comment back to the agent from inside the doc.
 
-- **Docs**: real pages on a gray canvas with the Docs toolbar, headings, lists, checklists, tables, images, links, an
-  outline and comments. Opens and saves `.html`, `.md` and `.docx` (Word). Export to PDF.
-- **Markdown** (what AI tools write): Edit, Read (a clean GitHub-style page), Split (source beside the live page) and
-  Source views. Front matter, task lists, tables and fenced code survive open and save unchanged; open tabs follow an
-  agent's changes as it writes.
-- **Sheets**: formula bar, formulas (SUM, IF, VLOOKUP, XLOOKUP, …), formatting, merged cells, conditional formatting,
-  charts, frozen rows, multiple sheets. Opens and saves `.xlsx`, `.csv`, `.tsv`.
-- **PDFs**: view, select text, add text, highlight, draw, white out, add a signature image, rotate, reorder and delete pages.
-- **Everything else**: a code editor like Notepad++: syntax highlighting for about 100 languages, find/replace, multiple
-  cursors, folding, word wrap. Plugins add formatters, previews and commands.
-- Files stay ordinary files on your PC. No account, no server, nothing is uploaded.
+- Documents look like Google Docs, with real pages, the usual toolbar, comments and an outline. They open and save as
+  Word, Markdown or HTML and export to PDF.
+- Markdown files (which is mostly what AI writes) have Edit, Read, Split and Source views. Front matter, tables, task
+  lists and code blocks come back out the same way they went in.
+- Spreadsheets have a formula bar, the usual formulas, formatting, merged cells, conditional formatting and charts.
+  They open and save as Excel, CSV or TSV.
+- PDFs can be marked up with text, highlights, drawing, whiteout or a signature image. Pages can be rotated, reordered
+  or deleted.
+- Every other file opens in a code editor that works like Notepad++. Plugins add formatters, previews and commands.
+- Files stay normal files on your PC. There's no account and nothing gets uploaded.
 
-The sibling project [Qmail](https://github.com/mattgauzza/quickMail) does the same for email.
+My email app [Qmail](https://github.com/mattgauzza/quickMail) works the same way for mail.
+
+## Why I built it
+
+I don't have an Office subscription. LibreOffice and OpenOffice feel ancient, slow and hard to use. I wanted something
+that feels like Google Docs but runs on my own computer.
+
+I also wanted a real connection to my AI. When an agent edits a doc for me, I want to watch it happen. And if I leave a
+comment or change something, that should stream straight back to the agent so it can keep going.
+
+So gauzzaDocs is an editor that feels like Google Docs plus a command line tool agents use to work in the same files
+with you.
 
 ## Install
 
-Download the latest installer from the [Releases page](https://github.com/mattgauzza/gauzzaDocs/releases/latest):
+Download the latest installer from the [Releases page](https://github.com/mattgauzza/gauzzaDocs/releases/latest).
 
-- **Windows**: `gauzzaDocs-Setup-x.y.z.exe`. It installs for your user only, with no administrator prompt. The installer
-  is not code-signed, so Windows may say "Windows protected your PC": choose **More info → Run anyway**.
-- **macOS (Apple Silicon)**: `gauzzaDocs-x.y.z-mac-arm64.dmg`. The app is not signed with an Apple certificate, so run
-  `xattr -cr /Applications/gauzzaDocs.app` once in Terminal before opening it.
-- **Linux**: `gauzzaDocs-x.y.z-linux-amd64.deb` (`sudo apt install ./gauzzaDocs-*.deb`) or the `.AppImage`.
+On Windows, run `gauzzaDocs-Setup-x.y.z.exe`. It installs for your user only and doesn't ask for an administrator. The
+installer isn't code signed, so Windows may show "Windows protected your PC". Choose More info, then Run anyway.
 
-The first start puts the `gdocs` command on your PATH (Windows: in the per-user WindowsApps folder; macOS and Linux:
-`~/.local/bin`). Nothing else needs installing.
+On a Mac with Apple Silicon, open `gauzzaDocs-x.y.z-mac-arm64.dmg` and drag the app to Applications. The app isn't
+signed with an Apple certificate, so run `xattr -cr /Applications/gauzzaDocs.app` once in Terminal before you open it.
 
-**Updates** are automatic on Windows and the Linux AppImage: the app checks GitHub releases at start and every half hour,
-downloads in the background, and shows a green download button in the tab strip. Click it to restart into the new
-version, or just close the app. On macOS, download the new `.dmg`.
+On Linux, install `gauzzaDocs-x.y.z-linux-amd64.deb` with `sudo apt install ./gauzzaDocs-*.deb`, or use the AppImage.
 
-## Agents: the `gdocs` CLI
+The first time it starts, the app puts the `gdocs` command on your PATH. Nothing else needs installing.
+
+Updates are automatic on Windows and with the Linux AppImage. The app checks GitHub when it starts and every half hour,
+downloads new versions in the background and shows a green download button in the tab strip. Click it to restart into
+the new version, or just close the app and it updates then. On a Mac, download the new `.dmg`.
+
+## The gdocs command line tool
 
 ```
-gdocs status                              # is the app running, what is open
-gdocs read report.md                      # docs as markdown, sheets as CSV, PDFs as text
+gdocs status                              # is the app running and what's open
+gdocs read report.md                      # docs as Markdown, sheets as CSV, PDFs as text
 gdocs append report.md "## Next steps" --live   # opens it in the app and types it in while you watch
 gdocs replace report.md "Q3" "Q4" --all   # keeps the formatting around each match
 gdocs doc insert report.md --after "Summary" --md "A new paragraph."
@@ -48,55 +59,55 @@ gdocs sheet format budget.xlsx A7:D7 --bold
 gdocs pdf text contract.pdf --pages 1-3
 gdocs pdf highlight contract.pdf --page 2 --x 72 --y 140 --w 300 --h 14
 gdocs format data.json --with json-tools.pretty
-gdocs op notes.txt '{"op":"replaceLines","from":3,"to":5,"content":"…"}'
 ```
 
-- When the app is running and the file is open there, edits go into the open editor: you see them happen, the agent's
-  name shows at the top, and Ctrl+Z undoes them. When it is not open, the file on disk is edited directly.
-  `--live` opens the file first; `--offline` always edits the disk copy.
-- Every command takes `--json`; errors exit non-zero with `{"error": "..."}`. Content arguments take `-` for standard
-  input or `@file`. `gdocs --help` and `gdocs <command> --help` list everything; `gdocs ops` prints the raw op reference.
-- Set `GDOCS_AGENT=Claude` (or `--agent Claude`) to choose the name shown in the app.
-- The bridge listens on 127.0.0.1 only and needs the token in `~/.gauzzadocs/server.json`, so only programs running
-  as you can use it.
+When the app is running and the file is open, edits go straight into the open editor. You see them happen, the agent's
+name shows at the top and Ctrl+Z undoes them. When the file isn't open, the tool edits it on disk. `--live` opens the
+file first and `--offline` always edits the copy on disk.
 
-In the app, **Agent** (top right of any file) shows the commands and ready-made prompts to copy.
+Every command takes `--json`, and errors exit non zero with `{"error": "..."}`. Content can come from standard input
+(`-`) or a file (`@notes.md`). `gdocs --help` lists everything and `gdocs ops` prints every raw operation. Set
+`GDOCS_AGENT=Claude` to choose the name the app shows while the agent works.
 
-### Two-way: comments and edits stream back to the agent
+The tool talks to the app over 127.0.0.1 with a token stored in `~/.gauzzadocs/server.json`, so only programs running
+as you can use it. In the app, the Agent button at the top right of any file shows these commands and some prompts you
+can copy.
 
-Comment on anything (select text, **Ctrl+Alt+M**, or the comment button top right) and an agent that is listening
-hears it at once. So do your own edits, as small before/after diffs. The agent answers in the thread, and its reply
-appears live in the comments panel. While an agent listens, the header says so ("Claude is listening").
+### Comments and edits stream back to the agent
+
+Select some text and press Ctrl+Alt+M (or use the comment button) to leave a comment. An agent that's listening gets it
+right away, along with small before and after diffs of anything you change. It answers in the comment thread and its
+reply shows up live. The header says "Claude is listening" while one is connected.
 
 ```
-gdocs listen report.md --once         # wait for the person's next comment, reply or edit, then exit
+gdocs listen report.md --once         # wait for your next comment, reply or edit, then exit
 gdocs comments report.md --waiting    # threads still waiting for an answer
 gdocs reply report.md <id> "Done, moved it under Risks." --resolve
 gdocs comment report.md "Should this be a table?" --quote "Q4 numbers"
 ```
 
-`listen` first replays open threads that are still waiting for an answer, so nothing said while no agent was
-listening gets lost. The agent's own edits and replies are never echoed back to it. A loop like "listen --once, act,
-reply, listen again" turns any coding agent into a collaborator in the doc; Agent → "Work on a doc with me" has a
-prompt for it. Comments live in `~/.gauzzadocs/comments.json` and follow renames made in the app. They work without the
-app too (`gdocs comments`, `reply`); only `listen` needs it running. Your edits are only diffed while an agent is
-listening, so it costs nothing otherwise.
+An agent that runs `listen --once`, does what you asked, replies and then listens again will keep working with you
+until you tell it to stop. The Agent button has a "Work on a doc with me" prompt for that. When an agent starts
+listening it first gets any comments it missed. Its own edits and replies aren't sent back to it.
 
-### Your writing voice, with Empirical
+Comments are saved in `~/.gauzzadocs/comments.json` and follow a file when you rename it in the app. Your edits are
+only compared while an agent is listening, so there's no cost the rest of the time.
 
-gauzzaDocs pairs well with [Empirical](https://empirical.gauzza.com), persistent memory for AI agents that we also
-build. Its command-line tool, [`@empirical-gauzza/cli`](https://www.npmjs.com/package/@empirical-gauzza/cli), gives
-Claude Code, Codex, Copilot and Cursor one shared memory, including **your writing voice**: how you write, learned once
-in a short interview, then used by every agent that drafts in your name.
+### Your writing voice with Empirical
+
+I also build [Empirical](https://empirical.gauzza.com), a shared memory for AI agents. Its command line tool is
+[`@empirical-gauzza/cli`](https://www.npmjs.com/package/@empirical-gauzza/cli) on npm, and it gives Claude Code, Codex,
+Copilot and Cursor the same memory. It can also hold your writing voice. You do a short interview once, and after that
+any agent writing in your name can look it up.
 
 ```
 npm install -g @empirical-gauzza/cli
-empirical install                      # sign in and set up
-empirical plugin install claude --voice   # adds the writing-voice skill (also: codex, copilot, all)
+empirical install                         # sign in and set up
+empirical plugin install claude --voice   # adds the writing voice skill (also codex, copilot or all)
 ```
 
-Set up your voice at [empirical.gauzza.com/voice](https://empirical.gauzza.com/voice) (also Help → Set up your writing
-voice in the app). Then make it a standing instruction for every file, so agents look it up before writing:
+Set up your voice at [empirical.gauzza.com/voice](https://empirical.gauzza.com/voice). It's also under Help in the app.
+Then add it to your standing instructions so agents check it before they write:
 
 ```
 gdocs instructions --global --set 'Before writing in my name, look up my voice: empirical memory query --match "how this person writes" --tags writing-voice --top-k 50'
@@ -104,108 +115,101 @@ gdocs instructions --global --set 'Before writing in my name, look up my voice: 
 
 ### Standing instructions for agents
 
-Tools → Agent instructions holds two layers of instructions that agents get before they touch a file:
-
-- **For every file**: `~/.gauzzadocs/agent.md`, e.g. "before writing in my name, look up my writing voice with
-  `empirical memory query --match "how this person writes" --tags writing-voice --top-k 50`".
-- **For one file**: saved invisibly inside the file so they travel with it (an inert `<script type="text/x-gdocs-instructions">`
-  in an HTML file's head, a leading `<!-- gdocs:instructions … -->` comment in Markdown). Word, Excel, PDF and code files
-  keep theirs in `~/.gauzzadocs/instructions.json`, which follows renames made in the app. Files with instructions show
-  an **Instructions** chip in the header.
+Tools > Agent instructions holds two sets of instructions that agents read before they touch a file. The ones for
+every file live in `~/.gauzzadocs/agent.md`. The ones for a single file are saved invisibly inside it, so they go
+wherever the file goes. HTML files keep them in a hidden block in the page head and Markdown files keep them in a
+hidden comment at the top. Word, Excel, PDF and code files keep theirs in `~/.gauzzadocs/instructions.json`. A file
+with its own instructions shows an Instructions chip in the header.
 
 ```
-gdocs instructions report.md                       # both layers; agents run this first
+gdocs instructions report.md                       # both sets; agents run this first
 gdocs instructions report.md --set "Keep it under one page."
 gdocs instructions --global --set @my-rules.md
 ```
 
-`gdocs read --json` includes them, and a plain `gdocs read` notes on stderr when they apply.
+`gdocs read --json` includes them too.
 
-## Status bar
+## Tabs and saving
 
-Every file has a status bar along the bottom, like a code editor: words, characters, paragraphs, pages and reading
-time for documents (and the selection's count); Ln/Col, line length, line count, longest line (click to jump), language
-and indent for code; the current page for PDFs; the line position for large files. On the right: format, line endings,
-encoding, size on disk (click to show in folder) and save state.
+Every open file is a tab, like in a code editor. Drag tabs to reorder them, middle click to close one and right click
+for close others, copy path or show in folder. Ctrl+Tab switches between them, and your tabs come back the next time
+you open the app.
 
-## Memory
+Changes save a moment after you stop typing, like Google Docs. A Word file that has things the editor can't keep
+(headers, footnotes or tracked changes) only saves when you press Ctrl+S, and the first save keeps a copy of the
+original next to it. PDFs also save on Ctrl+S. If a file changes on disk the tab reloads. If you have unsaved changes
+at the same time, you choose which version to keep.
 
-Only what is in use is loaded:
+The status bar at the bottom works like a code editor's. Documents show words, pages and reading time. Code shows the
+line and column, line length and the longest line. PDFs show the current page. On the right you get the format, line
+endings, encoding, size on disk and whether everything is saved.
 
-- Each editor (documents, sheets, PDF, code) is a separate bundle that loads the first time a file of that kind opens.
-- Background tabs go to sleep: the tab in focus and the two most recently used stay loaded; others drop their editor and
-  content once saved and reload from disk when clicked (or when an agent edits them). Unsaved tabs never sleep.
-  Tabs restored at start-up stay asleep until opened.
-- PDFs stream from disk by byte range, so only the pages on screen are read; the whole file is read only to save or
-  rearrange pages. Page text is extracted only when searched or asked for.
-- Text and CSV files over 32 MB open in a read-only viewer that reads only the lines on screen (a sparse line index,
-  about 160 KB for 20 million lines). Search streams through the file. `gdocs` can still edit them on disk.
-- Sheets store only non-empty cells, render only visible cells, recalculate only what depends on a change, and keep
-  undo as small diffs.
+## Memory use
 
-## Tabs
+The app only loads what you're using. Each editor loads the first time you open that kind of file, so if you never
+open a PDF the PDF code never loads.
 
-Every open file is a tab, like a code editor: drag to reorder, middle-click to close, right-click for close others / close
-to the right / copy path / show in folder, Ctrl+Tab to switch. Tabs from the last session reopen at start. A dot marks
-unsaved changes.
+Tabs you aren't using go to sleep once they're saved. The tab you're on and the last two you used stay loaded, and the
+rest reload from disk when you click them or an agent edits them. Tabs with unsaved changes never sleep.
 
-Saving works like Google Docs: changes save automatically a moment after you stop typing. Word and PDF files are the
-exception (saving them can drop things the app does not support), so those save on Ctrl+S. If a file changes on disk,
-the open tab reloads; if you also have unsaved changes, you choose which version to keep.
+PDFs are read from disk a piece at a time, so only the pages on screen are loaded. Text and CSV files over 32 MB open
+in a read only viewer that reads only the lines on screen. `gdocs` can still edit those files. Spreadsheets only keep
+the cells that have something in them and only redraw what's on screen.
 
 ## Plugins
 
-Plugins → Marketplace… browses [`plugins/marketplace.json`](plugins/marketplace.json) in this repository: 13 base
-plugins in six categories (formatters for JSON, XML, SQL and CSS; writing review; Markdown and HTML previews; CSV and
-Markdown tables; JSON ⇄ YAML; developer utilities; log insights). Every download is checked against the SHA-256 in the
-marketplace file. Writing one takes a single JavaScript file: see [plugins/README.md](plugins/README.md).
+Plugins > Marketplace in the app shows every plugin in [`plugins/marketplace.json`](plugins/marketplace.json) in this
+repo. There are formatters for JSON, XML, SQL and CSS, a writing review, Markdown and HTML previews, table and YAML
+converters, developer utilities and a log viewer. The full list is in [plugins/MARKETPLACE.md](plugins/MARKETPLACE.md).
+Every download is checked against the SHA-256 recorded in the marketplace file before it's installed.
 
 ```
-gdocs plugins marketplace      # what is on offer, by category
+gdocs plugins marketplace      # what's available, by category
 gdocs plugins install json-tools sql-format writing-tools
 gdocs plugins update           # install every available update
 gdocs format query.sql         # uses the first formatter for the file's language
 ```
 
+A plugin is one JavaScript file and a `plugin.json`. `gdocs plugins new my-plugin` gives you a starting point and
+[plugins/README.md](plugins/README.md) explains how to write one and get it listed.
+
 ## Sharing
 
-gauzzaDocs keeps files as ordinary files and has no server, so sharing works the way it does for any local file:
-keep them in a synced folder (OneDrive, Dropbox, Google Drive, iCloud, Syncthing) or a git repository. Open tabs reload
-when a synced copy changes, and if you also have unsaved changes you choose which version to keep. Comments are stored
-on your PC, not in the file, so they are not shared yet.
+gauzzaDocs has no server, so sharing works the way it does for any file on your PC. Keep your files in a synced folder
+like OneDrive, Dropbox or Google Drive, or in a git repository, and open tabs reload when the synced copy changes.
+Comments are saved on your PC, so they don't travel with the file yet.
 
-## Support
+## Contributing
 
-gauzzaDocs is free and open source ([MIT](LICENSE)). Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md),
-and [plugins/README.md](plugins/README.md#submitting-a-plugin) to publish a plugin.
+gauzzaDocs is free and open source under the [MIT license](LICENSE). Issues and pull requests are welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md), and [plugins/README.md](plugins/README.md#submitting-a-plugin) if you want to
+publish a plugin.
 
 ## Where things live
 
-- Your files: wherever they are. New files go to `Documents\gauzzaDocs` (change it in Settings).
-- App data: `~/.gauzzadocs` (settings, recent files, plugins, the bridge address).
+New files go to `Documents\gauzzaDocs`, and you can change that in Settings. Your other files stay wherever they are.
+Settings, recent files, plugins and the connection details for `gdocs` are in `~/.gauzzadocs`.
 
 ## Build from source
 
-Needs Node 22+.
+You need Node 22 or newer.
 
 ```
 npm install
-npm run dev          # the app, with hot reload
-npm run build        # app + CLI (dist/cli.mjs)
+npm run dev          # the app with hot reload
+npm run build        # the app and the CLI (dist/cli.mjs)
 node dist/cli.mjs --help
-npm run dist         # Windows installer in release/
+npm run dist         # an installer for your platform in release/
 ```
-
-Installed copies put `gdocs` on the PATH the first time the app starts.
 
 ## Layout
 
 ```
-src/shared     pure code used everywhere: file kinds, types, markdown/html conversion, the ops agents run,
-               the sheet formula engine, PDF edits
-src/core       Node only: loading and saving each format, running ops on files on disk, plugins, paths
-src/main       Electron main process: window, file dialogs, the live-edit bridge (server.ts)
+src/shared     code used everywhere: file kinds, types, Markdown and HTML conversion, the operations agents run,
+               the spreadsheet formula engine and PDF edits
+src/core       Node only: loading and saving each format, running operations on files on disk, plugins, paths
+src/main       the Electron main process: the window, file dialogs and the bridge the CLI talks to (server.ts)
 src/cli        the gdocs command
-src/renderer   the window: App.tsx (tabs, menus, saving, agent routing) and one folder per editor
-plugins        the plugin library
+src/renderer   the window: App.tsx (tabs, menus, saving, agents) and one folder per editor
+plugins        the plugin marketplace
 ```

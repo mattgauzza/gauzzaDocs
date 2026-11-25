@@ -1,12 +1,20 @@
 {
   "id": "yaml-tools",
-  "name": "JSON ↔ YAML",
+  "name": "JSON and YAML",
   "version": "1.0.0",
-  "description": "Convert JSON to YAML and YAML to JSON (block-style YAML: maps, lists, scalars, comments), and normalise YAML indentation.",
+  "description": "Converts JSON to YAML and YAML to JSON and tidies YAML indentation.",
   "author": "gauzzaDocs",
   "category": "Data",
-  "tags": ["yaml", "json", "config", "convert"],
+  "tags": [
+    "yaml",
+    "json",
+    "config",
+    "convert"
+  ],
   "icon": "🔁",
   "main": "index.js",
-  "languages": ["json", "yaml"]
+  "languages": [
+    "json",
+    "yaml"
+  ]
 }

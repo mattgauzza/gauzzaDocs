@@ -2,11 +2,19 @@
   "id": "html-preview",
   "name": "HTML preview",
   "version": "1.0.0",
-  "description": "See .html and .svg files rendered live beside the code, safely (scripts never run in the preview).",
+  "description": "Shows HTML and SVG files rendered beside the code. Scripts never run in the preview.",
   "author": "gauzzaDocs",
   "category": "Preview",
-  "tags": ["html", "svg", "web", "preview"],
+  "tags": [
+    "html",
+    "svg",
+    "web",
+    "preview"
+  ],
   "icon": "🌐",
   "main": "index.js",
-  "languages": ["html", "xml"]
+  "languages": [
+    "html",
+    "xml"
+  ]
 }

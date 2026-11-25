@@ -6,17 +6,18 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for building a plugin! Two ways to get it listed:
+        Thanks for building a plugin! There are two ways to get it listed.
 
-        - **Add it to this repo**: open a pull request that adds `plugins/<your-id>/` and runs `npm run marketplace`. Best for small, dependency-free plugins we can maintain together.
-        - **Keep it in your own repo**: fill in this form (or open a pull request adding one line to `plugins/external.json`). We pin your plugin to a commit, so users get exactly what was reviewed; new versions are a new pin.
+        You can open a pull request that adds `plugins/<your-id>/` to this repo and runs `npm run marketplace`. That works best for small plugins with no dependencies.
 
-        Before submitting, run `gdocs plugins validate <folder>`: it is the same check CI runs. Plugins cannot import Node modules, use eval, or make network requests.
+        You can also keep it in your own repo and fill in this form, or open a pull request that adds one line to `plugins/external.json`. It gets pinned to a commit, so people install exactly what was reviewed. A new version just moves the pin.
+
+        Before you submit, run `gdocs plugins validate <folder>`. It runs the same checks as CI. Plugins can't import Node modules, use eval or make network requests.
   - type: input
     id: id
     attributes:
       label: Plugin id
-      description: Lower-case, matches "id" in plugin.json
+      description: Lower case, the same as "id" in plugin.json
       placeholder: mermaid-preview
     validations:
       required: true
@@ -24,14 +25,14 @@ body:
     id: source
     attributes:
       label: Where is it?
-      description: "Your repository folder, or a raw URL pinned to a commit: https://raw.githubusercontent.com/<you>/<repo>/<40-char commit>/<folder>/"
+      description: "Your repository folder, or a raw URL pinned to a commit: https://raw.githubusercontent.com/<you>/<repo>/<40 character commit>/<folder>/"
     validations:
       required: true
   - type: textarea
     id: what
     attributes:
       label: What does it do?
-      description: Which file types, and what it adds (formatters, previews, commands). Screenshots welcome.
+      description: Which file types it works with and what it adds (formatters, previews or commands). Screenshots help.
     validations:
       required: true
   - type: checkboxes
@@ -41,7 +42,7 @@ body:
       options:
         - label: "`gdocs plugins validate` passes"
           required: true
-        - label: It does not send data anywhere or run code it downloads
+        - label: It doesn't send data anywhere or run code it downloads
           required: true
-        - label: I agree to it being listed under the repository's MIT license, or my plugin's license is stated in its folder
+        - label: It can be listed under this repo's MIT license, or its own license is in its folder
           required: true

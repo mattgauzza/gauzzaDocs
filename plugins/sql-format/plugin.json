@@ -2,11 +2,17 @@
   "id": "sql-format",
   "name": "SQL formatter",
   "version": "1.0.0",
-  "description": "Format SQL with one clause per line, indented joins and conditions, and upper-case keywords. Minify too.",
+  "description": "Formats SQL with one clause per line and upper case keywords. It can minify too.",
   "author": "gauzzaDocs",
   "category": "Formatting",
-  "tags": ["sql", "database", "formatter"],
+  "tags": [
+    "sql",
+    "database",
+    "formatter"
+  ],
   "icon": "🗄️",
   "main": "index.js",
-  "languages": ["sql"]
+  "languages": [
+    "sql"
+  ]
 }

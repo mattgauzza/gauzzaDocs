@@ -2,11 +2,19 @@
   "id": "markdown-tables",
   "name": "Markdown tables",
   "version": "1.0.0",
-  "description": "Turn CSV/TSV (or a copied spreadsheet range) into a Markdown table and back, and tidy every table in a file.",
+  "description": "Turns CSV or a copied spreadsheet range into a Markdown table and back.",
   "author": "gauzzaDocs",
   "category": "Data",
-  "tags": ["markdown", "csv", "tables"],
+  "tags": [
+    "markdown",
+    "csv",
+    "tables"
+  ],
   "icon": "📋",
   "main": "index.js",
-  "languages": ["markdown", "csv", "text"]
+  "languages": [
+    "markdown",
+    "csv",
+    "text"
+  ]
 }

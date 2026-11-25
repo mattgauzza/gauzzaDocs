@@ -2,7 +2,7 @@
   "id": "csv-preview",
   "name": "CSV table preview",
   "version": "1.0.0",
-  "description": "See CSV/TSV text as a table, and align columns in plain-text CSV.",
+  "description": "Shows CSV and TSV text as a table and lines up the columns.",
   "author": "gauzzaDocs",
   "category": "Data",
   "tags": [

@@ -2,7 +2,7 @@
   "id": "markdown-preview",
   "name": "Markdown preview",
   "version": "1.0.0",
-  "description": "Live rendered preview of Markdown beside the editor, plus a table formatter.",
+  "description": "A live preview of Markdown beside the editor and a table formatter.",
   "author": "gauzzaDocs",
   "category": "Preview",
   "tags": [

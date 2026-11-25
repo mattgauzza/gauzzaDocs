@@ -2,7 +2,7 @@
   "id": "json-tools",
   "name": "JSON tools",
   "version": "1.0.0",
-  "description": "Pretty-print, minify and sort JSON; a collapsible tree preview.",
+  "description": "Pretty print, minify and sort JSON, with a tree view.",
   "author": "gauzzaDocs",
   "category": "Formatting",
   "tags": [

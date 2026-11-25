@@ -15,7 +15,7 @@
       "id": "css-tools",
       "name": "CSS tools",
       "version": "1.0.0",
-      "description": "Format and minify CSS, sort properties, and preview every color used in the file as swatches.",
+      "description": "Format, minify and sort CSS, with swatches of every color in the file.",
       "author": "gauzzaDocs",
       "category": "Formatting",
       "tags": [
@@ -32,12 +32,12 @@
       ],
       "minApi": 1,
       "path": "css-tools",
-      "size": 3822,
+      "size": 3856,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "2cd73edc8843f4154bb9c4f6999c02433539cfff632c8ed12c8d00145b8e674c",
-          "size": 362
+          "sha256": "f89e7f4d2560e31f4f67b17f402431c4a0752f69e80e9a3384e43500a43392ff",
+          "size": 396
         },
         {
           "path": "index.js",
@@ -50,7 +50,7 @@
       "id": "csv-preview",
       "name": "CSV table preview",
       "version": "1.0.0",
-      "description": "See CSV/TSV text as a table, and align columns in plain-text CSV.",
+      "description": "Shows CSV and TSV text as a table and lines up the columns.",
       "author": "gauzzaDocs",
       "category": "Data",
       "tags": [
@@ -64,12 +64,12 @@
       ],
       "minApi": 1,
       "path": "csv-preview",
-      "size": 2434,
+      "size": 2428,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "85a95761cb448a4d09f111ffbb5f4a1da6b13057a84458d6abc495b94bc34e3a",
-          "size": 356
+          "sha256": "55ad30f1ba8b5d1e97c38789a6d1b23bf181340cc610b56709ac5f360de632bd",
+          "size": 350
         },
         {
           "path": "index.js",
@@ -82,7 +82,7 @@
       "id": "dev-utils",
       "name": "Developer utilities",
       "version": "1.0.0",
-      "description": "Insert UUIDs, timestamps and lorem ipsum; SHA-256 hashes; decode JWTs; convert Unix times; escape and unescape JSON strings.",
+      "description": "UUIDs, timestamps, lorem ipsum, SHA-256 hashes, JWT decoding and JSON string escaping.",
       "author": "gauzzaDocs",
       "category": "Developer",
       "tags": [
@@ -98,12 +98,12 @@
       ],
       "minApi": 1,
       "path": "dev-utils",
-      "size": 3826,
+      "size": 3840,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "5d35bb215626e5af7f44c1f7ac09422fa8f25b6fbfe88b20feb06af14b6169ce",
-          "size": 396
+          "sha256": "527d50a88320ed78867de8db7561928b6a0ca5780af91fb9e8e53ca002a07f3f",
+          "size": 410
         },
         {
           "path": "index.js",
@@ -116,7 +116,7 @@
       "id": "html-preview",
       "name": "HTML preview",
       "version": "1.0.0",
-      "description": "See .html and .svg files rendered live beside the code, safely (scripts never run in the preview).",
+      "description": "Shows HTML and SVG files rendered beside the code. Scripts never run in the preview.",
       "author": "gauzzaDocs",
       "category": "Preview",
       "tags": [
@@ -132,12 +132,12 @@
       ],
       "minApi": 1,
       "path": "html-preview",
-      "size": 1688,
+      "size": 1726,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "c9d4198eb888ae8869497cee13921acdabe11da0e794ff684c1eaab5887eb0bb",
-          "size": 362
+          "sha256": "44c13043fdba64d8bcdd730d96ff4dfb837b3a69608650187b81fd970058c136",
+          "size": 400
         },
         {
           "path": "index.js",
@@ -150,7 +150,7 @@
       "id": "json-tools",
       "name": "JSON tools",
       "version": "1.0.0",
-      "description": "Pretty-print, minify and sort JSON; a collapsible tree preview.",
+      "description": "Pretty print, minify and sort JSON, with a tree view.",
       "author": "gauzzaDocs",
       "category": "Formatting",
       "tags": [
@@ -164,12 +164,12 @@
       ],
       "minApi": 1,
       "path": "json-tools",
-      "size": 2299,
+      "size": 2289,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "6cc8f272e054801d69b900548dacba40b97ff98153ef36ab9493648f62b17fc8",
-          "size": 357
+          "sha256": "86ca499afb9fff9bfdc3b2b4f609b1652ed8863a4465b75bab3e6c1f05833aec",
+          "size": 347
         },
         {
           "path": "index.js",
@@ -182,7 +182,7 @@
       "id": "log-insights",
       "name": "Log insights",
       "version": "1.0.0",
-      "description": "A dashboard beside any log: counts by level, the most frequent errors (with numbers and ids folded together), and the time span covered.",
+      "description": "Shows counts by log level and the most common errors beside any log file.",
       "author": "gauzzaDocs",
       "category": "Developer",
       "tags": [
@@ -197,12 +197,12 @@
       ],
       "minApi": 1,
       "path": "log-insights",
-      "size": 4107,
+      "size": 4091,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "dd52db79d7b7d51b9ad4aa1055906d584085a096c611c7840e9aa84fc17171f3",
-          "size": 401
+          "sha256": "8bcadac0b860afb1455aa105e4e59d0f6e0f6df3f392913daaad969baafa637f",
+          "size": 385
         },
         {
           "path": "index.js",
@@ -215,7 +215,7 @@
       "id": "markdown-preview",
       "name": "Markdown preview",
       "version": "1.0.0",
-      "description": "Live rendered preview of Markdown beside the editor, plus a table formatter.",
+      "description": "A live preview of Markdown beside the editor and a table formatter.",
       "author": "gauzzaDocs",
       "category": "Preview",
       "tags": [
@@ -229,12 +229,12 @@
       ],
       "minApi": 1,
       "path": "markdown-preview",
-      "size": 2321,
+      "size": 2312,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "6ca7f78b1c883d511d26b58964f950e23bd1cdbc99762e2e3d7c111b752c51cf",
-          "size": 390
+          "sha256": "c87e6baed6d8861921c916795c1b3ed9524fc5184472ef2b6c80d3b8a7a6d5d8",
+          "size": 381
         },
         {
           "path": "index.js",
@@ -247,7 +247,7 @@
       "id": "markdown-tables",
       "name": "Markdown tables",
       "version": "1.0.0",
-      "description": "Turn CSV/TSV (or a copied spreadsheet range) into a Markdown table and back, and tidy every table in a file.",
+      "description": "Turns CSV or a copied spreadsheet range into a Markdown table and back.",
       "author": "gauzzaDocs",
       "category": "Data",
       "tags": [
@@ -263,12 +263,12 @@
       ],
       "minApi": 1,
       "path": "markdown-tables",
-      "size": 3291,
+      "size": 3306,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "12a4bcbc0d53c680ca90e1fd030f365176c6df6060948a9620c49dc0013be756",
-          "size": 383
+          "sha256": "84b5643ec18c93309fe39b9a2644e4a7547767343f555fbfd08029b01e989bf0",
+          "size": 398
         },
         {
           "path": "index.js",
@@ -281,7 +281,7 @@
       "id": "sql-format",
       "name": "SQL formatter",
       "version": "1.0.0",
-      "description": "Format SQL with one clause per line, indented joins and conditions, and upper-case keywords. Minify too.",
+      "description": "Formats SQL with one clause per line and upper case keywords. It can minify too.",
       "author": "gauzzaDocs",
       "category": "Formatting",
       "tags": [
@@ -295,12 +295,12 @@
       ],
       "minApi": 1,
       "path": "sql-format",
-      "size": 4994,
+      "size": 5012,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "ce332ad91711acf04a696ecbf17109357c26f376520fd393b2bb306ebebbae0e",
-          "size": 364
+          "sha256": "787525f6d17bb15064c56dd8067f61a99a95f6a8e48913f51cb280dbfc5dc7d8",
+          "size": 382
         },
         {
           "path": "index.js",
@@ -313,7 +313,7 @@
       "id": "text-tools",
       "name": "Text tools",
       "version": "1.0.0",
-      "description": "Sort, dedupe, trim, case changes, Base64 and URL encode/decode, line numbers.",
+      "description": "Sort, dedupe, trim, change case, Base64, URL encode and number lines.",
       "author": "gauzzaDocs",
       "category": "Text",
       "tags": [
@@ -329,12 +329,12 @@
       ],
       "minApi": 1,
       "path": "text-tools",
-      "size": 2301,
+      "size": 2293,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "f0065f8e1d48e9f2ba9c1d20724cfda8ee5b98c31d239e357f70221309aeea85",
-          "size": 386
+          "sha256": "dbd40173ef07501e1d35fdb58fa62e53b97ae1843454855183dd474fef0359b9",
+          "size": 378
         },
         {
           "path": "index.js",
@@ -347,7 +347,7 @@
       "id": "writing-tools",
       "name": "Writing tools",
       "version": "1.0.0",
-      "description": "Readability score, reading level, long sentences, passive voice, adverbs and repeated words, live beside your document.",
+      "description": "Readability, long sentences, passive voice, adverbs and repeated words beside your document.",
       "author": "gauzzaDocs",
       "category": "Writing",
       "tags": [
@@ -364,12 +364,12 @@
       ],
       "minApi": 1,
       "path": "writing-tools",
-      "size": 6244,
+      "size": 6274,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "367fa6d0c7570341f015ad4fec3286c47fec996eed033dcb11943e352b2adb34",
-          "size": 410
+          "sha256": "07510d6d13104bf2b136e7f1852e45750c24038b420934996b4d4e21a45fa8af",
+          "size": 440
         },
         {
           "path": "index.js",
@@ -380,9 +380,9 @@
     },
     {
       "id": "xml-tools",
-      "name": "XML / HTML formatter",
+      "name": "XML and HTML formatter",
       "version": "1.0.0",
-      "description": "Indent XML, SVG and HTML markup; minify XML.",
+      "description": "Indents XML, SVG and HTML and minifies XML.",
       "author": "gauzzaDocs",
       "category": "Formatting",
       "tags": [
@@ -398,12 +398,12 @@
       ],
       "minApi": 1,
       "path": "xml-tools",
-      "size": 2130,
+      "size": 2131,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "efde6dfebf7a9d62fa2f1063f1ac92734679a67b727bcf2866e91410a8824432",
-          "size": 373
+          "sha256": "b740bea88fd436131f2411ed76cdd4e22d1bf8d6365c4847baec9d64f4567023",
+          "size": 374
         },
         {
           "path": "index.js",
@@ -414,9 +414,9 @@
     },
     {
       "id": "yaml-tools",
-      "name": "JSON ↔ YAML",
+      "name": "JSON and YAML",
       "version": "1.0.0",
-      "description": "Convert JSON to YAML and YAML to JSON (block-style YAML: maps, lists, scalars, comments), and normalise YAML indentation.",
+      "description": "Converts JSON to YAML and YAML to JSON and tidies YAML indentation.",
       "author": "gauzzaDocs",
       "category": "Data",
       "tags": [
@@ -432,12 +432,12 @@
       ],
       "minApi": 1,
       "path": "yaml-tools",
-      "size": 6496,
+      "size": 6494,
       "files": [
         {
           "path": "plugin.json",
-          "sha256": "3cffa7721f6a2df614cb40c5142edfa20c9e58f8c6b8e5783fa537edd7c02207",
-          "size": 386
+          "sha256": "6d25443c38829f839272bb5b00bed1b64e158c28b28b0ad7f270fd564b603aee",
+          "size": 384
         },
         {
           "path": "index.js",

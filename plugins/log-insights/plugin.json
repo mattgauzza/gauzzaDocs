@@ -2,11 +2,18 @@
   "id": "log-insights",
   "name": "Log insights",
   "version": "1.0.0",
-  "description": "A dashboard beside any log: counts by level, the most frequent errors (with numbers and ids folded together), and the time span covered.",
+  "description": "Shows counts by log level and the most common errors beside any log file.",
   "author": "gauzzaDocs",
   "category": "Developer",
-  "tags": ["logs", "errors", "debugging"],
+  "tags": [
+    "logs",
+    "errors",
+    "debugging"
+  ],
   "icon": "📈",
   "main": "index.js",
-  "languages": ["text", "json"]
+  "languages": [
+    "text",
+    "json"
+  ]
 }
