@@ -26,7 +26,8 @@ const EDITORS: Record<Kind, React.ComponentType<EditorProps>> = {
   doc: lazy(() => import('./doc/DocEditor')),
   sheet: lazy(() => import('./sheet/SheetEditor')),
   pdf: lazy(() => import('./pdf/PdfEditor')),
-  text: lazy(() => import('./text/TextEditor'))
+  text: lazy(() => import('./text/TextEditor')),
+  slides: lazy(() => import('./slides/SlidesEditor')) // slides
 }
 
 interface Tab {
@@ -48,7 +49,7 @@ interface Tab {
 const HOME = -1
 /** Save only on Ctrl+S? Word files say so per file (only when they hold things the editor would drop); PDFs always. */
 const isLossy = (t: { path: string; payload: FilePayload | null }) =>
-  t.payload?.kind === 'doc' && t.payload.lossy !== undefined ? t.payload.lossy : lossy(t.path)
+  (t.payload?.kind === 'doc' || t.payload?.kind === 'slides') && t.payload.lossy !== undefined ? t.payload.lossy : lossy(t.path)
 /** Ops that only look: shown as "reading" rather than "editing". */
 const READ_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets'])
 /** Tabs kept loaded besides the active one (most recently used). The rest sleep once saved, to keep memory low. */
@@ -371,8 +372,8 @@ export default function App() {
     if (!t || !hh || t.large) return null
     try {
       if (t.kind === 'text') return hh.getText?.() ?? null
-      if (t.kind === 'doc' || t.kind === 'sheet') {
-        const r = (await hh.agent({ op: 'read', format: t.kind === 'doc' ? 'md' : 'csv' }, { name: 'gauzzaDocs' })) as { content?: string }
+      if (t.kind === 'doc' || t.kind === 'sheet' || t.kind === 'slides') {
+        const r = (await hh.agent({ op: 'read', format: t.kind === 'sheet' ? 'csv' : 'md' }, { name: 'gauzzaDocs' })) as { content?: string }
         return typeof r?.content === 'string' ? r.content : null
       }
     } catch { /* not ready */ }
@@ -686,13 +687,15 @@ export default function App() {
       doc: [['Word (.docx)', 'docx'], ['PDF (.pdf)', 'pdf'], ['Markdown (.md)', 'md'], ['Web page (.html)', 'html']],
       sheet: [['Excel (.xlsx)', 'xlsx'], ['Comma separated (.csv)', 'csv'], ['Tab separated (.tsv)', 'tsv'], ['PDF (.pdf)', 'pdf']],
       pdf: [],
-      text: []
+      text: [],
+      slides: [['PowerPoint (.pptx)', 'pptx'], ['PDF (.pdf)', 'pdf'], ['Markdown outline (.md)', 'md']] // slides
     }
     const sep: MenuItem = { label: '', sep: true }
     const file: MenuItem[] = [
       { label: 'New', submenu: [
         { label: 'Document', run: () => newFile('doc') },
         { label: 'Spreadsheet', run: () => newFile('sheet') },
+        { label: 'Presentation', run: () => newFile('slides') }, // slides
         { label: 'Markdown document', run: () => newFile('doc', 'md') },
         { label: 'Word document', run: () => newFile('doc', 'docx') },
         { label: 'Text file', run: () => newFile('text') }

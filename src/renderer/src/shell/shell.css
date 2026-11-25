@@ -88,9 +88,9 @@
 .home-new { background: var(--canvas); padding: 18px 0 26px; }
 .home-new-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .home-new h2 { margin: 0; font-size: 16px; font-weight: 500; }
-.templates { display: flex; gap: 20px; flex-wrap: wrap; }
-.tpl { display: flex; flex-direction: column; gap: 10px; width: 142px; text-align: left; font-size: 14px; font-weight: 500; }
-.tpl-art { display: grid; place-items: center; width: 142px; height: 182px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); transition: border-color .12s; }
+.templates { display: flex; gap: 16px; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
+.tpl { display: flex; flex-direction: column; gap: 10px; width: 124px; flex: none; text-align: left; font-size: 14px; font-weight: 500; }
+.tpl-art { display: grid; place-items: center; width: 124px; height: 160px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); transition: border-color .12s; }
 .tpl:hover .tpl-art { border-color: var(--accent); }
 .tpl-art .plus { display: grid; place-items: center; }
 .tpl-art.doc .plus { color: var(--doc); }

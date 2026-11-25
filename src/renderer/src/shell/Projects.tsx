@@ -10,7 +10,7 @@ import { fileSize } from './StatusBar'
 
 /** Files gauzzaDocs doesn't edit open in their usual app instead (pictures, archives, media, programs, old Office). */
 const SYSTEM = new Set(('png jpg jpeg gif bmp webp ico tif tiff heic svgz mp3 wav flac ogg m4a mp4 mov avi mkv webm zip 7z rar gz tgz tar ' +
-  'exe msi dll bin iso dmg doc xls ppt pptx odt ods odp psd ai fig sketch blend stl obj fbx woff woff2 ttf otf').split(' '))
+  'exe msi dll bin iso dmg doc xls ppt odt ods odp psd ai fig sketch blend stl obj fbx woff woff2 ttf otf').split(' '))
 export const opensInApp = (p: string) => !SYSTEM.has(extOf(p))
 
 export function openEntry(p: string, onOpen: (p: string) => void) {

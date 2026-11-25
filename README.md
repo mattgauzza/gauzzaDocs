@@ -194,6 +194,19 @@ draw your signature and drop it on the line. Agents do the same with `gdocs pdf 
 Open as document in the Tools menu turns a PDF into a Word file you can rewrite, but you get the text, headings and
 lists, not the layout. Scanned pages have no text to edit.
 
+## Presentations
+
+I wanted to put a quick deck together without opening PowerPoint. Presentations look like Google Slides, with the
+slides down the left, the slide in the middle and speaker notes under it. You can add text boxes, shapes and pictures,
+drag them around, resize or rotate them and pick a theme. Press F5 to present. During the show S switches to a
+presenter view with your notes, the next slide and a timer. Decks open and save as PowerPoint files and export to PDF.
+
+Agents write decks in Markdown, so they don't have to place anything by hand. Each slide starts with a `# Title` and
+there's a `---` line between slides. `gdocs slides from-md deck.pptx --md @outline.md --live` builds the whole deck
+while you watch, and `gdocs slides add`, `update` and `notes` change one slide at a time. A PowerPoint file with charts,
+tables or animations opens with those parts simplified, so it only saves on Ctrl+S and the first save keeps the
+original next to it.
+
 ## Tabs and saving
 
 Every open file is a tab, like in a code editor. Drag tabs to reorder them, middle click to close one and right click

@@ -100,6 +100,7 @@ function RecentView(props: {
   const templates: { kind: Kind; ext?: string; label: string; art: React.JSX.Element }[] = [
     { kind: 'doc', label: 'Blank document', art: <div className="tpl-art doc"><span className="plus"><Icon name="plus" size={56} /></span></div> },
     { kind: 'sheet', label: 'Blank spreadsheet', art: <div className="tpl-art sheet"><span className="plus"><Icon name="plus" size={56} /></span></div> },
+    { kind: 'slides', label: 'Blank presentation', art: <div className="tpl-art slides"><span className="plus" style={{ color: '#f4b400' }}><Icon name="plus" size={56} /></span></div> },
     { kind: 'doc', ext: 'md', label: 'Markdown doc', art: <div className="tpl-art md"><b>M↓</b></div> },
     { kind: 'doc', ext: 'docx', label: 'Word document', art: <div className="tpl-art docx"><b>W</b></div> },
     { kind: 'text', label: 'Text or code', art: <div className="tpl-art code"><b>{'{ }'}</b></div> }
@@ -133,9 +134,9 @@ function RecentView(props: {
       <section className="home-inner home-files">
         <div className="home-files-head">
           <div className="chips">
-            {(['all', 'doc', 'sheet', 'pdf', 'text'] as const).map(k => (
+            {(['all', 'doc', 'sheet', 'slides', 'pdf', 'text'] as const).map(k => (
               <button key={k} className={`chip${filter === k ? ' on' : ''}`} onClick={() => setFilter(k)}>
-                {{ all: 'All', doc: 'Documents', sheet: 'Spreadsheets', pdf: 'PDFs', text: 'Text & code' }[k]}
+                {{ all: 'All', doc: 'Documents', sheet: 'Spreadsheets', slides: 'Presentations', pdf: 'PDFs', text: 'Text & code' }[k]}
               </button>
             ))}
           </div>

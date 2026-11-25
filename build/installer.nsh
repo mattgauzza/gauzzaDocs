@@ -29,4 +29,6 @@
   DeleteRegValue HKCU "Software\Classes\.yml\OpenWithProgids" "gauzzaDocs.yml"
   DeleteRegKey HKCU "Software\gauzzaDocs"
   DeleteRegValue HKCU "Software\RegisteredApplications" "gauzzaDocs"
+  DeleteRegKey HKCU "Software\Classes\gauzzaDocs.pptx"
+  DeleteRegValue HKCU "Software\Classes\.pptx\OpenWithProgids" "gauzzaDocs.pptx"
 !macroend

@@ -6,6 +6,8 @@ import { loadDoc, saveDoc } from './formats/doc'
 import { loadPdf, savePdf } from './formats/pdf'
 import { loadSheet, saveSheet } from './formats/sheet'
 import { loadText, saveText } from './formats/text'
+import { loadSlides, saveSlides } from './formats/slides' // slides
+import { newDeck } from '../shared/slides/model' // slides
 import { LARGE_BYTES } from './large'
 import { extOf } from '../shared/kinds'
 
@@ -19,7 +21,7 @@ export async function loadFile(file: string, opts: { full?: boolean } = {}): Pro
   if (!opts.full && stat.size > LARGE_BYTES && (kind === 'text' || csv))
     return { path: p, kind, payload: { kind: 'large', size: stat.size, as: csv ? 'csv' : 'text' }, mtime: stat.mtimeMs }
   const payload: FilePayload =
-    kind === 'doc' ? await loadDoc(p) : kind === 'sheet' ? await loadSheet(p) : kind === 'pdf' ? loadPdf(p) : loadText(p)
+    kind === 'doc' ? await loadDoc(p) : kind === 'sheet' ? await loadSheet(p) : kind === 'pdf' ? loadPdf(p) : kind === 'slides' ? await loadSlides(p) : loadText(p)
   return { path: p, kind, payload, mtime: stat.mtimeMs }
 }
 
@@ -33,6 +35,7 @@ export async function saveFile(file: string, payload: FilePayload): Promise<numb
   const target = payload.kind === 'pdf' || payload.kind === 'text' ? tmp : p
   if (payload.kind === 'doc') await saveDoc(p, payload.html)
   else if (payload.kind === 'sheet') await saveSheet(p, payload.workbook)
+  else if (payload.kind === 'slides') await saveSlides(p, payload.deck)
   else if (payload.kind === 'pdf') savePdf(target, payload.bytes)
   else saveText(target, payload.text, payload.eol)
   if (target === tmp) fs.renameSync(tmp, p)
@@ -44,6 +47,7 @@ export async function createFile(file: string) {
   const kind = kindOf(file)
   if (kind === 'doc') await saveFile(file, { kind, html: '<p></p>' })
   else if (kind === 'sheet') await saveFile(file, { kind, workbook: { sheets: [{ name: 'Sheet1', cells: {} }] } })
+  else if (kind === 'slides') await saveFile(file, { kind, deck: newDeck() })
   else if (kind === 'pdf') {
     const { PDFDocument } = await import('pdf-lib')
     const doc = await PDFDocument.create()

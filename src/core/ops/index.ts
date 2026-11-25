@@ -8,8 +8,9 @@ import { findInFile, indexFile, isLarge, readLines } from '../large'
 import { docOps } from './doc'
 import { pdfOps } from './pdf'
 import { sheetOps } from './sheet'
+import { slidesOps } from './slides'
 
-export const HANDLERS: Record<Kind, OpHandler> = { text: textOps, doc: docOps, sheet: sheetOps, pdf: pdfOps }
+export const HANDLERS: Record<Kind, OpHandler> = { text: textOps, doc: docOps, sheet: sheetOps, pdf: pdfOps, slides: slidesOps }
 
 /** Applies an op straight to a file on disk (used when the file is not open in the app). Read-only ops never write. */
 export async function runOffline(file: string, op: AgentOp): Promise<unknown> {

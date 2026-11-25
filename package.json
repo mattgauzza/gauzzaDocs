@@ -150,6 +150,15 @@
           "description": "YAML file",
           "mimeType": "application/x-yaml",
           "role": "Editor"
+        },
+        {
+          "ext": [
+            "pptx"
+          ],
+          "name": "PowerPoint presentation",
+          "description": "PowerPoint presentation",
+          "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "role": "Editor"
         }
       ]
     },
@@ -246,12 +255,22 @@
           "description": "YAML file",
           "mimeType": "application/x-yaml",
           "role": "Editor"
+        },
+        {
+          "ext": [
+            "pptx"
+          ],
+          "name": "PowerPoint presentation",
+          "description": "PowerPoint presentation",
+          "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "role": "Editor"
         }
       ]
     }
   },
   "dependencies": {
     "@turbodocx/html-to-docx": "^1.23.3",
+    "@xmldom/xmldom": "^0.9.12",
     "commander": "^15.1.0",
     "electron-updater": "^6.8.11",
     "exceljs": "^4.4.0",
@@ -259,6 +278,7 @@
     "marked": "^18.3.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.5.438",
+    "pptxgenjs": "^4.0.1",
     "turndown": "^7.2.5",
     "turndown-plugin-gfm": "^1.0.2"
   },

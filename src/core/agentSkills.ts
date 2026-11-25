@@ -74,14 +74,14 @@ export function detectAgents(opts: { checkPath?: boolean } = {}): AgentTarget[] 
 export function skillText(version: string) {
   return `---
 name: ${SKILL_NAME}
-description: Use when reading, writing or editing the person's documents, spreadsheets, PDFs, Markdown or text files with gauzzaDocs (the gdocs command), when they say a file is open in gauzzaDocs, ask you to work on a doc with them, or mention comments in a doc. Edits land live in the open editor while they watch, and their comments and edits stream back to you.
+description: Use when reading, writing or editing the person's documents, spreadsheets, presentations, PDFs, Markdown or text files with gauzzaDocs (the gdocs command), when they say a file is open in gauzzaDocs, ask you to work on a doc with them, or mention comments in a doc. Edits land live in the open editor while they watch, and their comments and edits stream back to you.
 ---
 <!-- ${MARKER} ${version}. Reinstalled by the app on update; edit a copy under a different name to customise. -->
 
 # gauzzaDocs
 
-gauzzaDocs is the person's local editor for documents (.docx .md .html), spreadsheets (.xlsx .csv .tsv), PDFs and
-any text or code file. The \`gdocs\` command (also \`gauzzadocs\`, if \`gdocs\` is taken on this machine) reads and edits
+gauzzaDocs is the person's local editor for documents (.docx .md .html), spreadsheets (.xlsx .csv .tsv), presentations
+(.pptx), PDFs and any text or code file. The \`gdocs\` command (also \`gauzzadocs\`, if \`gdocs\` is taken on this machine) reads and edits
 them. When the app is running and the file is open, your edits go into the open editor: the person watches them
 happen and can undo them. Otherwise the file on disk is edited.
 
@@ -90,7 +90,7 @@ happen and can undo them. Otherwise the file on disk is edited.
 1. \`gdocs instructions <file>\` prints standing instructions from the person (for every file and for this file).
    Follow them. They may tell you to look up their writing voice before you write in their name.
 2. \`gdocs status\` shows whether the app is running and which files are open.
-3. Read with \`gdocs read <file>\`: documents come back as Markdown, spreadsheets as CSV, PDFs as text.
+3. Read with \`gdocs read <file>\`: documents and presentations come back as Markdown, spreadsheets as CSV, PDFs as text.
    \`--json\` on any command gives machine-readable output; errors exit non-zero with {"error": "..."}.
 
 ## Editing
@@ -108,6 +108,30 @@ gdocs write notes.md - --format md       # whole-file replace, only when asked
 \`\`\`
 
 \`gdocs --help\`, \`gdocs <command> --help\` and \`gdocs ops\` list everything.
+
+## Presentations (.pptx)
+
+A deck reads and writes as Markdown: \`---\` between slides, \`# Title\` per slide, \`- bullets\` (indent two spaces to
+nest), a plain line under the first slide's title is its subtitle, a slide with only a title is a section header,
+\`Notes:\` starts the speaker notes and \`![](picture.png)\` adds a picture. \`<!-- layout: twoColumn -->\` picks a
+layout (title, titleBody, twoColumn, section, blank) and \`<!-- column -->\` starts the right column. Slides are
+numbered from 1.
+
+\`\`\`
+gdocs new slides "Quarterly review"               # a new .pptx in the docs folder
+gdocs slides from-md deck.pptx --md @outline.md --live   # build the whole deck from Markdown
+gdocs slides outline deck.pptx
+gdocs slides add deck.pptx --title "Risks" --bullets "Hiring|Supply|  Lead times" --notes "Keep it short"
+gdocs slides update deck.pptx 3 --title "Risks" --bullets "Hiring|Supply"
+gdocs slides move deck.pptx 5 2
+gdocs slides notes deck.pptx 2 "Mention the survey numbers."
+gdocs slides delete deck.pptx 4
+\`\`\`
+
+Prefer \`slides update\` with --title, --bullets or --notes over --md or rewriting the deck: those change only that text,
+so pictures, shapes and positions the person set by hand stay put. Files made in PowerPoint with charts, tables,
+SmartArt or animations open with those parts simplified; the first save keeps the untouched original beside it as
+<name>.original.pptx.
 
 ## Working together through comments
 

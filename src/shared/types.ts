@@ -80,6 +80,67 @@ export type FilePayload =
   | { kind: 'sheet'; workbook: Workbook }
   | { kind: 'pdf'; bytes: Uint8Array; url?: string } // url: stream pages from disk instead of holding all bytes
   | { kind: 'large'; size: number; as: 'text' | 'csv' } // too big to load: viewed in pieces straight from disk
+  // ---- slides (begin) ----
+  | { kind: 'slides'; deck: Deck; lossy?: boolean; lossyReasons?: string[] }
+  // ---- slides (end) ----
+
+// ---------- presentations (.pptx), edited by renderer/src/slides; model helpers in shared/slides ----------
+
+/** A run of text with its own formatting. Sizes are points, colors #rrggbb. */
+export interface SlideRun {
+  text: string
+  b?: boolean
+  i?: boolean
+  u?: boolean
+  color?: string
+  size?: number
+  font?: string
+}
+export interface SlidePara {
+  runs: SlideRun[]
+  bullet?: 'bullet' | 'number'
+  level?: number // 0 = top level
+  align?: 'left' | 'center' | 'right'
+}
+/** Positions and sizes are inches on a 13.333 x 7.5 in (16:9) slide; rotation is degrees clockwise. */
+export interface SlideElement {
+  id: string
+  type: 'text' | 'image' | 'shape'
+  x: number
+  y: number
+  w: number
+  h: number
+  rotation?: number
+  role?: 'title' | 'subtitle' | 'body' // placeholders created by a layout (agents address these)
+  paras?: SlidePara[] // text (text boxes, and text inside shapes)
+  valign?: 'top' | 'middle' | 'bottom'
+  shape?: 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow'
+  fill?: string
+  stroke?: string
+  strokeWidth?: number // points
+  src?: string // image data URL
+}
+export type SlideLayout = 'title' | 'titleBody' | 'twoColumn' | 'section' | 'blank'
+export interface Slide {
+  id: string
+  layout: SlideLayout
+  background?: string
+  elements: SlideElement[]
+  notes: string
+}
+export interface DeckTheme {
+  name: string
+  headFont: string
+  bodyFont: string
+  text: string
+  accent: string
+  background: string
+}
+export interface Deck {
+  size: { w: number; h: number }
+  theme: DeckTheme
+  slides: Slide[]
+}
 
 export interface OpenFile {
   path: string

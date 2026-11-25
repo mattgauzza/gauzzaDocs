@@ -3,12 +3,14 @@
  *  doc   rich document editor (Google Docs style): .html .htm .md .markdown .docx
  *  sheet spreadsheet editor (Google Sheets style): .xlsx .csv .tsv
  *  pdf   PDF viewer / markup: .pdf
+ *  slides presentation editor (Google Slides style): .pptx
  *  text  code and plain text editor (Notepad++ style): everything else
  */
-export type Kind = 'doc' | 'sheet' | 'pdf' | 'text'
+export type Kind = 'doc' | 'sheet' | 'pdf' | 'text' | 'slides'
 
 const DOC = ['html', 'htm', 'md', 'markdown', 'docx']
 const SHEET = ['xlsx', 'csv', 'tsv']
+const SLIDES = ['pptx']
 
 export const extOf = (file: string) => {
   const base = file.split(/[\\/]/).pop() || ''
@@ -23,6 +25,7 @@ export function kindOf(file: string): Kind {
   if (DOC.includes(ext)) return 'doc'
   if (SHEET.includes(ext)) return 'sheet'
   if (ext === 'pdf') return 'pdf'
+  if (SLIDES.includes(ext)) return 'slides'
   return 'text'
 }
 
@@ -52,5 +55,6 @@ export const OPEN_FILTERS = [
   { name: 'All supported', extensions: ['*'] },
   { name: 'Documents', extensions: DOC },
   { name: 'Spreadsheets', extensions: SHEET },
+  { name: 'Presentations', extensions: SLIDES },
   { name: 'PDF', extensions: ['pdf'] }
 ]

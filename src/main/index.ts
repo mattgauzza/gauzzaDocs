@@ -81,8 +81,8 @@ async function openInWindow(file: string, opts: { focus?: boolean } = {}) {
 
 async function newFilePath(kind: Kind, ext?: string, name?: string, dir?: string) {
   const s = getSettings()
-  const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf' }[kind]
-  const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled' }[kind]
+  const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
+  const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
   const file = freeName(dir || s.docsDir, base, e)
   await work('createFile', [file])
   return file
@@ -250,7 +250,7 @@ async function htmlToPdf(html: string, title: string): Promise<Uint8Array> {
   const w = new BrowserWindow({ show: false, webPreferences: { javascript: false, offscreen: true } })
   try {
     await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html.startsWith('<!doctype') ? html : wrapHtml(html, title)))
-    return await w.webContents.printToPDF({ pageSize: 'Letter', printBackground: true })
+    return await w.webContents.printToPDF({ pageSize: 'Letter', printBackground: true, preferCSSPageSize: true }) // slides: @page sets 16:9
   } finally {
     w.destroy()
   }
@@ -320,7 +320,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
   saveAsDialog: async (file: string) => {
     const ext = extOf(file)
     const kind = kindOf(file)
-    const choices: Record<Kind, string[]> = { doc: ['html', 'md', 'docx'], sheet: ['xlsx', 'csv', 'tsv'], pdf: ['pdf'], text: [ext || 'txt'] }
+    const choices: Record<Kind, string[]> = { doc: ['html', 'md', 'docx'], sheet: ['xlsx', 'csv', 'tsv'], pdf: ['pdf'], text: [ext || 'txt'], slides: ['pptx'] }
     const r = await dialog.showSaveDialog(win!, {
       defaultPath: file,
       filters: [...new Set([ext, ...choices[kind]])].filter(Boolean).map(e => ({ name: e.toUpperCase(), extensions: [e] }))

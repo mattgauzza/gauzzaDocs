@@ -6,7 +6,7 @@ import { api, when } from '../lib'
 
 const FORMAT: Record<string, string> = {
   html: 'HTML document', htm: 'HTML document', md: 'Markdown', markdown: 'Markdown', docx: 'Word document',
-  xlsx: 'Excel workbook', csv: 'CSV', tsv: 'TSV', pdf: 'PDF'
+  xlsx: 'Excel workbook', csv: 'CSV', tsv: 'TSV', pdf: 'PDF', pptx: 'PowerPoint presentation'
 }
 
 export const fileSize = (n: number) =>
@@ -54,7 +54,7 @@ export function StatusBar(props: {
   const right: StatusItem[] = [
     { text: FORMAT[ext] || (languageOf(props.path) === 'text' ? 'Plain text' : ext.toUpperCase() || 'Text') },
     ...(props.payload?.kind === 'text' ? [{ text: props.payload.eol === '\r\n' ? 'CRLF' : 'LF', title: 'Line endings (kept as they were)' }] : []),
-    ...(['pdf', 'xlsx', 'docx'].includes(ext) ? [] : [{ text: 'UTF-8' }]),
+    ...(['pdf', 'xlsx', 'docx', 'pptx'].includes(ext) ? [] : [{ text: 'UTF-8' }]),
     ...(stat ? [{ text: fileSize(stat.size), title: `On disk${stat.created ? `\nCreated ${new Date(stat.created).toLocaleString()}` : ''}`, run: () => api.reveal(props.path) }] : []),
     large
       ? { text: 'Read-only view', title: 'Too large to load; read from disk a screen at a time. gdocs can still edit it.' }

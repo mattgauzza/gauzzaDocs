@@ -17,12 +17,13 @@ import { registerProjectCommands } from './projects'
 import { registerDocCommands } from './doc'
 import { registerPdfCommands } from './pdf'
 import { registerSheetCommands } from './sheet'
+import { registerSlidesCommands } from './slides' // slides
 
 const program = new Command()
 program
   .name('gdocs')
   .description(
-    'gauzzaDocs: read and edit documents, spreadsheets, PDFs and text files, live in the app or on disk.\n\n' +
+    'gauzzaDocs: read and edit documents, spreadsheets, presentations, PDFs and text files, live in the app or on disk.\n\n' +
       'When the app is running and a file is open in it, edits go into the open editor and appear as you watch\n' +
       '(undoable, saved by the app). Otherwise the file on disk is edited directly. --live opens the file first.\n' +
       'Before editing, run `gdocs instructions <file>`: it prints standing instructions (global and per file).\n' +
@@ -83,15 +84,15 @@ program
 
 program
   .command('new <kind> [name]')
-  .description('create a new file: doc | sheet | text (in the docs folder, or --dir). Opens it if the app is running')
+  .description('create a new file: doc | sheet | slides | text (in the docs folder, or --dir). Opens it if the app is running')
   .option('--ext <ext>', 'file extension, e.g. md, docx, csv, py')
   .option('--dir <dir>', 'folder to create it in (default: the app\'s docs folder)')
   .option('--no-open', 'do not open it in the app')
   .action(async (kind: Kind, name: string | undefined, o) => {
-    if (!['doc', 'sheet', 'text'].includes(kind)) throw new Error('kind must be doc, sheet or text')
+    if (!['doc', 'sheet', 'slides', 'text'].includes(kind)) throw new Error('kind must be doc, sheet, slides or text')
     const s = getSettings()
-    const ext = o.ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf' }[kind]
-    const stemName = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled' }[kind]
+    const ext = o.ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
+    const stemName = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
     const file = freeName(path.resolve(o.dir || s.docsDir), stemName, ext)
     await createFile(file)
     if (o.open) await call('open', { path: file }).catch(() => null)
@@ -118,7 +119,7 @@ program
 liveOptions(
   program
     .command('read <file>')
-    .description('print a file\'s content: docs as markdown (or --format html|text), sheets as CSV, PDFs as text')
+    .description('print a file\'s content: docs as markdown (or --format html|text), sheets as CSV, slides as Markdown, PDFs as text')
     .option('--format <format>', 'md | html | text (docs); csv | json | formulas (sheets); text | json (pdf)')
     .option('--lines <range>', 'text files: only these lines, e.g. 10-40')
     .option('--range <range>', 'sheets: only this range, e.g. A1:D20')
@@ -419,6 +420,7 @@ registerSubscribeCommands(program, ctx)
 registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)
 registerPdfCommands(program, ctx)
+registerSlidesCommands(program, ctx) // slides
 
 // Always node-style argv: installed copies run this under the app's Electron runtime (ELECTRON_RUN_AS_NODE),
 // where Commander would otherwise treat the script path as the first command.
