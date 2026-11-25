@@ -137,7 +137,10 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
 
       const q = new URLSearchParams({ agent: agentName(), ...(target ? { path: target } : {}) })
       const res = await fetch(`http://127.0.0.1:${s.port}/events?${q}`, { headers: { authorization: `Bearer ${s.token}` } })
-      if (!res.ok || !res.body) throw new Error(`Could not listen (HTTP ${res.status})`)
+      if (!res.ok || !res.body) {
+        const why = await res.json().then((j: { error?: string }) => j.error, () => '')
+        throw new Error(why || `Could not listen (HTTP ${res.status})`)
+      }
       if (!ctx.json() && process.stderr.isTTY) process.stderr.write(`listening${target ? ` to ${path.basename(target)}` : ''} as ${agentName()}…\n`)
       const reader = res.body.getReader()
       const dec = new TextDecoder()
@@ -152,6 +155,12 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
           buf = buf.slice(i + 2)
           if (!chunk.startsWith('data: ')) continue
           const ev = JSON.parse(chunk.slice(6)) as Record<string, unknown>
+          if (ev.type === 'disconnected') {
+            // The person cut this agent off in the app: say so plainly and stop (exit 3), so loops don't reconnect.
+            if (ctx.json()) console.log(JSON.stringify(ev))
+            else console.error(String(ev.reason))
+            process.exit(3)
+          }
           if (!wanted(ev)) continue // its own actions and housekeeping events are not news to it
           if (o.commentsOnly && ev.type === 'edit') continue
           deliver(ev)

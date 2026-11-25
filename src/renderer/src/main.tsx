@@ -1,5 +1,6 @@
 import { Component, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { lazy, Suspense } from 'react'
 import App from './App'
 import './styles.css'
 import './shell/shell.css'
@@ -25,8 +26,19 @@ class Boundary extends Component<{ children: ReactNode }, { error: Error | null 
   }
 }
 
+// #look is the hidden window that renders a file for `gdocs look` (agents seeing the document).
+const Look = lazy(() => import('./look/Look'))
+const looking = location.hash === '#look'
+if (looking) document.documentElement.classList.add('look')
+
 createRoot(document.getElementById('root')!).render(
   <Boundary>
-    <App />
+    {looking ? (
+      <Suspense fallback={null}>
+        <Look />
+      </Suspense>
+    ) : (
+      <App />
+    )}
   </Boundary>
 )

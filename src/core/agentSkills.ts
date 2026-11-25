@@ -133,6 +133,15 @@ so pictures, shapes and positions the person set by hand stay put. Files made in
 SmartArt or animations open with those parts simplified; the first save keeps the untouched original beside it as
 <name>.original.pptx.
 
+## Seeing the document
+
+\`gdocs look <file>\` saves screenshots of the file the way the app shows it and prints their paths: one per slide,
+or one per screen of a document, sheet, PDF or code file. Open them with your image tool (Read in Claude Code,
+view_image in Codex) to check how it reads and looks: headings, spacing, tables, slide layout, anything cut off or
+crowded. Do it after big or visual changes and before you tell the person a document is done, not after every small
+edit. \`--from 4 --count 2\` picks screens, \`--all\` takes up to 30. It needs the app running, and for an open file
+it shows the unsaved changes too.
+
 ## Working together through comments
 
 The person can comment on any selection or edit the file while you work. To hear them:
@@ -148,6 +157,9 @@ When they ask you to work on a doc with them, loop: \`listen --once\`, do what t
 reply in the thread (resolve it when it is done), then listen again until they tell you to stop. Comments that start
 with "@agent:" (Rewrite, Make shorter, Fix grammar, Explain) are requests about the quoted text. Your own edits and
 replies are never sent back to you.
+
+The person can disconnect you from the app. \`listen\` then prints why and exits with code 3, and trying again is
+refused. When that happens, stop listening and don't reconnect unless they ask you to.
 
 ## Working with other agents
 

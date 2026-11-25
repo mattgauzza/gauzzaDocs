@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { InstalledPlugin, Settings } from '../../../shared/types'
 import { type Market, type MarketPlugin, api } from '../lib'
 import { Icon } from './icons'
+import { DONATE } from '../../../shared/links'
 
 export function Modal(props: { title: string; onClose(): void; children: React.ReactNode; wide?: boolean; footer?: React.ReactNode }) {
   useEffect(() => {
@@ -31,6 +32,31 @@ export function Confirm(props: { title: string; text: string; buttons: { label: 
       <button key={b.label} className={b.primary ? 'btn primary' : 'btn'} onClick={b.run} autoFocus={b.primary}>{b.label}</button>
     ))}>
       <p>{props.text}</p>
+    </Modal>
+  )
+}
+
+/** The heart button: a note from Matt before anything opens in the browser. */
+export function DonateDialog({ onClose }: { onClose(): void }) {
+  return (
+    <Modal
+      title="Support gauzzaDocs"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>Not now</button>
+          <button className="btn primary" autoFocus onClick={() => (api.openUrl(DONATE), onClose())}>
+            <Icon name="heart" size={16} /> Donate on Ko-fi
+          </button>
+        </>
+      }
+    >
+      <div className="donate">
+        <p>I made gauzzaDocs for free. There's no subscription, no account and no ads.</p>
+        <p>If it's useful to you, a donation on Ko-fi helps me keep building it.</p>
+        <p className="muted small">Ko-fi opens in your browser.</p>
+        <p className="donate-sign">Thanks, Matt</p>
+      </div>
     </Modal>
   )
 }

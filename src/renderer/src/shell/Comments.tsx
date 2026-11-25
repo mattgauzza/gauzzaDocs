@@ -120,7 +120,9 @@ export function CommentsPanel(props: {
         {listening.length ? (
           <>
             <span className="cm-live" />
-            <span><b>{[...new Set(listening.map(l => l.agent))].join(', ')}</b> {listening.length > 1 ? 'are' : 'is'} listening: your comments and edits go straight to {listening.length > 1 ? 'them' : 'it'}.</span>
+            <span><b>{[...new Set(listening.map(l => l.agent))].join(', ')}</b> {listening.length > 1 ? 'are' : 'is'} listening: your comments and edits go straight to {listening.length > 1 ? 'them' : 'it'}.{' '}
+              <button className="cm-manage" onClick={() => window.dispatchEvent(new Event('gd-show-connections'))}>Manage</button>
+            </span>
           </>
         ) : (
           <span>

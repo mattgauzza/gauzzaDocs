@@ -23,10 +23,16 @@ export interface Listener {
   virtual?: boolean // an agent subscribed to the doc (woken by the app) rather than connected with gdocs listen
 }
 
+export interface Blocked { agent: string; path?: string; since: number }
+
 export interface Bridge {
   port: number
   emit(event: { type: string; path?: string; [k: string]: unknown }): void
   listeners(): Listener[]
+  /** Ends one agent's connection (it's told the person disconnected it) and keeps that name off this file until allowed. */
+  disconnect(id: number): boolean
+  blocked(): Blocked[]
+  unblock(agent: string, path?: string): void
   close(): void
 }
 
@@ -37,6 +43,10 @@ export function startBridge(rpc: Rpc, onListeners: (l: Listener[]) => void, tap?
   let seq = 0
   const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
   const snapshot = () => [...streams.values()]
+  // Agents the person disconnected: refused if they try to listen to the same file again (this session only).
+  const blocks = new Map<string, Blocked>()
+  const blockKey = (agent: string, p?: string) => `${agent.toLowerCase()}|${p ? path.resolve(p).toLowerCase() : '*'}`
+  const isBlocked = (agent: string, p?: string) => blocks.has(blockKey(agent, p)) || blocks.has(blockKey(agent))
 
   const server = http.createServer(async (req, res) => {
     const auth = req.headers.authorization || ''
@@ -48,6 +58,12 @@ export function startBridge(rpc: Rpc, onListeners: (l: Listener[]) => void, tap?
     if (req.method === 'GET' && req.url?.startsWith('/events')) {
       const q = new URL(req.url, 'http://x').searchParams
       const l: Listener = { id: ++seq, agent: q.get('agent') || 'Agent', path: q.get('path') || undefined, since: Date.now() }
+      if (isBlocked(l.agent, l.path)) {
+        res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({
+          error: `The person disconnected ${l.agent} from this file in gauzzaDocs. Don't reconnect unless they ask you to.`
+        }))
+        return
+      }
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
       res.write(': connected\n\n')
       streams.set(res, l)
@@ -95,6 +111,23 @@ export function startBridge(rpc: Rpc, onListeners: (l: Listener[]) => void, tap?
           for (const [res, l] of streams) if (!l.path || (event.path && same(l.path, event.path))) res.write(line)
         },
         listeners: snapshot,
+        disconnect: id => {
+          for (const [res, l] of streams) {
+            if (l.id !== id) continue
+            blocks.set(blockKey(l.agent, l.path), { agent: l.agent, path: l.path, since: Date.now() })
+            res.write(`data: ${JSON.stringify({ type: 'disconnected', path: l.path, reason: 'The person disconnected you from this file in gauzzaDocs. Stop listening and do not reconnect unless they ask you to.', at: Date.now() })}\n\n`)
+            res.end()
+            streams.delete(res)
+            onListeners(snapshot())
+            return true
+          }
+          return false
+        },
+        blocked: () => [...blocks.values()],
+        unblock: (agent, p) => {
+          blocks.delete(blockKey(agent, p))
+          onListeners(snapshot())
+        },
         close: () => {
           for (const res of streams.keys()) res.end()
           server.close()

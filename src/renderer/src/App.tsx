@@ -4,9 +4,11 @@ import type { AgentInfo, AgentOp, FilePayload, Settings } from '../../shared/typ
 import type { EditorHandle, EditorProps, MenuItem, MenuName } from './editor'
 import { type Listener, api, dirOf } from './lib'
 import { DONATE, EMPIRICAL_VOICE, REPO, SUBMIT_PLUGIN } from '../../shared/links'
-import { AgentDialog, Confirm, InstructionsDialog, PluginsDialog, SettingsDialog, ShortcutsDialog } from './shell/Dialogs'
+import { AgentDialog, Confirm, DonateDialog, InstructionsDialog, PluginsDialog, SettingsDialog, ShortcutsDialog } from './shell/Dialogs'
 import { Home } from './shell/Home'
+import { EDITORS } from './editors'
 import { StatusBar } from './shell/StatusBar'
+import { Connections } from './shell/Connections'
 import { agentColor } from '../../shared/agentColors'
 import { ToolbarOverflow } from './shell/ToolbarOverflow'
 import { usePanelSize } from './shell/resize'
@@ -22,14 +24,6 @@ import { Icon, KindIcon, Logo } from './shell/icons'
 import { MenuBar, MenuList } from './shell/Menus'
 import { type EditorAccess, type LoadedPlugins, fits, loadPlugins } from './shell/plugins'
 
-// Each editor loads the first time a file of its kind opens, so start-up stays light (pdf.js alone is large).
-const EDITORS: Record<Kind, React.ComponentType<EditorProps>> = {
-  doc: lazy(() => import('./doc/DocEditor')),
-  sheet: lazy(() => import('./sheet/SheetEditor')),
-  pdf: lazy(() => import('./pdf/PdfEditor')),
-  text: lazy(() => import('./text/TextEditor')),
-  slides: lazy(() => import('./slides/SlidesEditor')) // slides
-}
 
 interface Tab {
   id: number
@@ -65,7 +59,7 @@ export default function App() {
   const [settings, setSettingsState] = useState<Settings | null>(null)
   const [homeDir, setHomeDir] = useState('')
   const [plugins, setPlugins] = useState<LoadedPlugins | null>(null)
-  const [dialog, setDialog] = useState<null | 'plugins' | 'settings' | 'agent' | 'shortcuts' | 'instructions'>(null)
+  const [dialog, setDialog] = useState<null | 'plugins' | 'settings' | 'agent' | 'shortcuts' | 'instructions' | 'donate'>(null)
   const [confirm, setConfirm] = useState<null | { title: string; text: string; buttons: { label: string; primary?: boolean; run(): void }[] }>(null)
   const [toast, setToast] = useState('')
   const [preview, setPreview] = useState<string | null>(null) // plugin preview id shown beside the editor
@@ -96,6 +90,16 @@ export default function App() {
   const cur = tabs.find(t => t.id === active) || null
   // Whether the file in focus carries its own agent instructions (shown as a chip in the header).
   const [hasInstructions, setHasInstructions] = useState(false)
+  // The list of agents connected to this file (click the listening chip, or Manage in the comments panel).
+  const [connOpen, setConnOpen] = useState(false)
+  useEffect(() => {
+    const show = () => setConnOpen(true)
+    window.addEventListener('gd-show-connections', show)
+    return () => window.removeEventListener('gd-show-connections', show)
+  }, [])
+  useEffect(() => {
+    if (dialog) setConnOpen(false) // a dialog takes over the screen
+  }, [dialog])
   // The project explorer beside the editor (View > Explorer, Ctrl+Shift+E); remembered between sessions.
   const [explorer, setExplorerState] = useState(() => {
     try {
@@ -584,7 +588,19 @@ export default function App() {
         }, 400)
       }
     })
-    return () => (offOpen(), offClose(), offAgent())
+    // `gdocs look`: the content as it is now, unsaved changes included. null: not loaded here (asleep), use the disk.
+    const offSnapshot = window.gd.serve('snapshot', async (req: { path: string; agent?: AgentInfo }) => {
+      const t = tabFor(req.path)
+      const h = t && handles.current.get(t.id)
+      if (!t || !h || !t.payload) return null
+      if (req.agent) {
+        const color = req.agent.color || agentColor(req.agent.name)
+        patch(t.id, { agent: { ...req.agent, color, reading: true, until: Date.now() + 6000 } })
+        window.setTimeout(() => force(n => n + 1), 6100)
+      }
+      return { kind: t.kind, payload: await h.getPayload() }
+    })
+    return () => (offOpen(), offClose(), offAgent(), offSnapshot())
   }, [])
 
   // ---------- editor handles ----------
@@ -840,7 +856,7 @@ export default function App() {
             </button>
           )}
           {DONATE && (
-            <button className="strip-btn heart" title="Support gauzzaDocs (opens in your browser)" onClick={() => api.openUrl(DONATE)}>
+            <button className="strip-btn heart" title="Support gauzzaDocs" onClick={() => setDialog('donate')}>
               <Icon name="heart" size={17} />
             </button>
           )}
@@ -880,9 +896,9 @@ export default function App() {
           </div>
           <div className="file-actions-right">
             {listensTo(cur.path).filter(l => !l.virtual).length > 0 && (
-              <span className="listening" title="An agent is listening: your comments and edits are sent to it as you make them">
+              <button className="listening" title="Agents connected to this file: click to see them or disconnect one" onClick={() => setConnOpen(!connOpen)}>
                 <span className="cm-live" /> {[...new Set(listensTo(cur.path).filter(l => !l.virtual).map(l => l.agent))].join(', ')} is listening
-              </span>
+              </button>
             )}
             <Participants path={cur.path} say={say} />
             <button className={`icon-btn comments-btn${commentsOpen ? ' on' : ''}`} title="Comments (Ctrl+Alt+M comments on the selection)" onClick={() => setCommentsOpen(!commentsOpen)}>
@@ -972,11 +988,13 @@ export default function App() {
       <SelectionBubble enabled={!!cur && active !== HOME && !cur.large && (cur.kind === 'doc' || cur.kind === 'text') && !dialog} onComment={addComment} />
       {welcome && <Onboarding onClose={() => setWelcome(false)} />}
       <ToolbarOverflow />
+      {connOpen && cur && active !== HOME && <Connections path={cur.path} listeners={listeners} onClose={() => setConnOpen(false)} />}
       {toast && <div className="toast">{toast}</div>}
       {dialog === 'plugins' && <PluginsDialog onClose={() => setDialog(null)} onReload={reloadPlugins} />}
       {dialog === 'settings' && <SettingsDialog settings={settings} onClose={() => setDialog(null)} onSave={saveSettings} />}
       {dialog === 'agent' && <AgentDialog onClose={() => setDialog(null)} onInstructions={() => setDialog('instructions')} />}
       {dialog === 'shortcuts' && <ShortcutsDialog onClose={() => setDialog(null)} />}
+      {dialog === 'donate' && <DonateDialog onClose={() => setDialog(null)} />}
       {dialog === 'instructions' && (
         <InstructionsDialog
           path={active === HOME ? null : cur?.path || null}

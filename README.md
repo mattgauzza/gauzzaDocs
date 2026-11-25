@@ -107,6 +107,24 @@ listening it first gets any comments it missed. Its own edits and replies aren't
 Comments are saved in `~/.gauzzadocs/comments.json` and follow a file when you rename it in the app. Your edits are
 only compared while an agent is listening, so there's no cost the rest of the time.
 
+Click "Claude is listening" in the header to see every agent connected to the file. Disconnect cuts one off. The agent
+is told you disconnected it, and it can't listen to that file again until you click Allow again or restart the app.
+Subscribed agents show up in the same list, where you can pause or remove them.
+
+### Agents can see the document
+
+Reading the text doesn't tell an agent how the page looks. `gdocs look` renders the file the way the app shows it and
+saves screenshots: one per slide, or one per screen of a doc, sheet, PDF or code file. The agent opens them with its
+own image tool and checks the layout, the tables and anything that's cut off. The skill tells agents to do this after
+big changes and before they call a draft done. It renders in a hidden window, so it doesn't move what you're looking
+at, and it includes changes you haven't saved yet.
+
+```
+gdocs look report.md                    # the first 3 screens
+gdocs look deck.pptx --all              # every slide, up to 30
+gdocs look report.md --from 4 --count 2
+```
+
 ### Agents working together
 
 I can put more than one agent on a document and let them work it out between them. Each one is subscribed to the doc

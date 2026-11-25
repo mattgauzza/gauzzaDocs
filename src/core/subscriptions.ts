@@ -230,6 +230,8 @@ ${activity}
 How to work:
 1. Run: gdocs instructions ${q}  and follow what it says (it may ask you to look up the person's writing voice).
 2. Read the document: gdocs read ${q}  and open threads: gdocs comments ${q}
+   To see how it looks (layout, tables, slides): gdocs look ${q}  then open the images it lists. Do this after big
+   changes and before you call a draft done, not after every edit.
 3. Change the document only with gdocs, in small steps so others can follow:
    gdocs replace ${q} "old text" "new text"
    gdocs doc insert ${q} --after "Heading or text" --md "New paragraph"

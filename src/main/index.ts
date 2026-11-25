@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { BrowserWindow, app, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
+import { BrowserWindow, type WebContents, app, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
 import { instructionsFor, renameInstructions, setDocInstructions, setGlobal } from '../core/instructions'
 import {
   HOME, PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
@@ -18,6 +18,7 @@ import { stopWorker, warmUp, work } from './work'
 import { stopWatching, watchFolders } from './folders'
 import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
+import { LOOK_MAX, closeLook, look } from './look'
 
 app.setAppUserModelId('app.gauzzadocs.desktop')
 protocol.registerSchemesAsPrivileged([
@@ -46,6 +47,10 @@ let seq = 0
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>()
 function askWindow(channel: string, payload: Record<string, unknown>, timeoutMs = 60_000): Promise<unknown> {
   if (!win) return Promise.reject(new Error('The app window is not open'))
+  return askWeb(win.webContents, channel, payload, timeoutMs)
+}
+/** The same request and reply, to any of our windows (the app window, or the hidden one `gdocs look` renders in). */
+function askWeb(wc: WebContents, channel: string, payload: Record<string, unknown>, timeoutMs = 60_000): Promise<unknown> {
   const id = ++seq
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -53,7 +58,7 @@ function askWindow(channel: string, payload: Record<string, unknown>, timeoutMs 
       reject(new Error('The app did not answer in time'))
     }, timeoutMs)
     pending.set(id, { resolve, reject, timer })
-    win!.webContents.send(channel, { id, ...payload })
+    wc.send(channel, { id, ...payload })
   })
 }
 ipcMain.handle('agent:reply', (_e, id: number, reply: { result?: unknown; error?: string }) => {
@@ -148,6 +153,36 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     }
     case 'listeners':
       return bridge?.listeners() || []
+    // ---------- agents seeing the document: screenshots of it as the app shows it ----------
+    case 'look': {
+      if (!fs.existsSync(file)) throw new Error(`No such file: ${file}`)
+      let content = isOpen(file) ? ((await askWindow('snapshot', { path: file, agent }, 30_000).catch(() => null)) as { kind: Kind; payload: FilePayload } | null) : null
+      if (!content) {
+        const st = fs.statSync(file)
+        if (kindOf(file) === 'pdf') content = { kind: 'pdf', payload: { kind: 'pdf', bytes: new Uint8Array(0), url: fileUrl(file, st.mtimeMs) } as FilePayload }
+        else {
+          if (st.size > 32 * 1024 * 1024) throw new Error('That file is too big to picture. Use gdocs read or gdocs find to check it instead.')
+          const f = await work<OpenFile>('loadFile', [file])
+          content = { kind: f.kind, payload: f.payload }
+        }
+      }
+      return look(
+        {
+          path: file,
+          kind: content.kind,
+          payload: content.payload,
+          from: params.from as number | undefined,
+          count: params.all ? LOOK_MAX : (params.count as number | undefined),
+          width: params.width as number | undefined,
+          height: params.height as number | undefined,
+          theme: params.theme as string | undefined,
+          out: params.out as string | undefined
+        },
+        askWeb,
+        path.join(__dirname, '../preload/index.js'),
+        w => (process.env.ELECTRON_RENDERER_URL ? w.loadURL(process.env.ELECTRON_RENDERER_URL + '#look') : w.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: 'look' }))
+      )
+    }
     case 'close':
       if (!isOpen(file)) return { ok: true, wasOpen: false }
       return askWindow('close', { path: file, force: !!params.force })
@@ -221,6 +256,7 @@ function createWindow() {
   win.on('closed', () => {
     win = null
     tabs = []
+    closeLook()
   })
   // Links in documents open in the browser, never inside the app.
   attachContextMenu(win) // right-click menu with spelling suggestions (see contextMenu.ts)
@@ -430,6 +466,9 @@ const api: Record<string, (...a: any[]) => unknown> = {
     comments.remove(file, id)
     commentsChanged(file, { type: 'deleted', by: 'user', id })
   },
+  listenerDisconnect: (id: number) => bridge?.disconnect(id) ?? false,
+  listenersBlocked: () => bridge?.blocked() || [],
+  listenerUnblock: (agent: string, p?: string) => bridge?.unblock(agent, p),
   listeners: () => allListeners(),
   // Agents subscribed to documents (Add agent, the participant strip).
   agentsOn: (file: string) => runner?.states(file) || [],
@@ -607,6 +646,7 @@ else {
   })
   app.on('before-quit', () => {
     forceQuit = true
+    closeLook()
     runner?.shutdown()
     stopWorker()
     stopWatching()

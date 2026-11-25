@@ -108,6 +108,40 @@ program
   .action(async (file: string, o) => out(await call('close', { path: path.resolve(file), force: !!o.force }), () => 'closed'))
 
 program
+  .command('look <file>')
+  .alias('see')
+  .description('see the file as the app shows it: saves screenshots (one per slide, or per screen of a doc, sheet, PDF or code) as PNGs for you to open')
+  .option('--from <n>', 'first slide or screen to show', '1')
+  .option('--count <n>', 'how many to show', '3')
+  .option('--all', 'every slide or screen (up to 30)')
+  .option('--width <px>', 'window width (default 1200, slides 1280)')
+  .option('--height <px>', 'window height (default 1400, slides 720)')
+  .option('--theme <theme>', 'light or dark (default: the app theme)')
+  .option('--out <dir>', 'folder for the images (default: a gauzzadocs-look folder in temp)')
+  .action(async (file: string, o) => {
+    const p = path.resolve(file)
+    if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
+    const num = (v: unknown) => (v === undefined ? undefined : Number(v))
+    const r = (await call('look', {
+      path: p,
+      from: num(o.from),
+      count: num(o.count),
+      all: !!o.all,
+      width: num(o.width),
+      height: num(o.height),
+      theme: o.theme,
+      out: o.out,
+      agent: { name: program.opts().agent || process.env.GDOCS_AGENT || 'Agent' }
+    })) as { unit: string; total: number; images: { n: number; file: string; width: number; height: number }[] } | null
+    if (!r) throw new Error('gdocs look needs gauzzaDocs running, since it pictures the file the way the app shows it. Start the app and try again.')
+    out(r, () => {
+      const last = r.images.at(-1)?.n || 0
+      const more = last < r.total ? `\n${r.total - last} more: gdocs look ${file} --from ${last + 1}` : ''
+      return `${r.images.map(i => `${r.unit} ${i.n} of ${r.total}: ${i.file}`).join('\n')}${more}\nOpen each image with your image viewer tool to see it.`
+    })
+  })
+
+program
   .command('list')
   .alias('recent')
   .description('recently opened files')
