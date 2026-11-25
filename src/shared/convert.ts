@@ -71,10 +71,24 @@ function forTurndown(html: string) {
       `<${t}${a}>${inner.replace(/<\/p>\s*<p[^>]*>/gi, '<br>').replace(/<\/?p[^>]*>/gi, '').trim()}</${t}>`)
 }
 
+export const PAGE_BREAK_MD = '<div style="page-break-after: always"></div>'
+
 let td: TurndownService | null = null
 function turndown() {
   if (td) return td
-  td = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '-', emDelimiter: '*', hr: '---' })
+  td = new TurndownService({
+    headingStyle: 'atx',
+    codeBlockStyle: 'fenced',
+    bulletListMarker: '-',
+    emDelimiter: '*',
+    hr: '---',
+    // A page break is an empty div, and turndown drops empty elements before any rule sees them. Keep it as the raw
+    // HTML that Markdown to PDF tools understand; marked passes it back through and the editor reads it as a break.
+    blankReplacement: (_c, node) =>
+      node.nodeName === 'DIV' && /page-break/.test(`${(node as HTMLElement).getAttribute('class')} ${(node as HTMLElement).getAttribute('style')}`)
+        ? `\n\n${PAGE_BREAK_MD}\n\n`
+        : (node as unknown as { isBlock: boolean }).isBlock ? '\n\n' : ''
+  })
   td.use(gfm)
   ;(td as unknown as { escape: (s: string) => string }).escape = escapeMarkdown
 

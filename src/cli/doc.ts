@@ -31,8 +31,10 @@ export function registerDocCommands(program: Command, ctx: Ctx) {
       .option('--md <markdown>', 'content as markdown ("-" = stdin, "@file" = file)')
       .option('--html <html>', 'content as HTML')
       .option('--text <text>', 'content as plain text')
+      .option('--page-break', 'a page break (start what follows on a new page)')
   ).action(async (file: string, o) => {
     if (!o.after && !o.before) throw new Error('Use --after <text> or --before <text>')
+    if (o.pageBreak) o.html = '<div class="page-break" style="page-break-after: always"></div>'
     const r = await ctx.run(file, { op: 'insert', after: o.after, before: o.before, ...content(ctx, o) }, o)
     ctx.out(r, () => 'Inserted.')
   })

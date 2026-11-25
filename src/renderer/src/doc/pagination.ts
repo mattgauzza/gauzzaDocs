@@ -61,13 +61,38 @@ function decorate(doc: EditorState['doc'], breaks: PageBreakAt[]) {
 const sameBreaks = (a: PageBreakAt[], b: PageBreakAt[]) =>
   a.length === b.length && a.every((x, i) => x.pos === b[i].pos && Math.abs(x.fill - b[i].fill) < 0.5)
 
+interface Block { pos: number; top: number; bottom: number; manualBreak: boolean; kind: 'heading' | 'figure' | 'break' | 'text' }
+/** Blocks that shouldn't start a page cut off from the words that introduce them. */
+const TOGETHER = new Set(['table', 'image', 'figure', 'codeBlock'])
+
+/**
+ * Block i doesn't fit on the page. Returns the block the new page should start with instead, the way Word and
+ * Google Docs keep things together: a heading never ends a page (it moves with what follows it), and a table, picture
+ * or code block takes its short lead-in along (the paragraph or two back to its heading, if that's under a third of a
+ * page). Never moves the page's first block, so a page is never left empty.
+ */
+function keepTogether(blocks: Block[], i: number, pageStart: number) {
+  let j = i
+  while (j > 0 && blocks[j - 1].kind === 'heading') j--
+  if (j === i && blocks[i].kind === 'figure') {
+    let k = i
+    while (k > 0 && i - k < 2 && blocks[k - 1].kind === 'text') k--
+    if (k > 0 && blocks[k - 1].kind === 'heading') {
+      k--
+      while (k > 0 && blocks[k - 1].kind === 'heading') k--
+      if (blocks[i].top - blocks[k].top <= CONTENT_H / 3) j = k
+    }
+  }
+  return blocks[j].top <= pageStart + 0.5 ? i : j
+}
+
 /** Measures the laid-out document and works out where pages must break. */
 function measure(view: EditorView, current: PState): PageBreakAt[] | null {
   const root = view.dom as HTMLElement
   if (!root.offsetParent || root.offsetHeight === 0) return null // hidden tab: measure again when shown
   // Widgets already in the flow push blocks down; subtract them to get each block's position in plain text flow.
   const widgetBefore: { pos: number; height: number }[] = current.breaks.map(b => ({ pos: b.pos, height: b.fill + MARGIN + GAP + MARGIN }))
-  const blocks: { pos: number; top: number; bottom: number; manualBreak: boolean }[] = []
+  const blocks: Block[] = []
   const rootTop = root.getBoundingClientRect().top
   const scale = root.getBoundingClientRect().height / (root.offsetHeight || 1) || 1 // CSS zoom on the page
   unit = 64 * (window.devicePixelRatio || 1) * scale
@@ -81,7 +106,10 @@ function measure(view: EditorView, current: PState): PageBreakAt[] | null {
     const mt = parseFloat(style.marginTop) || 0
     const mb = parseFloat(style.marginBottom) || 0
     const top = (r.top - rootTop) / scale - shift
-    blocks.push({ pos: offset, top: top - mt, bottom: top + r.height / scale + mb, manualBreak: node.type.name === 'pageBreak' })
+    const name = node.type.name
+    const kind: Block['kind'] =
+      name === 'pageBreak' ? 'break' : name === 'heading' ? 'heading' : TOGETHER.has(name) ? 'figure' : 'text'
+    blocks.push({ pos: offset, top: top - mt, bottom: top + r.height / scale + mb, manualBreak: name === 'pageBreak', kind })
   })
 
   const breaks: PageBreakAt[] = []
@@ -89,13 +117,17 @@ function measure(view: EditorView, current: PState): PageBreakAt[] | null {
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i]
     const prev = blocks[i - 1]
-    if (prev?.manualBreak || (b.bottom - pageStart > CONTENT_H + 0.5 && b.top > pageStart + 0.5)) {
+    // A block taller than a page can't fit on any page, so moving it only leaves a gap: it starts where it is,
+    // unless the page is nearly full.
+    const tooTall = b.bottom - b.top > CONTENT_H && pageStart + CONTENT_H - b.top >= CONTENT_H * 0.2
+    if (prev?.manualBreak || (b.bottom - pageStart > CONTENT_H + 0.5 && b.top > pageStart + 0.5 && !tooTall)) {
+      const s = blocks[prev?.manualBreak ? i : keepTogether(blocks, i, pageStart)]
       // Layout snaps heights to 1/64 px; round the fill the same way and carry the remainder into the next page,
       // so page edges stay on the 1080px grid however long the document gets.
-      const exact = Math.max(0, pageStart + CONTENT_H - b.top)
+      const exact = Math.max(0, pageStart + CONTENT_H - s.top)
       const fill = snap(exact)
-      breaks.push({ pos: b.pos, fill })
-      pageStart = b.top - (fill - exact)
+      breaks.push({ pos: s.pos, fill })
+      pageStart = s.top - (fill - exact)
     }
     // A block taller than a page (a long table) cannot be split here: it runs over, and the next page starts after it.
     while (b.bottom - pageStart > CONTENT_H + 0.5 && b.top <= pageStart + 0.5 && b.bottom - b.top > CONTENT_H) {

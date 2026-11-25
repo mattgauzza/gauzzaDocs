@@ -25,7 +25,7 @@ export interface LookRequest {
   out?: string
 }
 export interface LookImage { n: number; file: string; width: number; height: number }
-export interface LookResult { path: string; unit: 'slide' | 'screen'; total: number; images: LookImage[] }
+export interface LookResult { path: string; unit: 'slide' | 'screen'; total: number; images: LookImage[]; notes: string[] }
 
 interface Rect { x: number; y: number; width: number; height: number }
 
@@ -90,6 +90,7 @@ async function shoot(req: LookRequest, ask: Ask, preload: string, load: (w: Brow
     const prep = (await ask(wc, 'look-prepare', { path: req.path, kind: req.kind, payload: req.payload, theme: req.theme }, 45_000)) as {
       unit: 'slide' | 'screen'
       total: number
+      notes?: string[]
     }
     const total = Math.max(1, prep.total)
     const from = clamp(req.from ?? 1, 1, total)
@@ -115,7 +116,7 @@ async function shoot(req: LookRequest, ask: Ask, preload: string, load: (w: Brow
       const size = img.getSize()
       images.push({ n: i + 1, file, width: size.width, height: size.height })
     }
-    return { path: req.path, unit: prep.unit, total, images }
+    return { path: req.path, unit: prep.unit, total, images, notes: prep.notes || [] }
   } finally {
     idle = setTimeout(closeLook, IDLE_MS)
   }

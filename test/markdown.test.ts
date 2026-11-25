@@ -100,3 +100,11 @@ test('saving a .md file keeps its front matter first and its agent instructions'
   void getDocInstructions
   fs.rmSync(dir, { recursive: true, force: true })
 })
+
+test('markdown: page breaks survive a save and come back as breaks in the editor', () => {
+  const md = htmlToMarkdown('<h1>A</h1><p>one</p><div class="page-break" style="page-break-after: always"></div><h2>B</h2><p>two</p>')
+  assert.match(md, /one\n\n<div style="page-break-after: always"><\/div>\n\n## B/)
+  const json = generateJSON(markdownToHtml(md), schemaExtensions())
+  assert.ok(json.content.some((n: { type: string }) => n.type === 'pageBreak'), 'parsed as a page break node')
+  assert.doesNotMatch(htmlToMarkdown('<p>a</p><div></div><p>b</p>'), /page-break/)
+})

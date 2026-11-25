@@ -4,6 +4,7 @@ import type { FilePayload, Settings } from '../../../shared/types'
 import { slideHtml } from '../../../shared/slides/html'
 import { EDITORS } from '../editors'
 import { api } from '../lib'
+import { CONTENT_H, MARGIN } from '../doc/pagination'
 
 /**
  * The hidden window that lets agents see a file (`gdocs look`). Main sends the content (the open tab's, unsaved
@@ -35,6 +36,54 @@ function screens(el: HTMLElement) {
   return Math.max(1, Math.ceil(Math.max(0, el.scrollHeight - el.clientHeight) / step) + 1)
 }
 
+// ---------- layout notes: problems an agent should fix, in words, next to the pictures ----------
+const clip = (el: Element | null) => {
+  const t = ((el as HTMLElement | null)?.innerText || '').trim().replace(/\s+/g, ' ')
+  return t.length > 48 ? `${t.slice(0, 45)}...` : t
+}
+const whatIs = (el: Element) => (el.querySelector('table') || el.tagName === 'TABLE' ? 'table' : el.tagName === 'PRE' ? 'code block' : el.querySelector('img') ? 'picture' : 'block')
+
+/** Pages of a document: headings left at the bottom of a page, mostly empty pages, blocks too tall for a page. */
+function docNotes(): string[] {
+  const pm = document.querySelector<HTMLElement>('.look-host .ProseMirror')
+  if (!pm) return []
+  const scale = pm.getBoundingClientRect().height / (pm.offsetHeight || 1) || 1
+  const notes: string[] = []
+  let page = 1
+  let last: HTMLElement | null = null
+  for (const el of pm.children as HTMLCollectionOf<HTMLElement>) {
+    if (el.classList.contains('gd-page-gap')) {
+      const empty = (parseFloat(el.querySelector<HTMLElement>('.gd-page-fill')?.style.height || '0') - MARGIN) / CONTENT_H
+      const next = el.nextElementSibling
+      if (last && /^H[1-6]$/.test(last.tagName)) notes.push(`Page ${page} ends with the heading "${clip(last)}" and its section starts on page ${page + 1}.`)
+      else if (empty > 0.5 && !last?.classList.contains('page-break') && next)
+        notes.push(`Page ${page} is ${Math.round(empty * 100)}% empty because the ${whatIs(next)} "${clip(next)}" didn't fit, so it starts page ${page + 1}.`)
+      page++
+      last = null
+      continue
+    }
+    if (el.getBoundingClientRect().height / scale > CONTENT_H + 1) notes.push(`The ${whatIs(el)} "${clip(el)}" is taller than a page and runs past the bottom of page ${page}. Split it into smaller parts.`)
+    last = el
+  }
+  return notes
+}
+
+/** Slides: text cut off by its box, and things that go past the edge of the slide. */
+function slideNotes(): string[] {
+  const notes: string[] = []
+  document.querySelectorAll<HTMLElement>('.look-unit .gd-slide').forEach((slide, i) => {
+    const s = slide.getBoundingClientRect()
+    for (const box of slide.children as HTMLCollectionOf<HTMLElement>) {
+      const text = box.querySelector<HTMLElement>('.gd-text')
+      const what = text ? `"${clip(text)}"` : box.querySelector('img') ? 'a picture' : 'a shape'
+      if (text && text.scrollHeight > text.clientHeight + 2) notes.push(`Slide ${i + 1}: the text ${what} doesn't fit its box and is cut off.`)
+      const r = box.getBoundingClientRect()
+      if (r.right > s.right + 2 || r.bottom > s.bottom + 2 || r.left < s.left - 2 || r.top < s.top - 2) notes.push(`Slide ${i + 1}: ${what} goes past the edge of the slide.`)
+    }
+  })
+  return notes
+}
+
 export default function Look() {
   const [job, setJob] = useState<Job | null>(null)
   const ready = useRef<(() => void) | null>(null)
@@ -56,9 +105,9 @@ export default function Look() {
       await document.fonts.ready
       await sleep(req.kind === 'pdf' ? 1200 : 700) // pagination, pdf.js first pages, sheet layout
       await frames()
-      if (req.kind === 'slides') return { unit: 'slide', total: document.querySelectorAll('.look-unit').length }
+      if (req.kind === 'slides') return { unit: 'slide', total: document.querySelectorAll('.look-unit').length, notes: slideNotes() }
       const el = scroller()
-      return { unit: 'screen', total: el ? screens(el) : 1 }
+      return { unit: 'screen', total: el ? screens(el) : 1, notes: req.kind === 'doc' ? docNotes() : [] }
     })
 
     const offShot = window.gd.serve('look-shot', async (req: { index: number }): Promise<Rect> => {

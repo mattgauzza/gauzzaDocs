@@ -142,6 +142,11 @@ crowded. Do it after big or visual changes and before you tell the person a docu
 edit. \`--from 4 --count 2\` picks screens, \`--all\` takes up to 30. It needs the app running, and for an open file
 it shows the unsaved changes too.
 
+It also prints layout notes when it finds problems: a heading left at the bottom of a page, a mostly empty page, a
+table taller than a page, slide text cut off by its box or something past the slide edge. Fix them: shorten or split
+the content, resize the box, or start a section on a new page with
+\`gdocs doc insert <file> --before "Section heading" --page-break\`. Then look again.
+
 ## Working together through comments
 
 The person can comment on any selection or edit the file while you work. To hear them:

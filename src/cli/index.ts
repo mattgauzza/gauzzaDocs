@@ -132,12 +132,13 @@ program
       theme: o.theme,
       out: o.out,
       agent: { name: program.opts().agent || process.env.GDOCS_AGENT || 'Agent' }
-    })) as { unit: string; total: number; images: { n: number; file: string; width: number; height: number }[] } | null
+    })) as { unit: string; total: number; images: { n: number; file: string; width: number; height: number }[]; notes?: string[] } | null
     if (!r) throw new Error('gdocs look needs gauzzaDocs running, since it pictures the file the way the app shows it. Start the app and try again.')
     out(r, () => {
       const last = r.images.at(-1)?.n || 0
       const more = last < r.total ? `\n${r.total - last} more: gdocs look ${file} --from ${last + 1}` : ''
-      return `${r.images.map(i => `${r.unit} ${i.n} of ${r.total}: ${i.file}`).join('\n')}${more}\nOpen each image with your image viewer tool to see it.`
+      const notes = r.notes?.length ? `\n\nLayout notes:\n${r.notes.map(n => `- ${n}`).join('\n')}` : ''
+      return `${r.images.map(i => `${r.unit} ${i.n} of ${r.total}: ${i.file}`).join('\n')}${more}\nOpen each image with your image viewer tool to see it.${notes}`
     })
   })
 
