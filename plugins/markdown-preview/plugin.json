@@ -1,0 +1,18 @@
+{
+  "id": "markdown-preview",
+  "name": "Markdown preview",
+  "version": "1.0.0",
+  "description": "Live rendered preview of Markdown beside the editor, plus a table formatter.",
+  "author": "gauzzaDocs",
+  "category": "Preview",
+  "tags": [
+    "markdown",
+    "preview",
+    "tables"
+  ],
+  "icon": "👁️",
+  "main": "index.js",
+  "languages": [
+    "markdown"
+  ]
+}

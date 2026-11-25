@@ -1,0 +1,20 @@
+{
+  "id": "text-tools",
+  "name": "Text tools",
+  "version": "1.0.0",
+  "description": "Sort, dedupe, trim, case changes, Base64 and URL encode/decode, line numbers.",
+  "author": "gauzzaDocs",
+  "category": "Text",
+  "tags": [
+    "sort",
+    "case",
+    "base64",
+    "url",
+    "textfx"
+  ],
+  "icon": "🔤",
+  "main": "index.js",
+  "languages": [
+    "*"
+  ]
+}

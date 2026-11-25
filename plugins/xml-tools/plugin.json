@@ -1,0 +1,20 @@
+{
+  "id": "xml-tools",
+  "name": "XML / HTML formatter",
+  "version": "1.0.0",
+  "description": "Indent XML, SVG and HTML markup; minify XML.",
+  "author": "gauzzaDocs",
+  "category": "Formatting",
+  "tags": [
+    "xml",
+    "html",
+    "svg",
+    "formatter"
+  ],
+  "icon": "🏷️",
+  "main": "index.js",
+  "languages": [
+    "xml",
+    "html"
+  ]
+}

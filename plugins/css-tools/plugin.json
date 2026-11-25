@@ -1,0 +1,12 @@
+{
+  "id": "css-tools",
+  "name": "CSS tools",
+  "version": "1.0.0",
+  "description": "Format and minify CSS, sort properties, and preview every color used in the file as swatches.",
+  "author": "gauzzaDocs",
+  "category": "Formatting",
+  "tags": ["css", "scss", "less", "colors"],
+  "icon": "🎨",
+  "main": "index.js",
+  "languages": ["css", "sass", "less"]
+}

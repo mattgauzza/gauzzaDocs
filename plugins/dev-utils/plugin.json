@@ -1,0 +1,12 @@
+{
+  "id": "dev-utils",
+  "name": "Developer utilities",
+  "version": "1.0.0",
+  "description": "Insert UUIDs, timestamps and lorem ipsum; SHA-256 hashes; decode JWTs; convert Unix times; escape and unescape JSON strings.",
+  "author": "gauzzaDocs",
+  "category": "Developer",
+  "tags": ["uuid", "hash", "jwt", "timestamp", "lorem"],
+  "icon": "🧰",
+  "main": "index.js",
+  "languages": ["*"]
+}

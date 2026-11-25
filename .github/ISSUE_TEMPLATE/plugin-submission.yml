@@ -1,0 +1,47 @@
+name: Submit a plugin
+description: Get your plugin listed in the gauzzaDocs marketplace
+title: "Plugin: "
+labels: ["plugin submission"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for building a plugin! Two ways to get it listed:
+
+        - **Add it to this repo**: open a pull request that adds `plugins/<your-id>/` and runs `npm run marketplace`. Best for small, dependency-free plugins we can maintain together.
+        - **Keep it in your own repo**: fill in this form (or open a pull request adding one line to `plugins/external.json`). We pin your plugin to a commit, so users get exactly what was reviewed; new versions are a new pin.
+
+        Before submitting, run `gdocs plugins validate <folder>`: it is the same check CI runs. Plugins cannot import Node modules, use eval, or make network requests.
+  - type: input
+    id: id
+    attributes:
+      label: Plugin id
+      description: Lower-case, matches "id" in plugin.json
+      placeholder: mermaid-preview
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Where is it?
+      description: "Your repository folder, or a raw URL pinned to a commit: https://raw.githubusercontent.com/<you>/<repo>/<40-char commit>/<folder>/"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What does it do?
+      description: Which file types, and what it adds (formatters, previews, commands). Screenshots welcome.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: "`gdocs plugins validate` passes"
+          required: true
+        - label: It does not send data anywhere or run code it downloads
+          required: true
+        - label: I agree to it being listed under the repository's MIT license, or my plugin's license is stated in its folder
+          required: true

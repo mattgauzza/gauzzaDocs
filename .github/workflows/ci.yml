@@ -1,0 +1,24 @@
+name: CI
+
+# Every push and pull request: typecheck, tests, and the plugin marketplace checks (each plugin loads and registers
+# something, ids match folders, marketplace.json and MARKETPLACE.md are rebuilt with current checksums).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - name: Validate plugins
+        run: npm run plugins:validate
+      - name: Marketplace is up to date
+        run: npm run marketplace:check

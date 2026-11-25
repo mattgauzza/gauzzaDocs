@@ -1,0 +1,447 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { BrowserWindow, app, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
+import { createFile, loadFile, saveFile } from '../core/files'
+import { instructionsFor, renameInstructions, setDocInstructions, setGlobal } from '../core/instructions'
+import { findInFile, forgetIndex, indexFile, readLines } from '../core/large'
+import { runOffline } from '../core/ops'
+import {
+  PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
+} from '../core/paths'
+import * as plugins from '../core/plugins'
+import { wrapHtml } from '../shared/convert'
+import { type Kind, OPEN_FILTERS, extOf, kindOf, stem } from '../shared/kinds'
+import type { AgentInfo, AgentOp, FilePayload } from '../shared/types'
+import * as comments from '../core/comments'
+import { type Bridge, startBridge } from './server'
+import { installUpdate, updateReady, watchForUpdates } from './updates'
+
+app.setAppUserModelId('app.gauzzadocs.desktop')
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'gdplugin', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
+  { scheme: 'gdfile', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
+])
+
+let win: BrowserWindow | null = null
+let bridge: Bridge | null = null
+/** Bundled copy of the plugin library, used when GitHub cannot be reached. */
+const BUNDLED_PLUGINS = path.join(app.getAppPath(), 'plugins')
+
+// ---------- what the window has open (it tells us; we answer the CLI from this) ----------
+interface TabInfo { path: string; kind: Kind; dirty: boolean; active?: boolean; large?: boolean }
+let tabs: TabInfo[] = []
+// Large-file tabs are views, not editors: agent ops on them go straight to the file on disk.
+const isOpen = (file: string) => tabs.some(t => !t.large && samePath(t.path, file))
+const isShown = (file: string) => tabs.some(t => samePath(t.path, file)) || openingNow.has(file.toLowerCase())
+const openingNow = new Set<string>()
+
+/** URL the window reads an open file through, by byte range (PDFs stream their pages from it). */
+const fileUrl = (file: string, mtime: number) => `gdfile://f/${encodeURIComponent(file)}?v=${Math.round(mtime)}`
+
+// ---------- requests to the window (agent ops), answered over 'agent:reply' ----------
+let seq = 0
+const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>()
+function askWindow(channel: string, payload: Record<string, unknown>, timeoutMs = 60_000): Promise<unknown> {
+  if (!win) return Promise.reject(new Error('The app window is not open'))
+  const id = ++seq
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id)
+      reject(new Error('The app did not answer in time'))
+    }, timeoutMs)
+    pending.set(id, { resolve, reject, timer })
+    win!.webContents.send(channel, { id, ...payload })
+  })
+}
+ipcMain.handle('agent:reply', (_e, id: number, reply: { result?: unknown; error?: string }) => {
+  const p = pending.get(id)
+  if (!p) return
+  pending.delete(id)
+  clearTimeout(p.timer)
+  if (reply.error) p.reject(new Error(reply.error))
+  else p.resolve(reply.result)
+})
+
+/** Opens a file in the window (or focuses its tab) and waits until its editor is ready for agent ops. */
+async function openInWindow(file: string, opts: { focus?: boolean } = {}) {
+  const p = path.resolve(file)
+  if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
+  if (!win) createWindow()
+  if (opts.focus !== false) {
+    if (win!.isMinimized()) win!.restore()
+    win!.show()
+    win!.focus()
+  }
+  await askWindow('open', { path: p }, 30_000)
+  return p
+}
+
+async function newFilePath(kind: Kind, ext?: string, name?: string) {
+  const s = getSettings()
+  const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf' }[kind]
+  const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled' }[kind]
+  const file = freeName(s.docsDir, base, e)
+  await createFile(file)
+  return file
+}
+
+// ---------- the CLI bridge ----------
+async function rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
+  const file = typeof params.path === 'string' ? path.resolve(params.path) : ''
+  const agent: AgentInfo = (params.agent as AgentInfo) || { name: 'Agent' }
+  switch (method) {
+    case 'ping':
+      return { app: 'gauzzaDocs', version: app.getVersion(), pid: process.pid }
+    case 'list':
+      return tabs
+    case 'open':
+      return { path: await openInWindow(file, { focus: params.focus !== false }) }
+    case 'new': {
+      const created = await newFilePath(String(params.kind || 'doc') as Kind, params.ext as string, params.name as string)
+      if (params.open !== false) await openInWindow(created)
+      return { path: created }
+    }
+    // ---------- comments: agents read and answer the person's comments ----------
+    case 'comments':
+      return comments.list(file, { all: !!params.all })
+    case 'comment': {
+      const t = comments.add(file, { text: String(params.text || ''), quote: params.quote as string, anchor: params.anchor as never, author: agent.name, by: 'agent' })
+      commentsChanged(file, { type: 'comment', by: 'agent', author: agent.name, thread: t })
+      return t
+    }
+    case 'reply': {
+      const r = comments.reply(file, String(params.id), { text: String(params.text || ''), author: agent.name, by: 'agent' })
+      commentsChanged(file, { type: 'reply', by: 'agent', author: agent.name, thread: r.thread, reply: r.reply })
+      return r
+    }
+    case 'resolve': {
+      const t = comments.resolve(file, String(params.id), params.reopen ? false : true)
+      commentsChanged(file, { type: 'resolved', by: 'agent', author: agent.name, thread: t, resolved: t.resolved })
+      return t
+    }
+    case 'listeners':
+      return bridge?.listeners() || []
+    case 'close':
+      if (!isOpen(file)) return { ok: true, wasOpen: false }
+      return askWindow('close', { path: file, force: !!params.force })
+    case 'op': {
+      const op = params.op as AgentOp
+      if (!op?.op) throw new Error('missing op')
+      // --live: open it, or bring its tab to the front, so the person can watch the edit happen.
+      if (params.live) await openInWindow(file, { focus: params.focus !== false })
+      if (isOpen(file)) {
+        const result = await askWindow('agent', { path: file, op, agent })
+        return { result, live: true }
+      }
+      if (op.op === 'save') return { result: { ok: true, note: 'not open; nothing to save' }, live: false }
+      return { result: await runOffline(file, op), live: false }
+    }
+    default:
+      throw new Error(`Unknown method "${method}"`)
+  }
+}
+
+/** Tells the window (to redraw the comment panel) and every listening agent that a thread changed. */
+function commentsChanged(file: string, event: Record<string, unknown>) {
+  win?.webContents.send('comments-changed', path.resolve(file))
+  bridge?.emit({ ...event, type: String(event.type), path: path.resolve(file) })
+}
+const userName = () => {
+  try {
+    const n = os.userInfo().username
+    return n.charAt(0).toUpperCase() + n.slice(1)
+  } catch {
+    return 'You'
+  }
+}
+
+// ---------- window ----------
+function createWindow() {
+  const dark = nativeTheme.shouldUseDarkColors
+  win = new BrowserWindow({
+    width: 1360,
+    height: 900,
+    minWidth: 720,
+    minHeight: 480,
+    show: false,
+    title: 'gauzzaDocs',
+    backgroundColor: dark ? '#1b1c1f' : '#f9fbfd',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#00000000', symbolColor: dark ? '#e3e3e3' : '#444746', height: 40 },
+    icon: path.join(__dirname, '../../resources/icon.png'),
+    webPreferences: { preload: path.join(__dirname, '../preload/index.js'), sandbox: false, spellcheck: true }
+  })
+  win.once('ready-to-show', () => win?.show())
+  win.on('closed', () => {
+    win = null
+    tabs = []
+  })
+  // Links in documents open in the browser, never inside the app.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:|^mailto:/i.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url !== win?.webContents.getURL()) {
+      e.preventDefault()
+      if (/^https?:|^mailto:/i.test(url)) shell.openExternal(url)
+    }
+  })
+  // The window asks before closing when files have unsaved changes.
+  win.on('close', e => {
+    if (forceQuit || !tabs.some(t => t.dirty)) return
+    e.preventDefault()
+    win!.webContents.send('confirm-quit')
+  })
+  if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL)
+  else win.loadFile(path.join(__dirname, '../renderer/index.html'))
+}
+let forceQuit = false
+
+/** Renders HTML to PDF bytes in a hidden window (Export → PDF for documents, sheets and printing). */
+async function htmlToPdf(html: string, title: string): Promise<Uint8Array> {
+  const w = new BrowserWindow({ show: false, webPreferences: { javascript: false, offscreen: true } })
+  try {
+    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html.startsWith('<!doctype') ? html : wrapHtml(html, title)))
+    return await w.webContents.printToPDF({ pageSize: 'Letter', printBackground: true })
+  } finally {
+    w.destroy()
+  }
+}
+
+// ---------- the window's API (window.gd.call(method, ...args)) ----------
+const api: Record<string, (...a: any[]) => unknown> = {
+  load: async (file: string) => {
+    const p = path.resolve(file)
+    openingNow.add(p.toLowerCase())
+    setTimeout(() => openingNow.delete(p.toLowerCase()), 30_000)
+    // PDFs are not read here: the window streams the pages it shows through gdfile:.
+    if (kindOf(p) === 'pdf') {
+      const st = fs.statSync(p)
+      addRecent(p)
+      return { path: p, kind: 'pdf', payload: { kind: 'pdf', bytes: new Uint8Array(0), url: fileUrl(p, st.mtimeMs) }, mtime: st.mtimeMs }
+    }
+    const f = await loadFile(p)
+    addRecent(f.path)
+    return f
+  },
+  largeIndex: async (file: string) => {
+    const i = await indexFile(file, f => win?.webContents.send('large-progress', file, f))
+    return { lines: i.lines, size: i.size, crlf: i.crlf }
+  },
+  largeLines: (file: string, from: number, count: number) => readLines(file, from, count),
+  largeFind: (file: string, q: string, opts: { from?: number; limit?: number; regex?: boolean; ignoreCase?: boolean }) => findInFile(file, q, opts),
+  largeForget: (file: string) => forgetIndex(file),
+  save: (file: string, payload: FilePayload) => saveFile(file, payload),
+  newFile: (kind: Kind, ext?: string) => newFilePath(kind, ext),
+  openDialog: async () => {
+    const r = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], filters: OPEN_FILTERS })
+    return r.canceled ? [] : r.filePaths
+  },
+  saveAsDialog: async (file: string) => {
+    const ext = extOf(file)
+    const kind = kindOf(file)
+    const choices: Record<Kind, string[]> = { doc: ['html', 'md', 'docx'], sheet: ['xlsx', 'csv', 'tsv'], pdf: ['pdf'], text: [ext || 'txt'] }
+    const r = await dialog.showSaveDialog(win!, {
+      defaultPath: file,
+      filters: [...new Set([ext, ...choices[kind]])].filter(Boolean).map(e => ({ name: e.toUpperCase(), extensions: [e] }))
+    })
+    return r.canceled ? null : r.filePath
+  },
+  /** Export to another format without changing which file is open. */
+  exportFile: async (file: string, payload: FilePayload, format: string, html?: string) => {
+    const r = await dialog.showSaveDialog(win!, {
+      defaultPath: path.join(path.dirname(file), `${stem(file)}.${format}`),
+      filters: [{ name: format.toUpperCase(), extensions: [format] }]
+    })
+    if (r.canceled || !r.filePath) return null
+    if (format === 'pdf' && payload.kind !== 'pdf') fs.writeFileSync(r.filePath, await htmlToPdf(html || '', stem(file)))
+    else await saveFile(r.filePath, payload)
+    return r.filePath
+  },
+  print: async (html: string, title: string) => {
+    const tmp = path.join(os.tmpdir(), `gauzzadocs-print-${Date.now()}.pdf`)
+    fs.writeFileSync(tmp, await htmlToPdf(html, title))
+    await shell.openPath(tmp)
+    return tmp
+  },
+  rename: (file: string, newStem: string) => {
+    const clean = newStem.replace(/[\\/:*?"<>|]/g, '').trim()
+    if (!clean) throw new Error('Name cannot be empty')
+    const to = path.join(path.dirname(file), `${clean}${path.extname(file)}`)
+    if (samePath(to, file)) return file
+    if (fs.existsSync(to)) throw new Error(`${path.basename(to)} already exists`)
+    fs.renameSync(file, to)
+    renameRecent(file, to)
+    renameInstructions(file, to)
+    comments.renameComments(file, to)
+    return to
+  },
+  instructions: (file?: string) => instructionsFor(file),
+  /** file null = the global instructions. Per-file ones in HTML/Markdown are written into the file itself. */
+  setInstructions: (file: string | null, text: string) => {
+    if (!file) return setGlobal(text), 0
+    setDocInstructions(file, text)
+    return fs.statSync(file).mtimeMs // so the open tab does not take this for someone else's edit
+  },
+  recent: () => getRecent(),
+  removeRecent: (file: string) => removeRecent(file),
+  listDir: (dir: string) =>
+    fs.readdirSync(dir, { withFileTypes: true })
+      .filter(d => !d.name.startsWith('.'))
+      .map(d => {
+        const p = path.join(dir, d.name)
+        let mtime = 0
+        try { mtime = fs.statSync(p).mtimeMs } catch { /* vanished */ }
+        return { name: d.name, path: p, dir: d.isDirectory(), mtime }
+      }),
+  stat: (file: string) => {
+    try {
+      const s = fs.statSync(file)
+      return { size: s.size, mtime: s.mtimeMs, created: s.birthtimeMs }
+    } catch {
+      return null
+    }
+  },
+  mtime: (file: string) => {
+    try { return fs.statSync(file).mtimeMs } catch { return 0 }
+  },
+  settings: () => getSettings(),
+  setSettings: (patch: Record<string, unknown>) => setSettings(patch),
+  reveal: (file: string) => shell.showItemInFolder(file),
+  openExternal: (url: string) => (/^https?:/i.test(url) ? shell.openExternal(url) : undefined),
+  pluginsInstalled: () => plugins.installed(),
+  pluginsLibrary: () => plugins.library(BUNDLED_PLUGINS),
+  pluginsInstall: (id: string) => plugins.install(id, BUNDLED_PLUGINS),
+  pluginsUpdateAll: () => plugins.updateAll(BUNDLED_PLUGINS),
+  pluginsRemove: (id: string) => plugins.remove(id),
+  pluginsSetEnabled: (id: string, on: boolean) => plugins.setEnabled(id, on),
+  // Comments made in the window are the person's.
+  commentsList: (file: string, all?: boolean) => comments.list(file, { all }),
+  commentAdd: (file: string, c: { text: string; quote?: string; anchor?: comments.Thread['anchor'] }) => {
+    const t = comments.add(file, { ...c, author: userName(), by: 'user' })
+    commentsChanged(file, { type: 'comment', by: 'user', author: t.author, thread: t })
+    return t
+  },
+  commentReply: (file: string, id: string, text: string) => {
+    const r = comments.reply(file, id, { text, author: userName(), by: 'user' })
+    commentsChanged(file, { type: 'reply', by: 'user', author: r.reply.author, thread: r.thread, reply: r.reply })
+    return r
+  },
+  commentResolve: (file: string, id: string, resolved: boolean) => {
+    const t = comments.resolve(file, id, resolved)
+    commentsChanged(file, { type: 'resolved', by: 'user', author: userName(), thread: t, resolved })
+    return t
+  },
+  commentDelete: (file: string, id: string) => {
+    comments.remove(file, id)
+    commentsChanged(file, { type: 'deleted', by: 'user', id })
+  },
+  listeners: () => bridge?.listeners() || [],
+  cliInfo: () => ({ port: bridge?.port, cli: path.join(app.getAppPath(), 'dist', 'cli.mjs'), home: os.homedir() }),
+  updateReady: () => updateReady(),
+  installUpdate: () => {
+    forceQuit = true
+    installUpdate()
+  },
+  openUrl: (url: string) => (/^https:\/\//i.test(url) ? shell.openExternal(url) : undefined),
+  quit: () => {
+    forceQuit = true
+    app.quit()
+  }
+}
+
+ipcMain.handle('api', async (_e, method: string, args: unknown[]) => {
+  const fn = api[method]
+  if (!fn) throw new Error(`Unknown api method ${method}`)
+  return fn(...args)
+})
+ipcMain.on('tabs', (_e, list: TabInfo[]) => {
+  const before = new Set(tabs.map(t => t.path))
+  tabs = list
+  for (const t of list) if (!before.has(t.path)) bridge?.emit({ type: 'opened', path: t.path })
+  for (const p of before) if (!list.some(t => t.path === p)) bridge?.emit({ type: 'closed', path: p })
+})
+ipcMain.on('changed', (_e, file: string, info: Record<string, unknown>) => bridge?.emit({ type: 'changed', path: file, ...info }))
+
+// ---------- CLI launcher (installed copies only), like quickMail ----------
+function installCli() {
+  if (!app.isPackaged || /[\\/]release[\\/]/i.test(process.execPath)) return
+  const cli = path.join(app.getAppPath(), 'dist', 'cli.mjs')
+  try {
+    if (process.platform === 'win32') {
+      if (!process.env.LOCALAPPDATA) return
+      const file = path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'gdocs.cmd')
+      const body = `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "${cli}" %*\r\n`
+      if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== body) fs.writeFileSync(file, body)
+    } else if (!process.env.APPIMAGE) {
+      const bin = path.join(os.homedir(), '.local', 'bin')
+      const file = path.join(bin, 'gdocs')
+      const sh = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cli}" "$@"\n`
+      fs.mkdirSync(bin, { recursive: true })
+      if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== sh) fs.writeFileSync(file, sh, { mode: 0o755 })
+    }
+  } catch { /* no launcher; the app still works */ }
+}
+
+// ---------- startup ----------
+const filesFromArgv = (argv: string[]) => argv.slice(app.isPackaged ? 1 : 2).filter(a => !a.startsWith('-') && fs.existsSync(a) && fs.statSync(a).isFile())
+
+if (!app.requestSingleInstanceLock()) app.quit()
+else {
+  app.on('second-instance', (_e, argv) => {
+    if (!win) createWindow()
+    else {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
+    for (const f of filesFromArgv(argv)) openInWindow(f).catch(() => {})
+  })
+
+  app.whenReady().then(async () => {
+    // Byte-range file reads for the window, limited to files it has open.
+    protocol.handle('gdfile', async req => {
+      const u = new URL(req.url)
+      const file = decodeURIComponent(u.pathname.slice(1))
+      if (!isShown(file) || !fs.existsSync(file)) return new Response('', { status: 403 })
+      const size = fs.statSync(file).size
+      const range = /bytes=(\d+)-(\d*)/.exec(req.headers.get('range') || '')
+      const headers = { 'accept-ranges': 'bytes', 'access-control-allow-origin': '*', 'content-type': 'application/octet-stream' }
+      if (!range) return new Response(fs.readFileSync(file), { status: 200, headers: { ...headers, 'content-length': String(size) } })
+      const start = Number(range[1])
+      const end = Math.min(range[2] ? Number(range[2]) : size - 1, size - 1)
+      if (start >= size || end < start) return new Response('', { status: 416, headers: { 'content-range': `bytes */${size}` } })
+      const buf = Buffer.allocUnsafe(end - start + 1)
+      const fd = fs.openSync(file, 'r')
+      try { fs.readSync(fd, buf, 0, buf.length, start) } finally { fs.closeSync(fd) }
+      return new Response(buf, { status: 206, headers: { ...headers, 'content-length': String(buf.length), 'content-range': `bytes ${start}-${end}/${size}` } })
+    })
+    protocol.handle('gdplugin', req => {
+      const u = new URL(req.url)
+      const file = path.join(PLUGINS_DIR, u.hostname, decodeURIComponent(u.pathname))
+      if (!file.startsWith(path.join(PLUGINS_DIR, u.hostname) + path.sep)) return new Response('', { status: 403 })
+      return net.fetch(`file://${file.replace(/\\/g, '/')}`).then(r =>
+        new Response(r.body, {
+          status: r.status,
+          headers: {
+            'content-type': file.endsWith('.css') ? 'text/css' : file.endsWith('.json') ? 'application/json' : 'text/javascript',
+            'access-control-allow-origin': '*'
+          }
+        })
+      )
+    })
+    fs.mkdirSync(getSettings().docsDir, { recursive: true })
+    bridge = await startBridge(rpc, list => win?.webContents.send('listeners', list))
+    installCli()
+    createWindow()
+    watchForUpdates(() => win)
+    const initial = filesFromArgv(process.argv)
+    if (initial.length) win!.webContents.once('did-finish-load', () => setTimeout(() => initial.forEach(f => openInWindow(f).catch(() => {})), 300))
+  })
+  app.on('before-quit', () => {
+    forceQuit = true
+    bridge?.close()
+  })
+  app.on('window-all-closed', () => app.quit())
+}

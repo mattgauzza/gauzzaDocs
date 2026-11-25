@@ -1,0 +1,57 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the installers for Windows, macOS and Linux and attaches them (plus the files
+# the in-app updater reads) to that GitHub release. It can also be run by hand for an existing tag
+# (Actions > Release > Run workflow). `npm run release` bumps the version, tags and pushes.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the release if it does not exist yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$TAG" --repo "$GITHUB_REPOSITORY" || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "gauzzaDocs ${TAG#v}" --generate-notes
+
+  build:
+    needs: create
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Not "npm ci": the lock file is written on Windows and does not list every platform's optional packages.
+      - run: npm install --no-audit --no-fund
+      - run: npm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false' # builds are not code-signed
+      - name: Attach installers to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(release/*.exe release/*.exe.blockmap release/*.dmg release/*.dmg.blockmap release/*.zip release/*.zip.blockmap release/*.AppImage release/*.deb release/latest*.yml)
+          printf '%s\n' "${files[@]}"
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

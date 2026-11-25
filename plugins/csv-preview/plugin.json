@@ -1,0 +1,18 @@
+{
+  "id": "csv-preview",
+  "name": "CSV table preview",
+  "version": "1.0.0",
+  "description": "See CSV/TSV text as a table, and align columns in plain-text CSV.",
+  "author": "gauzzaDocs",
+  "category": "Data",
+  "tags": [
+    "csv",
+    "tsv",
+    "preview"
+  ],
+  "icon": "📊",
+  "main": "index.js",
+  "languages": [
+    "csv"
+  ]
+}

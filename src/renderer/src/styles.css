@@ -1,0 +1,75 @@
+/* Design tokens. Editors use these (var(--...)) in their own CSS files so light/dark stay consistent. */
+:root {
+  --bg: #f9fbfd; /* app chrome */
+  --canvas: #f0f3f8; /* behind pages (docs, pdf) */
+  --surface: #fff; /* pages, cards, menus */
+  --text: #1f1f1f;
+  --muted: #5f6368;
+  --line: #dadce0;
+  --line-soft: #e8eaed;
+  --hover: rgba(68, 71, 70, .08);
+  --press: rgba(68, 71, 70, .14);
+  --toolbar: #edf2fa; /* the rounded toolbar pill */
+  --accent: #0b57d0;
+  --accent-soft: #d3e3fd;
+  --on-accent: #fff;
+  --sel: rgba(11, 87, 208, .14); /* selection fill */
+  --doc: #4285f4; --sheet: #0f9d58; --pdf: #ea4335; --code: #8e44ef; /* kind colors */
+  --agent: #8e44ef;
+  --danger: #b3261e;
+  --shadow: 0 1px 3px rgba(60, 64, 67, .3), 0 4px 8px 3px rgba(60, 64, 67, .15);
+  --page-shadow: 0 1px 3px 1px rgba(60, 64, 67, .15);
+  --radius: 8px;
+  --font: 'Google Sans Text', 'Segoe UI Variable Text', 'Segoe UI', Roboto, system-ui, sans-serif;
+  --mono: 'Cascadia Code', 'JetBrains Mono', Consolas, ui-monospace, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #1b1c1f; --canvas: #131416; --surface: #1f2023; --text: #e3e3e3; --muted: #9aa0a6; --line: #3c4043; --line-soft: #2d2f33;
+    --hover: rgba(232, 234, 237, .08); --press: rgba(232, 234, 237, .14); --toolbar: #2a2c30; --accent: #a8c7fa; --accent-soft: #2f3b52;
+    --on-accent: #062e6f; --sel: rgba(168, 199, 250, .2); --danger: #f2b8b5; --shadow: 0 2px 10px rgba(0, 0, 0, .6); --page-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+    color-scheme: dark;
+  }
+}
+:root[data-theme='dark'] {
+  --bg: #1b1c1f; --canvas: #131416; --surface: #1f2023; --text: #e3e3e3; --muted: #9aa0a6; --line: #3c4043; --line-soft: #2d2f33;
+  --hover: rgba(232, 234, 237, .08); --press: rgba(232, 234, 237, .14); --toolbar: #2a2c30; --accent: #a8c7fa; --accent-soft: #2f3b52;
+  --on-accent: #062e6f; --sel: rgba(168, 199, 250, .2); --danger: #f2b8b5; --shadow: 0 2px 10px rgba(0, 0, 0, .6); --page-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { font: 14px/1.4 var(--font); color: var(--text); background: var(--bg); overflow: hidden; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: none; padding: 0; }
+button:disabled { opacity: .45; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.muted { color: var(--muted); }
+.error { color: var(--danger); }
+.grow { flex: 1; min-width: 0; }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, .35); border-radius: 6px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background-color: rgba(128, 128, 128, .55); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------- shared toolbar pieces (editors use these) ---------- */
+.toolbar { display: flex; align-items: center; gap: 2px; height: 40px; margin: 0 12px 6px; padding: 0 8px; border-radius: 20px; background: var(--toolbar); overflow-x: auto; overflow-y: hidden; flex: none; scrollbar-width: none; }
+.toolbar::-webkit-scrollbar { display: none; }
+.tb { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 28px; height: 28px; padding: 0 5px; border-radius: 4px; color: var(--text); white-space: nowrap; flex: none; }
+.tb:hover:not(:disabled) { background: var(--hover); }
+.tb:active:not(:disabled) { background: var(--press); }
+.tb.on { background: var(--accent-soft); color: var(--accent); }
+.tb svg { width: 18px; height: 18px; }
+.tb-sep { width: 1px; height: 20px; margin: 0 4px; background: var(--line); flex: none; }
+.tb-select { height: 28px; padding: 0 6px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; flex: none; }
+.tb-select:hover { background: var(--hover); }
+.tb-input { width: 40px; height: 26px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); text-align: center; flex: none; }
+.swatch { width: 18px; height: 4px; border-radius: 1px; margin-top: -2px; }
+
+/* agent presence flash, for any editor */
+@keyframes agent-flash { from { background-color: rgba(142, 68, 239, .28); } to { background-color: transparent; } }
+.agent-flash { animation: agent-flash 1.6s ease-out; }
+
+.editor-placeholder { display: grid; place-items: center; height: 100%; color: var(--muted); }

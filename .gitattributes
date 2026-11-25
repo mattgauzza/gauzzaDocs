@@ -1,0 +1,2 @@
+# Plugin files are served byte-for-byte from GitHub and checked against SHA-256 hashes in marketplace.json.
+plugins/** -text
