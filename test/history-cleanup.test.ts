@@ -374,3 +374,16 @@ test('an index that vanishes after the listing makes the run keep every object, 
   assert.equal(scans, 2)
   assert.ok(exists(vs[0].hash) && exists(vs[1].hash) && exists(orphan), 'no object deleted this run')
 })
+
+test('a key with only a .bak does not block object deletion', async () => {
+  reset()
+  const f = fresh()
+  const vs = await seed(f, [{ days: 5 }, { days: 0 }], { exists: true })
+  fs.renameSync(indexPath(historyKey(f)), bakPath(historyKey(f))) // index set aside; only the .bak is left
+  const orphan = await putObject(crypto.randomBytes(50), 'bin')
+  age(objectPath(orphan), 3 * DAY)
+  const r = await clean()
+  assert.equal(r.skipped, undefined)
+  assert.ok(exists(vs[0].hash) && exists(vs[1].hash), 'the .bak keeps its objects')
+  assert.equal(exists(orphan), false)
+})

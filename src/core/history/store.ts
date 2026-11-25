@@ -59,6 +59,25 @@ export function volumeRoot(file: string, platform: string = process.platform): s
         : null
   return m ? m[0] : '/'
 }
+/**
+ * Whether the volume a file lives on is there. On Windows the drive or share root must be readable. Elsewhere a
+ * volume folder (/Volumes/X, /mnt/x ...) only counts when something is mounted on it: after an unclean unplug the
+ * folder stays behind as an empty plain directory. `stat` is injectable for tests.
+ */
+export function volumeReachable(
+  file: string,
+  platform: string = process.platform,
+  stat: (p: string) => { dev: number } = p => fs.statSync(p),
+): boolean {
+  const root = volumeRoot(file, platform)
+  try {
+    const st = stat(root)
+    if (platform === 'win32' || root === '/') return true
+    return st.dev !== stat(path.posix.dirname(root)).dev
+  } catch {
+    return false
+  }
+}
 export const historyKey = (file: string) => sha256(canonicalPath(file))
 
 export const objectPath = (hash: string) => path.join(OBJECTS_DIR, hash.slice(0, 2), hash)

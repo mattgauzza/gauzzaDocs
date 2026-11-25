@@ -16,7 +16,7 @@ import {
   readIndex,
   renameRetrySync,
   withLock,
-  volumeRoot,
+  volumeReachable,
   writeIndex,
   type Author,
   type HistoryVersion,
@@ -186,7 +186,7 @@ export function markBeforeRestore(file: string): HistoryVersion | null {
 
 // ---- detection and deferred work (caller holds the file's lock) ----
 /** A file is only "missing" when its drive or share is reachable and it is not there (a disconnected drive is not a move). The folder may be gone: it may have been renamed. */
-const reallyMissing = (p: string) => fs.existsSync(volumeRoot(p)) && !fs.existsSync(p)
+const reallyMissing = (p: string) => volumeReachable(p) && !fs.existsSync(p)
 
 /** A missing file's history whose latest version has this hash moves to `canon`. Returns whether one was adopted. */
 async function adoptMoved(canon: string, key: string, hash: string): Promise<boolean> {

@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { HISTORY_DIR, volumeRoot, indexPath, bakPath, logPath, withLock, writeAtomic, writeIndex, type HistoryIndex, type HistoryVersion } from './store'
+import { HISTORY_DIR, volumeReachable, indexPath, bakPath, logPath, withLock, writeAtomic, writeIndex, type HistoryIndex, type HistoryVersion } from './store'
 
 const DAY = 24 * 60 * 60 * 1000
 const FILES_DIR = path.join(HISTORY_DIR, 'files')
@@ -76,16 +76,21 @@ function scan(): Scan {
   }
   cleanupHooks.afterList?.(++scanCount)
   const keys = new Set<string>()
+  const listedJson = new Set<string>()
   for (const n of names) {
     const m = n.match(/^(.+)\.json(\.bak)?$/)
-    if (m) keys.add(m[1])
+    if (!m) continue
+    keys.add(m[1])
+    if (!m[2]) listedJson.add(m[1])
   }
   const out: Scan = { bad: listFailed, unstable: false, json: new Map(), bakOnly: new Map(), refs: new Set(), names }
   for (const key of keys) {
     const idx = parse(indexPath(key))
     const bak = parse(bakPath(key))
     if (idx === null || bak === null) out.bad = true
-    if (idx === undefined) out.unstable = true // an index vanished since the listing (a move or removal); a .bak may lack the latest version
+    // An index that was listed has vanished (a move or removal in progress; its .bak may lack the latest version), or nothing is left.
+    // A key listed with only a .bak is a settled state, not a race.
+    if (idx === undefined && (listedJson.has(key) || bak === undefined)) out.unstable = true
     for (const i of [idx, bak]) for (const v of i?.versions ?? []) out.refs.add(v.hash)
     if (idx) out.json.set(key, idx)
     else if (bak) out.bakOnly.set(key, bak)
@@ -140,12 +145,8 @@ type Presence = 'present' | 'absent' | 'unknown'
 function presence(file: string): Presence {
   if (cleanupHooks.reachable) {
     if (!cleanupHooks.reachable(file)) return 'unknown'
-  } else {
-    try {
-      fs.statSync(volumeRoot(file))
-    } catch {
-      return 'unknown' // a disconnected drive or share
-    }
+  } else if (!volumeReachable(file)) {
+    return 'unknown' // a disconnected drive or share, or an unmounted volume folder
   }
   try {
     fs.lstatSync(file)

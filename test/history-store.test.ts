@@ -197,3 +197,19 @@ test('volumeRoot finds the drive, share or mounted volume of a file', () => {
   assert.equal(volumeRoot('C:\\a\\b.txt', 'win32'), 'C:\\')
   assert.equal(volumeRoot('\\\\server\\share\\a.txt', 'win32'), '\\\\server\\share\\')
 })
+
+test('volumeReachable: off Windows a volume folder counts only when something is mounted on it', () => {
+  const { volumeReachable } = s
+  const devs: Record<string, number> = { '/': 1, '/mnt': 1, '/mnt/plain': 1, '/mnt/disk': 2, '/media/u': 1, '/media/u/usb': 3 }
+  const stat = (p: string) => {
+    if (!(p in devs)) throw Object.assign(new Error('nope'), { code: 'ENOENT' })
+    return { dev: devs[p] }
+  }
+  assert.equal(volumeReachable('/mnt/disk/a.txt', 'linux', stat), true)
+  assert.equal(volumeReachable('/media/u/usb/a.txt', 'linux', stat), true)
+  assert.equal(volumeReachable('/mnt/plain/a.txt', 'linux', stat), false, 'a leftover empty folder')
+  assert.equal(volumeReachable('/mnt/gone/a.txt', 'linux', stat), false, 'not even a folder')
+  assert.equal(volumeReachable('/home/u/a.txt', 'linux', stat), true)
+  assert.equal(volumeReachable('C:\\a.txt', 'win32', () => ({ dev: 1 })), true)
+  assert.equal(volumeReachable('Q:\\a.txt', 'win32', () => { throw new Error('no drive') }), false)
+})
