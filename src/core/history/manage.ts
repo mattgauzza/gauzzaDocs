@@ -45,7 +45,7 @@ export async function showVersion(file: string, n: number): Promise<Uint8Array> 
 }
 
 /** Gives a version a name (kept for good by cleanup). An empty name clears it. */
-export async function nameVersion(file: string, n: number, name: string, by = 'Agent'): Promise<void> {
+export async function nameVersion(file: string, n: number, name: string, by: string): Promise<void> {
   const key = historyKey(file)
   await withLock(key, async () => {
     const { idx, version } = find(file, n)

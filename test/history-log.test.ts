@@ -120,13 +120,48 @@ test('naming and restoring a version log named and restored', async () => {
   const f = fresh()
   fs.writeFileSync(f, 'one')
   await save(f, Buffer.from('two'))
-  await nameVersion(f, 2, 'Final draft')
+  await nameVersion(f, 2, 'Final draft', 'Matt')
   await restoreVersion(f, 1, agent)
   const log = readLog(f)
   assert.equal(log[0].type, 'restored')
   assert.equal(log[0].summary, 'restored v1')
   const named = log.find(e => e.type === 'named')!
   assert.equal(named.summary, 'named v2 "Final draft"')
+  assert.equal(named.by, 'Matt')
+})
+
+test('20 folded saves of one version leave exactly one save event for it', async () => {
+  const f = fresh()
+  fs.writeFileSync(f, 'seed')
+  for (let i = 0; i < 20; i++) await save(f, Buffer.from(`edit ${i}`), { authors: [{ name: 'Matt', by: 'person' as never }] })
+  assert.equal(h.listVersions(f).length, 2) // baseline + one folded version
+  const saves = readLog(f).filter(e => e.type === 'save')
+  assert.equal(saves.length, 1)
+  assert.equal(saves[0].summary, 'saved v2')
+  await save(f, Buffer.from('by agent')) // a different author makes a new version: a new event
+  assert.deepEqual(readLog(f).filter(e => e.type === 'save').map(e => e.summary), ['saved v3', 'saved v2'])
+})
+
+test('a normal append reads only the tail, never the whole log', async () => {
+  const f = fresh()
+  for (let i = 0; i < 50; i++) await appendEventLocked(f, ev({ at: i, type: 'comment', summary: `c${i}` }))
+  const target = logFile(f)
+  const orig = fs.readFileSync
+  const reads: string[] = []
+  ;(fs as { readFileSync: unknown }).readFileSync = (p: unknown, ...rest: unknown[]) => {
+    if (String(p) === target) reads.push(String(p))
+    return (orig as (...a: unknown[]) => unknown)(p, ...rest)
+  }
+  try {
+    await appendEventLocked(f, ev({ at: 100, type: 'comment', summary: 'plain' }))
+    await appendEventLocked(f, ev({ at: 101 }))
+    await appendEventLocked(f, ev({ at: 102 })) // merge
+  } finally {
+    ;(fs as { readFileSync: unknown }).readFileSync = orig
+  }
+  assert.deepEqual(reads, [])
+  const log = readLog(f, 3)
+  assert.deepEqual(log.map(e => e.summary), ['2 edits', 'plain', 'c49'])
 })
 
 test('moving a history logs "moved from" in the new path\'s log and the old log follows', async () => {

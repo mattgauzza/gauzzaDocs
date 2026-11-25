@@ -52,34 +52,64 @@ export async function appendEventLocked(file: string, ev: HistoryEvent): Promise
   // Excluded (secret) files never get quoted text in their work history.
   const next: HistoryEvent = isExcluded(file) ? { ...ev, summary: ev.type === 'agent-op' ? 'edited' : ev.type } : { ...ev }
   fs.mkdirSync(path.dirname(target), { recursive: true })
-  let text = ''
-  try {
-    text = fs.readFileSync(target, 'utf8')
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
-  }
-  const torn = !!text && !text.endsWith('\n') // a torn last line stays a skipped line of its own
-  const lines = text.split('\n').filter(l => l !== '')
-  const last = lines.length ? parse(lines[lines.length - 1]) : null
-  if (next.type === 'agent-op' && last && last.type === 'agent-op' && last.by === next.by && next.at - last.at <= MERGE_MS && next.at >= last.at) {
-    lines[lines.length - 1] = JSON.stringify({ ...next, summary: `${Number(editCount(last)) + 1} edits` })
-  } else {
-    const line = JSON.stringify(next)
-    if (Buffer.byteLength(text) + Buffer.byteLength(line) + 1 <= MAX_LOG_BYTES) {
-      fs.appendFileSync(target, (torn ? '\n' : '') + line + '\n') // the common case: no rewrite
-      return
+  const { size, last, lastStart, torn } = readTail(target)
+  // What the new event does to the last one: merge agent ops, or update a folded save in place.
+  let replacement: string | null = null
+  if (last && !torn) {
+    if (next.type === 'agent-op' && last.type === 'agent-op' && last.by === next.by && next.at - last.at <= MERGE_MS && next.at >= last.at) {
+      replacement = JSON.stringify({ ...next, summary: `${Number(editCount(last)) + 1} edits` })
+    } else if (next.type === 'save' && last.type === 'save' && last.summary === next.summary) {
+      replacement = JSON.stringify(next) // the same version saved again: one event per version
     }
-    lines.push(line)
   }
-  let out = lines.join('\n') + '\n'
-  if (Buffer.byteLength(out) > MAX_LOG_BYTES) {
-    // Keep the newest half, whole lines only.
-    let size = 0
-    let from = lines.length
-    while (from > 0 && size + Buffer.byteLength(lines[from - 1]) + 1 <= MAX_LOG_BYTES / 2) size += Buffer.byteLength(lines[--from]) + 1
-    out = lines.slice(from).join('\n') + '\n'
+  const line = replacement ?? JSON.stringify(next)
+  const base = replacement !== null ? lastStart : size // where the new line goes
+  if (base + (torn ? 1 : 0) + Buffer.byteLength(line) + 1 <= MAX_LOG_BYTES) {
+    const fd = fs.openSync(target, size === 0 ? 'w' : 'r+')
+    try {
+      const out = Buffer.from((torn ? '\n' : '') + line + '\n')
+      fs.writeSync(fd, out, 0, out.length, base)
+      fs.ftruncateSync(fd, base + out.length)
+    } finally {
+      fs.closeSync(fd)
+    }
+    return
   }
-  await writeAtomic(target, Buffer.from(out))
+  // A trim is due: only now is the whole file read.
+  const lines = fs.readFileSync(target, 'utf8').split('\n').filter(l => l !== '')
+  if (replacement !== null) lines[lines.length - 1] = line
+  else lines.push(line)
+  let size2 = 0
+  let from = lines.length
+  while (from > 0 && size2 + Buffer.byteLength(lines[from - 1]) + 1 <= MAX_LOG_BYTES / 2) size2 += Buffer.byteLength(lines[--from]) + 1
+  await writeAtomic(target, Buffer.from(lines.slice(from).join('\n') + '\n'))
+}
+
+const TAIL_BYTES = 64 * 1024
+/** The size of a log and its last line, read from the end of the file only. */
+function readTail(target: string): { size: number; last: HistoryEvent | null; lastStart: number; torn: boolean } {
+  let fd: number
+  try {
+    fd = fs.openSync(target, 'r')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { size: 0, last: null, lastStart: 0, torn: false }
+    throw e
+  }
+  try {
+    const size = fs.fstatSync(fd).size
+    if (size === 0) return { size, last: null, lastStart: 0, torn: false }
+    const from = Math.max(0, size - TAIL_BYTES)
+    const buf = Buffer.alloc(size - from)
+    fs.readSync(fd, buf, 0, buf.length, from)
+    const torn = buf[buf.length - 1] !== 0x0a
+    const end = torn ? buf.length : buf.length - 1
+    const nl = buf.lastIndexOf(0x0a, end - 1)
+    if (nl < 0 && from > 0) return { size, last: null, lastStart: size, torn } // a line longer than the window: leave it alone
+    const start = nl + 1
+    return { size, last: parse(buf.subarray(start, end).toString('utf8')), lastStart: from + start, torn }
+  } finally {
+    fs.closeSync(fd)
+  }
 }
 
 /** Appends an event under the file's lock. Do not call this while holding that lock: use appendEventLocked. */
