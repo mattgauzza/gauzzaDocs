@@ -48,7 +48,7 @@
 .sl-el img { pointer-events: none; }
 .sl-line::after { content: ''; position: absolute; inset: -10px; }
 .sl-flash { position: absolute; inset: 0; pointer-events: none; animation: sl-flash 1.6s ease-out forwards; }
-@keyframes sl-flash { from { box-shadow: 0 0 0 4px var(--agent), inset 0 0 0 9999px rgba(142, 68, 239, .1); } to { box-shadow: 0 0 0 0 transparent, inset 0 0 0 9999px transparent; } }
+@keyframes sl-flash { from { box-shadow: 0 0 0 4px var(--agent), inset 0 0 0 9999px color-mix(in srgb, var(--agent) 10%, transparent); } to { box-shadow: 0 0 0 0 transparent, inset 0 0 0 9999px transparent; } }
 
 /* selection */
 .sl-sel { position: absolute; pointer-events: none; outline: 1.5px solid #1a73e8; outline-offset: 0; }

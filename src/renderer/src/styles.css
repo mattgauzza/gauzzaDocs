@@ -69,7 +69,7 @@ button:disabled { opacity: .45; cursor: default; }
 .swatch { width: 18px; height: 4px; border-radius: 1px; margin-top: -2px; }
 
 /* agent presence flash, for any editor */
-@keyframes agent-flash { from { background-color: rgba(142, 68, 239, .28); } to { background-color: transparent; } }
+@keyframes agent-flash { from { background-color: color-mix(in srgb, var(--agent) 30%, transparent); } to { background-color: transparent; } }
 .agent-flash { animation: agent-flash 1.6s ease-out; }
 
 .editor-placeholder { display: grid; place-items: center; height: 100%; color: var(--muted); }

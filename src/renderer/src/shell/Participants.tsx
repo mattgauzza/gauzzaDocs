@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
+import { AGENT_COLORS } from '../../../shared/agentColors'
 import { type AgentStatus, api } from '../lib'
 import { Modal } from './Dialogs'
 import { Icon } from './icons'
 
-const COLORS: Record<AgentStatus['agent'], string> = { claude: '#d97757', codex: '#10a37f', gemini: '#4285f4', copilot: '#8e44ef' }
+const COLORS: Record<AgentStatus['agent'], string> = AGENT_COLORS as Record<AgentStatus['agent'], string>
 const LABELS: Record<AgentStatus['agent'], string> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', copilot: 'GitHub Copilot CLI' }
 const DEFAULT_NAMES: Record<AgentStatus['agent'], string> = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini', copilot: 'Copilot' }
 const STATE_TEXT: Record<AgentStatus['state'], string> = { idle: 'idle', working: 'working', waiting: 'waiting for a turn', paused: 'paused', error: 'last run failed' }

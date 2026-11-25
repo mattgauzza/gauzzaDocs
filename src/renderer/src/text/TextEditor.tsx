@@ -39,7 +39,7 @@ const flashField = StateField.define<DecorationSet>({
 })
 
 // ---------- comment highlights: the text each open thread quotes ----------
-type Quoted = { id: string; quote: string }
+type Quoted = { id: string; quote: string; color?: string }
 const commentEffect = StateEffect.define<Quoted[]>()
 function commentDecos(doc: EditorState['doc'], threads: Quoted[]): DecorationSet {
   if (!threads.length || doc.length > 2_000_000) return Decoration.none
@@ -47,7 +47,7 @@ function commentDecos(doc: EditorState['doc'], threads: Quoted[]): DecorationSet
   const ranges = threads
     .map(t => {
       const at = text.indexOf(t.quote)
-      return at < 0 ? null : Decoration.mark({ class: 'cm-comment-mark', attributes: { 'data-thread': t.id } }).range(at, at + t.quote.length)
+      return at < 0 ? null : Decoration.mark({ class: 'cm-comment-mark', attributes: { 'data-thread': t.id, ...(t.color ? { style: `--cmc: ${t.color}` } : {}) } }).range(at, at + t.quote.length)
     })
     .filter((r): r is NonNullable<typeof r> => !!r)
     .sort((a, b) => a.from - b.from)

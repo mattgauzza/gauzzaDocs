@@ -135,16 +135,17 @@ export const AgentFlash = Extension.create({
 })
 
 // ---------- comment highlights: the text each open thread quotes ----------
-export const commentKey = new PluginKey<{ threads: { id: string; quote: string }[]; deco: DecorationSet }>('commentMarks')
+export const commentKey = new PluginKey<{ threads: { id: string; quote: string; color?: string }[]; deco: DecorationSet }>('commentMarks')
 
 /** Ranges for each quote: its first match in the document (the first line of a multi-line quote). */
-function commentDecos(doc: Parameters<typeof searchDoc>[0], threads: { id: string; quote: string }[]) {
+function commentDecos(doc: Parameters<typeof searchDoc>[0], threads: { id: string; quote: string; color?: string }[]) {
   const decos: Decoration[] = []
   for (const t of threads) {
     const q = t.quote.split('\n').map(s => s.trim()).find(Boolean)
     if (!q) continue
     const hit = searchDoc(doc, q.slice(0, 300))[0]
-    if (hit) decos.push(Decoration.inline(hit[0], hit[1], { class: 'comment-mark', 'data-thread': t.id }))
+    // An agent's thread highlights in that agent's color; the person's own comments stay Google Docs yellow.
+    if (hit) decos.push(Decoration.inline(hit[0], hit[1], { class: 'comment-mark', 'data-thread': t.id, ...(t.color ? { style: `--cmc: ${t.color}` } : {}) }))
   }
   return DecorationSet.create(doc, decos)
 }

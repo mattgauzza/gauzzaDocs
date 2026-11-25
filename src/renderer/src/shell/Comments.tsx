@@ -2,15 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { type Listener, type Thread, api, when } from '../lib'
 import { Icon } from './icons'
 import { usePanelSize } from './resize'
+import { agentColor } from '../../../shared/agentColors'
 
 /** Open threads that quote some text, for highlighting in the editor. Reloads whenever the file's threads change. */
 export function useQuotedThreads(path: string) {
-  const [threads, setThreads] = useState<{ id: string; quote: string }[]>([])
+  const [threads, setThreads] = useState<{ id: string; quote: string; color?: string }[]>([])
   useEffect(() => {
     let alive = true
     const load = () =>
       api.commentsList(path).then(
-        ts => alive && setThreads(ts.filter(t => !t.resolved && t.quote?.trim()).slice(0, 100).map(t => ({ id: t.id, quote: t.quote!.trim() }))),
+        ts => alive && setThreads(ts.filter(t => !t.resolved && t.quote?.trim()).slice(0, 100).map(t => ({ id: t.id, quote: t.quote!.trim(), color: t.by === 'agent' ? agentColor(t.author) : undefined }))),
         () => {}
       )
     load()
@@ -164,7 +165,11 @@ export function CommentsPanel(props: {
 }
 
 function Avatar({ name, by }: { name: string; by: 'user' | 'agent' }) {
-  return <span className={`cm-avatar ${by}`} title={by === 'agent' ? `${name} (agent)` : name}>{(name || '?').slice(0, 1).toUpperCase()}</span>
+  return (
+    <span className={`cm-avatar ${by}`} style={by === 'agent' ? { background: agentColor(name) } : undefined} title={by === 'agent' ? `${name} (agent)` : name}>
+      {(name || '?').slice(0, 1).toUpperCase()}
+    </span>
+  )
 }
 
 function ThreadCard({ t, path, fresh, onChange }: { t: Thread; path: string; fresh: Set<string>; onChange(): void }) {
@@ -182,7 +187,7 @@ function ThreadCard({ t, path, fresh, onChange }: { t: Thread; path: string; fre
     return true
   }
   return (
-    <div data-thread={t.id} className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}`} onClick={() => setOpen(true)}>
+    <div data-thread={t.id} style={t.by === 'agent' ? { ['--agent' as string]: agentColor(t.author), borderLeft: `3px solid ${agentColor(t.author)}` } : undefined} className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}`} onClick={() => setOpen(true)}>
       <div className="cm-head">
         <Avatar name={t.author} by={t.by} />
         <div className="grow">
@@ -201,7 +206,7 @@ function ThreadCard({ t, path, fresh, onChange }: { t: Thread; path: string; fre
       {t.quote && <blockquote className="cm-quote">{t.quote.length > 240 ? t.quote.slice(0, 240) + '…' : t.quote}</blockquote>}
       <p className="cm-text">{t.text}</p>
       {t.replies.map(r => (
-        <div key={r.id} className={`cm-reply${isFresh(r.id) ? ' fresh' : ''}`}>
+        <div key={r.id} style={r.by === 'agent' ? { ['--agent' as string]: agentColor(r.author) } : undefined} className={`cm-reply${isFresh(r.id) ? ' fresh' : ''}`}>
           <div className="cm-head">
             <Avatar name={r.author} by={r.by} />
             <div className="grow"><b>{r.author}</b>{r.by === 'agent' && <span className="cm-badge">agent</span>} <span className="muted small">{when(r.created)}</span></div>

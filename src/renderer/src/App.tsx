@@ -7,6 +7,7 @@ import { DONATE, EMPIRICAL_VOICE, REPO, SUBMIT_PLUGIN } from '../../shared/links
 import { AgentDialog, Confirm, InstructionsDialog, PluginsDialog, SettingsDialog, ShortcutsDialog } from './shell/Dialogs'
 import { Home } from './shell/Home'
 import { StatusBar } from './shell/StatusBar'
+import { agentColor } from '../../shared/agentColors'
 import { ToolbarOverflow } from './shell/ToolbarOverflow'
 import { usePanelSize } from './shell/resize'
 import { Onboarding } from './shell/Onboarding'
@@ -552,7 +553,10 @@ export default function App() {
       await readyOrFail(t.id)
       const h = handles.current.get(t.id)!
       const reading = READ_OPS.has(req.op.op)
-      patch(t.id, { agent: { ...req.agent, reading, until: Date.now() + 8000 } })
+      // Each agent highlights in its own color: set it on this file's editor so other tabs keep theirs.
+      const color = req.agent.color || agentColor(req.agent.name)
+      document.querySelector<HTMLElement>(`.editor-host[data-tab="${t.id}"]`)?.style.setProperty('--agent', color)
+      patch(t.id, { agent: { ...req.agent, color, reading, until: Date.now() + 8000 } })
       window.setTimeout(() => force(n => n + 1), 8100)
       if (req.op.op === 'save') {
         await save(t.id, { explicit: true })
@@ -816,7 +820,7 @@ export default function App() {
             >
               <KindIcon kind={t.kind} size={16} />
               <span className="tab-name">{baseName(t.path)}</span>
-              {t.agent && t.agent.until > Date.now() && <span className="tab-agent" title={`${t.agent.name} is editing`} />}
+              {t.agent && t.agent.until > Date.now() && <span className="tab-agent" style={{ background: t.agent.color }} title={`${t.agent.name} is editing`} />}
               <button className={`tab-close${t.dirty ? ' dirty' : ''}`} onClick={e => (e.stopPropagation(), close(t.id))} title="Close (Ctrl+W)">
                 <Icon name="close" size={14} />
               </button>
@@ -886,8 +890,8 @@ export default function App() {
               {commentCount > 0 && <span className="badge">{commentCount}</span>}
             </button>
             {agentNow && (
-              <span className="presence" title={`${agentNow.name} is ${agentNow.reading ? 'reading' : 'editing'} this file`}>
-                <span className="presence-dot" style={{ background: agentNow.color || 'var(--agent)' }}>{agentNow.name.slice(0, 1).toUpperCase()}</span>
+              <span className="presence" style={{ color: agentNow.color }} title={`${agentNow.name} is ${agentNow.reading ? 'reading' : 'editing'} this file`}>
+                <span className="presence-dot" style={{ background: agentNow.color || 'var(--agent)', boxShadow: `0 0 0 2px var(--bg), 0 0 0 4px ${agentNow.color || 'var(--agent)'}` }}>{agentNow.name.slice(0, 1).toUpperCase()}</span>
                 {agentNow.name} is {agentNow.reading ? 'reading' : 'editing'}
               </span>
             )}
@@ -918,7 +922,7 @@ export default function App() {
             if (!t.payload) return t.id === active ? <div key={`${t.id}:sleep`} className="editor-placeholder">{t.error || 'Loading…'}</div> : null
             const E = t.large ? LargeViewer : EDITORS[t.kind]
             return (
-              <div key={`${t.id}:${t.version}`} className="editor-host" style={{ display: t.id === active ? undefined : 'none' }}>
+              <div key={`${t.id}:${t.version}`} className="editor-host" data-tab={t.id} style={{ display: t.id === active ? undefined : 'none' }}>
                 <TabBoundary onError={e => patch(t.id, { error: e.message })} onReload={() => reloadFromDisk(t.id)}>
                   <Suspense fallback={<div className="editor-placeholder">Loading…</div>}>
                     <E path={t.path} payload={t.payload} settings={settings} active={t.id === active} onChange={changeFor(t.id)} setHandle={handleSetter(t)} />

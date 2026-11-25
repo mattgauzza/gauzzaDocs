@@ -211,10 +211,10 @@ textarea.instructions { min-height: 110px; padding: 10px 12px; border: 1px solid
 .cm-empty { padding: 8px 4px; }
 .cm-thread { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface); box-shadow: var(--page-shadow); cursor: default; transition: box-shadow .2s, background .6s; }
 .cm-thread.resolved { opacity: .6; }
-.cm-thread.fresh, .cm-reply.fresh { background: rgba(142, 68, 239, .12); }
+.cm-thread.fresh, .cm-reply.fresh { background: color-mix(in srgb, var(--agent) 12%, transparent); }
 .cm-head { display: flex; align-items: center; gap: 8px; }
 .cm-head b { font-weight: 600; font-size: 13px; }
-.cm-badge { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: rgba(142, 68, 239, .15); color: var(--agent); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+.cm-badge { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: color-mix(in srgb, var(--agent) 15%, transparent); color: var(--agent); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
 .cm-avatar { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 600; flex: none; background: var(--doc); }
 .cm-avatar.agent { background: var(--agent); }
 .cm-quote { position: relative; margin: 8px 0 0; padding: 4px 26px 4px 10px; border-left: 3px solid #fbbc04; color: var(--muted); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -345,3 +345,4 @@ textarea.instructions { min-height: 110px; padding: 10px 12px; border: 1px solid
 .pt-choice { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 14px 0 6px; border: 1px solid var(--line); border-radius: 20px; font-size: 14px; color: var(--text); }
 .pt-choice.on { border-color: var(--accent); background: var(--accent-soft); }
 .pt-choice .pt-avatar { width: 28px; height: 28px; box-shadow: none; }
+.cm-thread[style*="--agent"] .cm-quote, .cm-reply[style*="--agent"] .cm-quote { border-left-color: var(--agent); }
