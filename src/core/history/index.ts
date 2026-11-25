@@ -1,6 +1,7 @@
 export * from './store'
 export * from './log'
 export { enqueue } from './queue'
+export { cleanupHistory, cleanupHooks, type CleanupResult } from './cleanup'
 export { forgetHistory, moveHistory, nameVersion, restoreVersion, showVersion } from './manage'
 export {
   checkOutside,
