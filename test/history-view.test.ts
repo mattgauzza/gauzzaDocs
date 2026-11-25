@@ -81,7 +81,7 @@ test('diffRows puts a gap row between two adjacent same hunks only', () => {
 
 test('diffRows on a real lineDiff with two distant edits has exactly one gap', () => {
   const doc = (edits: Record<number, string>) => Array.from({ length: 40 }, (_, i) => edits[i] ?? `line ${i}`).join('\n')
-  const { rows } = diffRows(lineDiff(doc({}), doc({ 2: 'two', 35: 'thirty five' })))
+  const { rows } = diffRows(lineDiff(doc({}), doc({ 2: 'two', 35: 'thirty five' })) as Hunk[])
   assert.equal(rows.filter(r => r.kind === 'gap').length, 1)
   assert.equal(rows.filter(r => r.kind === 'add').length, 2)
   assert.equal(rows.filter(r => r.kind === 'del').length, 2)

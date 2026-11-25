@@ -30,7 +30,12 @@ const tmpName = (target: string) =>
   path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${threadId}.${crypto.randomBytes(4).toString('hex')}.tmp`)
 const isBusy = (e: unknown) => ['EPERM', 'EBUSY'].includes((e as NodeJS.ErrnoException)?.code ?? '')
 
-/** The path a file's history is keyed on: real path, lowercased on Windows only. */
+/**
+ * The path a file's history belongs to: its real path, in the case it has on disk. This is what an index stores and
+ * what people see. The history key lowercases it on Windows (see historyKey), so `C:\Docs\Plan.md` and
+ * `c:/docs/plan.md` share one history. Indexes written before this kept the lowercased path: readers compare paths
+ * with samePath, and the next recorded version rewrites it in its real case.
+ */
 export function canonicalPath(file: string): string {
   const abs = path.resolve(file)
   let real = abs
@@ -43,7 +48,7 @@ export function canonicalPath(file: string): string {
       /* keep the resolved path */
     }
   }
-  return process.platform === 'win32' ? real.toLowerCase() : real
+  return real
 }
 /**
  * The drive, share or mounted volume a file lives on: the thing that has to be reachable before "the file is not
@@ -78,7 +83,11 @@ export function volumeReachable(
     return false
   }
 }
-export const historyKey = (file: string) => sha256(canonicalPath(file))
+/** SHA-256 of the canonical path, lowercased on Windows only. */
+export const historyKey = (file: string) => {
+  const canon = canonicalPath(file)
+  return sha256(process.platform === 'win32' ? canon.toLowerCase() : canon)
+}
 
 export const objectPath = (hash: string) => path.join(OBJECTS_DIR, hash.slice(0, 2), hash)
 export const indexPath = (key: string) => path.join(FILES_DIR, `${key}.json`)
@@ -126,23 +135,47 @@ export async function writeAtomic(file: string, bytes: Uint8Array): Promise<{ si
   return { size: st.size, mtime: st.mtimeMs }
 }
 
-export async function putObject(bytes: Uint8Array, ext: string): Promise<string> {
+export const isHash = (h: unknown): h is string => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)
+
+/**
+ * Stores bytes as an object and says what it left on disk: the object's mtime afterwards, and whether this call
+ * created it. An object that is already stored is not written again, but its mtime is refreshed, so cleanup leaves it
+ * alone and a fold that wants to delete an object it replaced can tell that someone else reused it since.
+ * `created` is true only when the object was not there at all and this writer alone made it: it is linked into place,
+ * which fails when another writer got there first. So until its mtime changes, nothing but the history that created
+ * it can use it (any other history would have reused it through here).
+ */
+export async function storeObject(bytes: Uint8Array, ext: string): Promise<{ hash: string; mtime: number; created: boolean }> {
   const hash = sha256(bytes)
   const dest = objectPath(hash)
   if (await getObject(hash)) {
     try {
       const now = new Date()
-      await fs.promises.utimes(dest, now, now) // already stored and good: keep it fresh so cleanup leaves it alone
-      return hash
+      await fs.promises.utimes(dest, now, now) // already stored and good: keep it fresh
+      return { hash, mtime: (await fs.promises.stat(dest)).mtimeMs, created: false }
     } catch {
       /* fall through and store it again */
     }
   } // missing or corrupt: (re)write it below
   await fs.promises.mkdir(path.dirname(dest), { recursive: true })
   const stored = STORED_AS_IS.has(ext.replace(/^\./, '').toLowerCase()) ? bytes : zlib.gzipSync(bytes)
-  await writeAtomic(dest, stored)
-  return hash
+  const tmp = tmpName(dest)
+  let created = false
+  try {
+    await fs.promises.writeFile(tmp, stored)
+    try {
+      await fs.promises.link(tmp, dest) // only if nothing is there
+      created = true
+    } catch {
+      await renameRetry(tmp, dest) // there (corrupt, or another writer just made it), or no hard links on this drive
+    }
+  } finally {
+    await fs.promises.rm(tmp, { force: true }).catch(() => {})
+  }
+  return { hash, mtime: (await fs.promises.stat(dest)).mtimeMs, created }
 }
+
+export const putObject = async (bytes: Uint8Array, ext: string): Promise<string> => (await storeObject(bytes, ext)).hash
 
 export async function getObject(hash: string): Promise<Uint8Array | null> {
   let raw: Buffer
@@ -318,20 +351,48 @@ function release(file: string, mine: string) {
   }
 }
 
-/** One writer at a time per file history, across processes. */
-export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const file = lockPath(key)
+/** The file a history key belongs to, for messages: from its index (or .bak), else a plain stand-in. */
+function fileOfKey(key: string): string {
+  try {
+    const idx = parseIndex(indexPath(key)) || parseIndex(bakPath(key))
+    if (idx) return idx.path
+  } catch {
+    /* unreadable right now */
+  }
+  return 'a file'
+}
+
+/**
+ * One writer at a time per file history, across processes. `file` is only for the message when the wait runs out
+ * (it becomes the "Version history paused" reason, so it names the file, never the key).
+ * On Windows an antivirus or indexer can hold the lock file for a moment, and creating it then fails with EPERM or
+ * EBUSY: that counts as busy, like EEXIST. Only when nothing but EPERM or EBUSY comes back for over a second is it
+ * taken for a real permission problem and thrown.
+ */
+export async function withLock<T>(key: string, fn: () => Promise<T>, file?: string): Promise<T> {
+  const lock = lockPath(key)
   fs.mkdirSync(FILES_DIR, { recursive: true })
   const until = Date.now() + LOCK_WAIT_MS
+  let busySince = 0
   let mine: string | null
-  while (!(mine = tryAcquire(file))) {
-    if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock (${key})`)
+  for (;;) {
+    mine = null
+    try {
+      mine = tryAcquire(lock)
+      busySince = 0
+    } catch (e) {
+      if (!isBusy(e)) throw e
+      busySince ||= Date.now()
+      if (Date.now() - busySince > RENAME_RETRY_MS) throw e
+    }
+    if (mine) break
+    if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock of ${file ?? fileOfKey(key)}`)
     await sleep(LOCK_RETRY_MS)
   }
   try {
     return await fn()
   } finally {
-    release(file, mine)
+    release(lock, mine)
   }
 }
 
@@ -374,10 +435,10 @@ export function listHistoryEntries(): { key: string; path: string }[] {
 }
 
 /**
- * Hashes used by every history except `key`'s (index and .bak of each). Null when anything cannot be read
- * with certainty: the caller must then keep every object.
+ * Hashes used by every history except `key`'s (index and .bak of each; every history when `key` is left out). Null
+ * when anything cannot be read with certainty: the caller must then keep every object.
  */
-export function hashesUsedElsewhere(key: string): Set<string> | null {
+export function hashesUsedElsewhere(key?: string): Set<string> | null {
   let names: string[]
   try {
     names = fs.readdirSync(FILES_DIR)

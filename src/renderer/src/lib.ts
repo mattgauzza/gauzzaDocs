@@ -38,8 +38,8 @@ export interface AgentStatus {
 
 /** Mirrors src/core/history/log.ts HistoryEvent: one line of a file's work history. */
 export interface HistoryEvent { at: number; type: string; by: string; summary: string; v?: number }
-/** What changed between two versions (src/core/history/compare.ts), or too large to compare here. */
-export type HistoryDiff = { hunks: Hunk[] } | { tooLarge: true }
+/** What changed between two versions (src/core/history/compare.ts), too large to compare here, or too many changes to compare in time. */
+export type HistoryDiff = { hunks: Hunk[] } | { tooLarge: true } | { tooMany: true }
 /** The history store's size and cap; paused: why history stopped recording this session; dir: where it is kept. */
 export interface HistoryStats { bytes: number; capBytes: number; overCapBytes?: number; paused?: string; dir?: string }
 /** Who changed a file since its last save, and what the agents did (a save's version authors and summary). */

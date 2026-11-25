@@ -389,14 +389,30 @@ export default function App() {
   /** Restores under way per tab (a counter: the panel and the CLI may both ask). No saves meanwhile, or the old content would land over the restore. */
   const restoring = useRef(new Map<number, number>())
   const isRestoring = (id: number) => (restoring.current.get(id) || 0) > 0
+  /** Resolves when every restore of the tab is done, so a save asked for meanwhile can wait for them. */
+  const restored = useRef(new Map<number, { done: Promise<void>; resolve(): void }>())
+  /** The change count a reload from disk left the tab at: its content is the file's then, with nothing to save. */
+  const loadedAt = useRef(new Map<number, number>())
   /** The save each tab has under way, so a restore can wait for it (React state lags behind). */
   const inFlight = useRef(new Map<number, Promise<void>>())
 
   // ---------- saving ----------
   const save = useCallback(async (id: number, opts: { explicit?: boolean } = {}) => {
+    if (isRestoring(id)) {
+      // Writing now would put the old content over the restore. An autosave just stops: typing during a restore marks
+      // the tab changed outside when it ends, and the banner lets the person choose. A save someone asked for waits
+      // for the restore and then saves: Close's Save, a rename, restart to update and an agent's save all go on as if
+      // it saved.
+      window.clearTimeout(saveTimers.current.get(id))
+      if (!opts.explicit) return
+      for (let w = restored.current.get(id); w; w = restored.current.get(id)) await w.done
+      // The restore kept the unsaved edits as a version and reloaded the tab: unless the person typed since, the
+      // file already holds what the tab shows.
+      if ((changeSeq.current.get(id) || 0) === loadedAt.current.get(id)) return
+    }
     const t = tabsRef.current.find(x => x.id === id)
     const h = handles.current.get(id)
-    if (!t || !h || !t.payload || t.large || isRestoring(id)) return
+    if (!t || !h || !t.payload || t.large) return
     window.clearTimeout(saveTimers.current.get(id))
     if (t.external && !opts.explicit) return // never overwrite someone else's change without being asked
     patch(id, { saving: true, error: undefined })
@@ -518,6 +534,7 @@ export default function App() {
     handles.current.delete(id)
     tabAuthors.current.delete(id)
     agentRunning.current.delete(id)
+    loadedAt.current.delete(id)
     const list = tabsRef.current
     const i = list.findIndex(t => t.id === id)
     const rest = list.filter(t => t.id !== id)
@@ -585,10 +602,17 @@ export default function App() {
   const reloadFromDisk = async (id: number) => {
     const t = tabsRef.current.find(x => x.id === id)
     if (!t) return
+    const seq = changeSeq.current.get(id) || 0
     try {
       const f = await api.load(t.path)
+      if ((changeSeq.current.get(id) || 0) !== seq) {
+        // Typed while it loaded: never thrown away. The tab is marked changed outside, and the banner lets the person choose.
+        patch(id, { dirty: true, external: true })
+        return
+      }
       handles.current.delete(id)
       tabAuthors.current.delete(id) // the edits they were credited for are gone
+      loadedAt.current.set(id, seq)
       patch(id, x => ({ payload: f.payload, mtime: f.mtime, version: x.version + 1, dirty: false, external: false }))
     } catch (e) {
       patch(id, { mtime: Date.now(), error: (e as Error).message })
@@ -607,6 +631,11 @@ export default function App() {
    */
   const restoreInTab = async (id: number, n: number, opts: { discardCurrent?: boolean; authors?: Author[] } = {}): Promise<HistoryVersion> => {
     restoring.current.set(id, (restoring.current.get(id) || 0) + 1)
+    if (!restored.current.has(id)) {
+      let resolve = () => {}
+      const done = new Promise<void>(r => (resolve = r))
+      restored.current.set(id, { done, resolve })
+    }
     window.clearTimeout(saveTimers.current.get(id))
     let taken: { authors: Map<string, Author>; ops: string[] } | undefined
     try {
@@ -634,7 +663,11 @@ export default function App() {
       if (taken) giveBack(id, taken)
       const left = (restoring.current.get(id) || 1) - 1
       if (left > 0) restoring.current.set(id, left)
-      else restoring.current.delete(id)
+      else {
+        restoring.current.delete(id)
+        restored.current.get(id)?.resolve() // saves that waited for the restore go ahead
+        restored.current.delete(id)
+      }
     }
   }
 

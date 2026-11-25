@@ -5,7 +5,7 @@ import path from 'node:path'
 import { threadId } from 'node:worker_threads'
 import { loadFile } from '../files'
 import { pdfText } from '../ops/pdf'
-import { type Hunk, lineDiff } from '../../shared/diff'
+import { type Hunk, type TooMany, lineDiff } from '../../shared/diff'
 import { extOf } from '../../shared/kinds'
 import { htmlToMarkdown } from '../../shared/convert'
 import { parseAddr } from '../../shared/sheet/address'
@@ -55,7 +55,12 @@ export async function versionText(file: string, bytes: Uint8Array): Promise<stri
   }
 }
 
-export async function compareVersions(file: string, a: Uint8Array, b: Uint8Array): Promise<{ hunks: Hunk[] } | { tooLarge: true }> {
+/**
+ * What changed from a to b. `tooLarge`: a side is over 8 MB, so nothing is compared. `tooMany`: the line diff gave up
+ * after DIFF_TIMEOUT_MS (the 8 MB bound limits the input, not the work).
+ */
+export async function compareVersions(file: string, a: Uint8Array, b: Uint8Array): Promise<{ hunks: Hunk[] } | { tooLarge: true } | TooMany> {
   if (a.byteLength > COMPARE_MAX_BYTES || b.byteLength > COMPARE_MAX_BYTES) return { tooLarge: true }
-  return { hunks: lineDiff(await versionText(file, a), await versionText(file, b)) }
+  const hunks = lineDiff(await versionText(file, a), await versionText(file, b))
+  return Array.isArray(hunks) ? { hunks } : hunks
 }

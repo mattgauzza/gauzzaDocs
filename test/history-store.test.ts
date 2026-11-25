@@ -116,6 +116,35 @@ test('locks: two processes recording at once lose nothing', async () => {
   assert.equal(new Set(ns).size, 40)
 })
 
+test('locks: EPERM or EBUSY creating the lock file counts as busy, like EEXIST (an antivirus or indexer holds it)', async () => {
+  fs.mkdirSync(filesDir, { recursive: true })
+  const lock = path.join(filesDir, 'av.lock')
+  const real = fs.openSync
+  let calls = 0
+  let failWith: string[] = ['EPERM', 'EBUSY']
+  fs.openSync = ((p: fs.PathLike, ...rest: unknown[]) => {
+    if (String(p) === lock) {
+      calls++
+      const code = failWith.length ? failWith.shift() : null
+      if (code) throw Object.assign(new Error(`${code}: held`), { code })
+    }
+    return (real as (...a: unknown[]) => number)(p, ...rest)
+  }) as typeof fs.openSync
+  try {
+    assert.equal(await withLock('av', async () => 'ok'), 'ok')
+    assert.equal(calls, 3)
+    assert.ok(!fs.existsSync(lock))
+    // Nothing but EPERM for over a second is a real permission problem, not a passing hold: it is thrown.
+    failWith = Array.from({ length: 1000 }, () => 'EPERM')
+    const t0 = Date.now()
+    await assert.rejects(withLock('av', async () => 'never'), (e: NodeJS.ErrnoException) => e.code === 'EPERM')
+    const waited = Date.now() - t0
+    assert.ok(waited >= 1000 && waited < 5000, `gave up after ${waited} ms`)
+  } finally {
+    fs.openSync = real
+  }
+})
+
 test('locks: a stale lock (dead pid or older than 30 s) is taken over', async () => {
   fs.mkdirSync(filesDir, { recursive: true })
   const lock = path.join(filesDir, 'dead.lock')
@@ -149,6 +178,23 @@ test('locks: a fresh lock appearing during takeover is never stolen', async () =
   assert.equal(overlapped, false)
   assert.ok(!fs.existsSync(lock))
   assert.deepEqual(fs.readdirSync(filesDir).filter(f => f.startsWith('race.lock.')), [])
+})
+
+test('storeObject says whether it created the object; reusing one refreshes its mtime', async () => {
+  const bytes = crypto.randomBytes(100)
+  const first = await s.storeObject(bytes, 'bin')
+  assert.equal(first.created, true)
+  assert.equal(first.mtime, fs.statSync(objectPath(first.hash)).mtimeMs)
+  const old = new Date(Date.now() - 60_000)
+  fs.utimesSync(objectPath(first.hash), old, old)
+  const again = await s.storeObject(bytes, 'bin')
+  assert.equal(again.created, false)
+  assert.ok(again.mtime > old.getTime() + 30_000, 'reuse refreshed the mtime')
+  fs.writeFileSync(objectPath(first.hash), 'damaged')
+  const fixed = await s.storeObject(bytes, 'bin')
+  assert.equal(fixed.created, false, 'rewriting a damaged object is not creating it: a history may already use it')
+  assert.deepEqual(Buffer.from((await getObject(first.hash))!), bytes)
+  assert.deepEqual(fs.readdirSync(path.dirname(objectPath(first.hash))).filter(n => n.endsWith('.tmp')), [])
 })
 
 test('an index for another path is refused', () => {

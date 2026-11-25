@@ -359,6 +359,25 @@ test('an empty file never adopts a moved history', async () => {
   assert.equal(listVersions(a).length, 1)
 })
 
+test('the index keeps the real-case path; an old lowercased one is still found and rewritten', { skip: process.platform !== 'win32' }, async () => {
+  const f = fresh('Mixed Case.md')
+  await guardedWrite(f, person, writeText(f, 'case-one'))
+  await flushHistory()
+  const ix = h.indexPath(historyKey(f))
+  const real = fs.realpathSync.native(f)
+  assert.equal(JSON.parse(fs.readFileSync(ix, 'utf8')).path, real)
+  // An index written before kept the lowercased path: same key, still read, rewritten in its real case on the next record.
+  const idx = JSON.parse(fs.readFileSync(ix, 'utf8'))
+  fs.writeFileSync(ix, JSON.stringify({ ...idx, path: real.toLowerCase() }))
+  assert.equal(historyKey(real.toLowerCase()), historyKey(f))
+  assert.equal(listVersions(f).length, 1)
+  assert.equal(listVersions(real.toUpperCase()).length, 1)
+  await guardedWrite(f, agent('Claude'), writeText(f, 'case-two'))
+  await flushHistory()
+  assert.equal(listVersions(f).length, 2)
+  assert.equal(JSON.parse(fs.readFileSync(ix, 'utf8')).path, real)
+})
+
 test('lock unavailable: the file is still written and paused is reported once', async () => {
   const f = fresh()
   const reasons: string[] = []
@@ -382,6 +401,8 @@ test('lock unavailable: the file is still written and paused is reported once', 
   await flushHistory()
   assert.equal(reasons.length, 1)
   assert.match(reasons[0], /lock/i)
+  assert.ok(reasons[0].includes(f), `the reason names the file: ${reasons[0]}`)
+  assert.doesNotMatch(reasons[0], /[0-9a-f]{64}/, 'never the 64-character key')
 })
 
 test('a history failure (store unavailable) still writes the file and reports paused once', async () => {

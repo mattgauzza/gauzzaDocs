@@ -13,6 +13,7 @@ import {
   enqueue,
   flushHistory,
   forgetHistory,
+  forgetObjects,
   historyKey,
   indexPath,
   listVersions,
@@ -102,13 +103,21 @@ function storeBytes(): number {
   return total
 }
 
+/** When historyForget tries again to delete the objects it had to leave (a test seam). */
+export const forgetRetry = { ms: 3 * 60 * 1000 }
+
 let lastCleanup: CleanupResult | null = null
 let cleaning: Promise<CleanupResult> | null = null
 
 export const historyJobs: Record<string, Job> = {
   historyList: ([file]) => onQueue(file, async () => listVersions(file)),
   historyLog: ([file]) => onQueue(file, async () => readLog(file)),
-  /** Changes from version a to version b, or to the file on disk now when b is left out. Not queued: a slow comparison must never hold up a save. */
+  /**
+   * Changes from version a to version b, or to the file on disk now when b is left out. Not on the file's queue, so
+   * it never waits behind that file's saves. It still runs on the worker's one thread, which also does every save:
+   * that is why the line diff gives up after DIFF_TIMEOUT_MS ({ tooMany: true }) and the panel only asks again when
+   * the versions it compares change.
+   */
   historyDiff: async ([file, a, b]) => {
     const versions = listVersions(file)
     const sizeOf = (n: number) => {
@@ -152,8 +161,23 @@ export const historyJobs: Record<string, Job> = {
     const v = versionNo(n)
     return onQueue(file, () => nameVersion(file, v, String(name ?? ''), by))
   },
-  /** Not queued: forgetHistory first waits for every queued history job, so it would wait on itself. */
-  historyForget: ([file]) => forgetHistory(file),
+  /**
+   * Not queued: forgetHistory first waits for every queued history job, so it would wait on itself. Objects it had to
+   * leave because they were touched in the last 2 minutes are tried once more, 3 minutes later.
+   */
+  historyForget: async ([file]) => {
+    const left = await forgetHistory(file)
+    if (left.length) {
+      const retry = setTimeout(() => {
+        try {
+          forgetObjects(left)
+        } catch {
+          /* cleanup removes them later */
+        }
+      }, forgetRetry.ms)
+      retry.unref?.() // never keeps the worker (or a test) alive
+    }
+  },
   /**
    * `by`: who renamed it (the person for a rename in the app; "outside gauzzaDocs" when left out). Waits for every
    * queued job first: a folder move carries the history of files that may still be recording.

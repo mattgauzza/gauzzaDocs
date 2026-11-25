@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,8 +10,15 @@ import { sheetBytes } from '../src/core/formats/sheet'
 import { slidesBytes } from '../src/core/formats/slides'
 import { deckToMarkdown, markdownToDeck } from '../src/shared/slides/markdown'
 import { compareVersions, versionText } from '../src/core/history/index'
-import { lineDiff, type Hunk } from '../src/shared/diff'
+import { DIFF_TIMEOUT_MS, lineDiff as lineDiffOrTooMany, type Hunk } from '../src/shared/diff'
 import type { Workbook } from '../src/shared/types'
+
+/** lineDiff for inputs that are quick to compare: always hunks. */
+const lineDiff = (a: string, b: string, context?: number): Hunk[] => {
+  const r = lineDiffOrTooMany(a, b, context)
+  assert.ok(Array.isArray(r), 'expected hunks, got tooMany')
+  return r
+}
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const paras = (n: number, edits: Record<number, string> = {}) =>
@@ -99,6 +107,21 @@ test('a side over 8 MB returns tooLarge without doing any work', async () => {
   const big = new Uint8Array(9 * 1024 * 1024)
   assert.deepEqual(await compareVersions('big.md', big, enc('x')), { tooLarge: true })
   assert.deepEqual(await compareVersions('big.md', enc('x'), big), { tooLarge: true })
+})
+
+test('a pathological pair (10,000 lines, all changed) gives tooMany within about 3 s', async () => {
+  const lines = (tag: string) => Array.from({ length: 10_000 }, (_, i) => `${tag} line ${i} ${crypto.randomBytes(6).toString('hex')}`).join('\n')
+  const a = lines('old')
+  const b = lines('new')
+  const t0 = performance.now()
+  assert.deepEqual(lineDiffOrTooMany(a, b), { tooMany: true })
+  const took = performance.now() - t0
+  assert.ok(took < 3000, `gave up after ${Math.round(took)} ms`)
+  assert.ok(took >= DIFF_TIMEOUT_MS - 50, `gave up after ${Math.round(took)} ms, before its time limit`)
+  // compareVersions says the same for two text versions
+  const t1 = performance.now()
+  assert.deepEqual(await compareVersions('big.txt', enc(a), enc(b)), { tooMany: true })
+  assert.ok(performance.now() - t1 < 3500)
 })
 
 test('CRLF on both sides gives hunk lines without carriage returns', () => {

@@ -50,6 +50,7 @@ export function eventLine(file: string, e: HistoryEvent): string {
 /** Lines of a diff: "  " same, "- " deleted, "+ " added, and "..." where lines were skipped. */
 export function diffText(r: Awaited<ReturnType<typeof compareVersions>>): string {
   if ('tooLarge' in r) return 'Too large to compare here'
+  if ('tooMany' in r) return 'Too many changes to compare here'
   if (!r.hunks.length) return 'No changes.'
   const out: string[] = []
   r.hunks.forEach((h, i) => {
@@ -113,12 +114,18 @@ export function registerHistoryCommands(program: Command, ctx: Ctx, agentName: (
       const f = abs(file)
       const n = parseVersion(version)
       const agent = { name: agentName() }
-      const live = o.offline
-        ? null
-        : ((await call('historyRestore', { path: f, n, discardCurrent: !!o.discardCurrent, agent })) as { version: HistoryVersion; live: boolean } | null)
-      const version2 = live
-        ? live.version
-        : await restoreVersion(f, n, { authors: [{ name: agent.name, by: 'agent' }], discardCurrent: !!o.discardCurrent })
+      type Live = { version: HistoryVersion; live: boolean }
+      let live: Live | null = null
+      let version2: HistoryVersion
+      try {
+        if (!o.offline) live = (await call('historyRestore', { path: f, n, discardCurrent: !!o.discardCurrent, agent })) as Live | null
+        version2 = live
+          ? live.version
+          : await restoreVersion(f, n, { authors: [{ name: agent.name, by: 'agent' }], discardCurrent: !!o.discardCurrent })
+      } catch (e) {
+        // The history store names its option discardCurrent; here it is the --discard-current flag.
+        throw new Error(((e as Error).message || String(e)).replace(/\bdiscardCurrent\b/g, '--discard-current'))
+      }
       ctx.out({ restored: n, version: version2, live: !!live?.live }, () => `Restored v${n}${live?.live ? ' in gauzzaDocs' : ''}. It is now v${version2.n}.`)
     })
 
@@ -134,7 +141,7 @@ export function registerHistoryCommands(program: Command, ctx: Ctx, agentName: (
     })
 
   h.command('log <file>')
-    .description('the work history: saves, agent edits, comments, restores, newest last')
+    .description('the work history: saves, agent edits, comments, restores, newest first')
     .action((file: string) => {
       const f = abs(file)
       const events = readLog(f)

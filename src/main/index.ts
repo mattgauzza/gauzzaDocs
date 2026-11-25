@@ -284,7 +284,16 @@ const clip = (s: string, n = 80) => {
  */
 function logHistory(file: string, type: HistoryEventType, by: string, summary: string, at = Date.now()) {
   const p = path.resolve(file)
-  work('historyEvent', [p, { at, type, by, summary }]).then(() => win?.webContents.send('history-changed', p), () => {})
+  work('historyEvent', [p, { at, type, by, summary }]).then(() => sendToWindow('history-changed', p), () => {})
+}
+
+/** Tells the window something, unless it is gone (closing during quit): a late history job must not throw then. */
+function sendToWindow(channel: string, ...args: unknown[]) {
+  try {
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(channel, ...args)
+  } catch {
+    /* the window went away meanwhile */
+  }
 }
 
 /** A rename in the app takes the version history of the file (or of every file in the folder) with it, credited to the person. Never fails the rename. */
@@ -300,10 +309,12 @@ const changedFiles = new Set<string>()
 function folderChanged(root: string, dir: string, file: string) {
   if (!changedDirs.size && !changedFiles.size) {
     setImmediate(() => {
-      for (const [r, d] of changedDirs.values()) win?.webContents.send('folder-changed', r, d)
+      // Taken and cleared first: if sending throws, later changes still get their own flush.
+      const dirs = [...changedDirs.values()]
       const files = [...changedFiles]
       changedDirs.clear()
       changedFiles.clear()
+      for (const [r, d] of dirs) sendToWindow('folder-changed', r, d)
       if (files.length) work('historyCheckChanged', [files]).catch(() => {})
     })
   }

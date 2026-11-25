@@ -34,6 +34,18 @@ const backdate = (hash: string) => {
   fs.utimesSync(objectPath(hash), old, old)
 }
 const logOf =(f: string) => indexPath(historyKey(f)).replace(/\.json$/, '.log.jsonl')
+const backdateBy = (hash: string, ms: number) => {
+  const t = new Date(Date.now() - ms)
+  fs.utimesSync(objectPath(hash), t, t)
+}
+/** Makes storing the object of `text` fail (its folder is a file), until the returned function is called. */
+function blockObject(text: string) {
+  const dir = path.dirname(objectPath(crypto.createHash('sha256').update(text).digest('hex')))
+  fs.rmSync(dir, { recursive: true, force: true })
+  fs.mkdirSync(path.dirname(dir), { recursive: true })
+  fs.writeFileSync(dir, 'in the way')
+  return () => fs.rmSync(dir, { force: true })
+}
 
 test('restore writes the stored bytes exactly and can be undone', async () => {
   const f = fresh('plan.docx')
@@ -119,6 +131,16 @@ test('restore credits unsaved content to unsavedAuthors and the restore to autho
 })
 
 for (const ext of ['md', 'html']) {
+  test(`restoring a deleted .${ext} keeps the version's standing instructions`, async () => {
+    const f = fresh(`deleted.${ext}`)
+    fs.writeFileSync(f, withInstructions(f, 'old body\n', 'kept rules'))
+    await save(f, Buffer.from(withInstructions(f, 'new body\n', 'kept rules')))
+    fs.rmSync(f)
+    await restoreVersion(f, 1, matt)
+    assert.equal(getDocInstructions(f), 'kept rules')
+    assert.deepEqual(fs.readFileSync(f), Buffer.from(withInstructions(f, 'old body\n', 'kept rules')), 'the stored bytes go back as they were')
+  })
+
   test(`restore keeps the current standing instructions in .${ext}`, async () => {
     const f = fresh(`i.${ext}`)
     fs.writeFileSync(f, withInstructions(f, 'old body\n', 'old rules'))
@@ -187,6 +209,42 @@ for (const ext of ['md', 'html']) {
   })
 }
 
+test('restore first records a save that a history failure left pending, under its real author', async () => {
+  const f = fresh('pending.md')
+  h.onHistoryPaused(() => {})
+  await save(f, Buffer.from('pending-one'), matt)
+  const unblock = blockObject('pending-two-by-claude')
+  try {
+    await save(f, Buffer.from('pending-two-by-claude'), agent('Claude')) // written, not recorded
+  } finally {
+    unblock()
+  }
+  assert.deepEqual(listVersions(f).map(v => v.authors[0].name), ['Matt'])
+  await restoreVersion(f, 1, matt)
+  const list = listVersions(f)
+  assert.deepEqual(
+    list.map(v => `${v.authors[0].name}${v.restoredFrom ? ` restored v${v.restoredFrom}` : ''}`),
+    ['Matt', 'Claude', 'Matt restored v1'],
+    'the pending save comes before the restore, credited to Claude, never to outside gauzzaDocs',
+  )
+  assert.equal(Buffer.from(await showVersion(f, 2)).toString(), 'pending-two-by-claude')
+  assert.equal(list[1].beforeRestore, true)
+  assert.equal(fs.readFileSync(f, 'utf8'), 'pending-one')
+})
+
+test('restore refuses a secret file and never writes over it', async () => {
+  const f = fresh('notes.md')
+  fs.writeFileSync(f, 'one')
+  await save(f, Buffer.from('two'))
+  const secret = path.join(path.dirname(f), '.env')
+  fs.renameSync(f, secret)
+  await moveHistory(f, secret) // renamed to .env after it had history
+  assert.equal(listVersions(secret).length, 2)
+  await assert.rejects(restoreVersion(secret, 1, matt), (e: Error) => e.message === "This file is a secret file, so gauzzaDocs doesn't keep versions of it.")
+  assert.equal(fs.readFileSync(secret, 'utf8'), 'two')
+  assert.equal(listVersions(secret).length, 2)
+})
+
 test('folding never merges into a restore or the state before it', async () => {
   const f = fresh('fold.docx')
   fs.writeFileSync(f, rnd())
@@ -233,16 +291,56 @@ test('forget removes index, log and unshared objects', async () => {
   assert.deepEqual(Buffer.from(await showVersion(b, 2)), shared)
 })
 
-test('forget leaves an unshared object touched in the last day, for cleanup to remove later', async () => {
+test('forget deletes unshared objects older than 2 minutes, and leaves newer ones for one retry', async () => {
   const a = fresh('ra.docx')
   fs.writeFileSync(a, rnd())
   await save(a, rnd())
   const va = listVersions(a)
-  backdate(va[0].hash)
-  await forgetHistory(a)
+  backdateBy(va[0].hash, 3 * 60 * 1000) // well under a day: it still goes
+  const left = await forgetHistory(a)
   assert.deepEqual(listVersions(a), [])
-  assert.ok(!fs.existsSync(objectPath(va[0].hash)), 'old unreferenced object deleted')
-  assert.ok(fs.existsSync(objectPath(va[1].hash)), 'recently touched object survives')
+  assert.ok(!fs.existsSync(objectPath(va[0].hash)), 'unreferenced object older than 2 minutes deleted')
+  assert.ok(fs.existsSync(objectPath(va[1].hash)), 'object touched in the last 2 minutes survives for now')
+  assert.deepEqual(left, [va[1].hash])
+  // The retry: not before 2 minutes have passed, then it goes.
+  assert.deepEqual(h.forgetObjects(left), left)
+  assert.ok(fs.existsSync(objectPath(va[1].hash)))
+  backdateBy(va[1].hash, 3 * 60 * 1000)
+  assert.deepEqual(h.forgetObjects(left), [])
+  assert.ok(!fs.existsSync(objectPath(va[1].hash)), 'deleted by the retry')
+})
+
+test('the forget retry keeps an object the file uses again since', async () => {
+  const a = fresh('again.docx')
+  const content = rnd()
+  fs.writeFileSync(a, rnd())
+  await save(a, content)
+  const left = await forgetHistory(a)
+  const hash = crypto.createHash('sha256').update(content).digest('hex')
+  assert.ok(left.includes(hash))
+  await save(a, rnd())
+  await save(a, content, matt) // saved again with the same content: its new history uses the object
+  backdateBy(hash, 3 * 60 * 1000)
+  h.forgetObjects(left)
+  assert.ok(fs.existsSync(objectPath(hash)))
+  assert.deepEqual(Buffer.from(await showVersion(a, listVersions(a).at(-1)!.n)), content)
+})
+
+test('forget never deletes anything but an object, whatever an index says', async () => {
+  const f = fresh('evil.docx')
+  fs.writeFileSync(f, rnd())
+  await save(f, rnd())
+  const key = historyKey(f)
+  const victim = path.join(home, 'victim.txt') // objectPath('../victim.txt') points here
+  fs.writeFileSync(victim, 'keep me')
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+  fs.utimesSync(victim, old, old)
+  assert.equal(path.resolve(objectPath('../victim.txt')), victim)
+  const idx = JSON.parse(fs.readFileSync(indexPath(key), 'utf8'))
+  idx.versions.push({ ...idx.versions[0], n: 99, hash: '../victim.txt' })
+  fs.writeFileSync(indexPath(key), JSON.stringify(idx))
+  await forgetHistory(f)
+  assert.equal(fs.readFileSync(victim, 'utf8'), 'keep me')
 })
 
 test('forget keeps every object when another index cannot be read', async () => {

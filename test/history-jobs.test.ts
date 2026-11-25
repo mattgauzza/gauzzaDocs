@@ -10,10 +10,10 @@ process.env.GAUZZADOCS_HOME = home
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gd-jobs-work-'))
 const docs = path.join(work, 'docs')
 
-const { historyJobs: jobs, copyName } = await import('../src/main/historyJobs')
+const { historyJobs: jobs, copyName, forgetRetry } = await import('../src/main/historyJobs')
 const { saveFile } = await import('../src/core/files')
 const { runOffline } = await import('../src/core/ops')
-const { flushHistory, listVersions, readLog, showVersion } = await import('../src/core/history')
+const { flushHistory, listVersions, readLog, showVersion, objectPath } = await import('../src/core/history')
 const { setSettings } = await import('../src/core/paths')
 setSettings({ docsDir: docs })
 
@@ -214,6 +214,30 @@ test('historyMove carries a renamed file history; historyForget removes it witho
   await within(Promise.resolve(jobs.historyForget([to])))
   assert.equal(listVersions(to).length, 0)
   assert.deepEqual(await jobs.historyList([to]), [])
+})
+
+test('historyForget tries once more, later, to delete the objects it had to leave', async () => {
+  const f = fresh()
+  for (const by of ['Claude', 'Codex']) {
+    await saveFile(f, text(`only here: ${by} ${Math.random()}`), { authors: [{ name: by, by: 'agent' }] }) // no other history shares these
+    await flushHistory()
+  }
+  const hashes = listVersions(f).map(v => v.hash)
+  assert.equal(hashes.length, 2)
+  const realNow = Date.now
+  const wait = forgetRetry.ms
+  forgetRetry.ms = 50
+  try {
+    await within(Promise.resolve(jobs.historyForget([f])))
+    for (const x of hashes) assert.ok(fs.existsSync(objectPath(x)), 'touched in the last 2 minutes: left for now')
+    Date.now = () => realNow() + 3 * 60 * 1000 // by the time the retry runs, they are older than 2 minutes
+    await new Promise(r => setTimeout(r, 300))
+  } finally {
+    Date.now = realNow
+    forgetRetry.ms = wait
+  }
+  for (const x of hashes) assert.ok(!fs.existsSync(objectPath(x)), 'deleted by the retry')
+  assert.equal(wait, 3 * 60 * 1000, 'the app retries 3 minutes later')
 })
 
 test('historyStats reports the store size, the cap and what the last cleanup could not remove', async () => {

@@ -311,17 +311,25 @@ function VersionDetail(props: {
   const [naming, setNaming] = useState(false)
   const [draft, setDraft] = useState(v.name || '')
   const mono = kindOf(path) === 'text' || kindOf(path) === 'sheet' || ['csv', 'tsv'].includes(extOf(path))
+  // A comparison runs on the worker's one thread, which also does every save, and a big one can take a while. So it
+  // only runs again when the versions compared change (or the person asks), never on each autosave: a save since
+  // only marks the result as out of date. A result for an earlier selection is dropped.
+  const [again, setAgain] = useState(0)
+  const inputs = `${v.hash}:${mode === 'now' ? props.refreshKey : 0}`
+  const [ranOn, setRanOn] = useState(inputs)
 
   useEffect(() => {
     let alive = true
     setDiff(null)
+    setRanOn(inputs)
     const run = mode === 'now' ? api.historyDiff(path, v.n) : prev ? api.historyDiff(path, prev.n, v.n) : null
     if (!run) setDiff({ first: true })
     else run.then(d => alive && setDiff(d), e => alive && setDiff({ error: errorText(e) }))
     return () => {
       alive = false
     }
-  }, [path, v.n, v.hash, prev?.n, mode, mode === 'now' ? props.refreshKey : 0])
+  }, [path, v.n, prev?.n, mode, again])
+  const outdated = !!diff && !('first' in diff) && ranOn !== inputs
 
   const restoreTitle = props.current && !props.dirty ? 'This is the current version' : undefined
   const finishName = () => {
@@ -367,6 +375,12 @@ function VersionDetail(props: {
       </div>
       {mode === 'changes' && prev && prev.n !== v.n - 1 && <p className="muted small hv-note">Compared with v{prev.n}, the version before it that is still kept.</p>}
       {mode === 'now' && props.dirty && <p className="muted small hv-note">Unsaved changes in the editor are not included.</p>}
+      {outdated && (
+        <div className="hv-large">
+          <span className="grow">The file changed since this comparison.</span>
+          <button className="btn sm" onClick={() => setAgain(n => n + 1)}>Compare again</button>
+        </div>
+      )}
       <DiffView diff={diff} mode={mode} v={v} mono={mono} onCopy={props.onCopy} />
     </div>
   )
@@ -378,10 +392,10 @@ function DiffView({ diff, mode, v, mono, onCopy }: { diff: DiffState; mode: 'cha
   if ('error' in diff) return <p className="muted small hv-note">{diff.error}</p>
   if ('first' in diff)
     return <p className="muted small hv-note">{v.baseline ? 'The file as it was before gauzzaDocs first changed it.' : 'The first version kept for this file.'}</p>
-  if ('tooLarge' in diff)
+  if ('tooLarge' in diff || 'tooMany' in diff)
     return (
       <div className="hv-large">
-        <span className="grow">Too large to compare here</span>
+        <span className="grow">{'tooMany' in diff ? 'Too many changes to compare here' : 'Too large to compare here'}</span>
         <button className="btn sm" onClick={onCopy}>Open as a copy</button>
       </div>
     )

@@ -7,19 +7,24 @@ import { appendEventLocked, type HistoryEvent } from './log'
 import { enqueue, idle } from './queue'
 import {
   HISTORY_DIR,
+  bakPath,
   canonicalPath,
   historyKey,
   indexPath,
   isExcluded,
+  isHash,
   listHistoryPaths,
   logPath,
-  putObject,
+  objectPath,
   readIndex,
   renameRetrySync,
+  storeObject,
   withLock,
   volumeReachable,
+  writeAtomic,
   writeIndex,
   type Author,
+  type HistoryIndex,
   type HistoryVersion,
 } from './store'
 
@@ -125,6 +130,39 @@ function defaultSummary(authors: Author[], extra?: { baseline?: boolean }) {
 }
 
 /**
+ * The object each file's latest record in this process stored: whether that record created it, and the mtime it
+ * left it with. A record made by another process is not known here: its object is left for cleanup.
+ */
+const lastStored = new Map<string, { hash: string; mtime: number; created: boolean }>()
+
+/**
+ * After a fold replaced the latest version's object, deletes that object right away when only this file used it and
+ * nothing touched it since this file wrote it. Every autosave would otherwise leave a whole copy of the file on disk
+ * for a day, outside the size cap. Caller holds the file's lock and has written the new index.
+ * No other history can use the object: this file's record created it (storeObject's `created`), and any other
+ * history would have had to reuse it through storeObject since, which refreshes its mtime. That is checked here
+ * rather than by reading every index in the store, which takes a second with a thousand histories (on every
+ * autosave). Best effort: anything uncertain keeps the object, and cleanup's 24 hour rule still covers it.
+ */
+async function dropReplaced(key: string, idx: HistoryIndex, replaced: string, seen: { hash: string; mtime: number; created: boolean } | undefined) {
+  try {
+    if (!isHash(replaced) || seen?.hash !== replaced || !seen.created) return
+    if (idx.versions.some(v => v.hash === replaced)) return // an earlier version of this file has the same content
+    await writeAtomic(bakPath(key), fs.readFileSync(indexPath(key))) // the .bak must not point at it either
+    const obj = objectPath(replaced)
+    if (fs.statSync(obj).mtimeMs !== seen.mtime) return // reused by another history since: theirs now
+    fs.rmSync(obj, { force: true })
+    try {
+      fs.rmdirSync(path.dirname(obj)) // only when empty
+    } catch {
+      /* not empty */
+    }
+  } catch {
+    /* left for cleanup */
+  }
+}
+
+/**
  * Records `bytes` as the next version of `file`. The caller holds the file's lock.
  * Skips (returns null) files that are excluded or over the size limit, and bytes identical to the latest version.
  * Folds into the latest version per the folding rules. `noFold` only turns folding off: identical bytes are always skipped.
@@ -142,11 +180,13 @@ export async function recordVersion(
   const canon = canonicalPath(file)
   const hash = sha256(bytes)
   const idx = readIndex(key, canon) ?? { path: canon, versions: [] }
+  idx.path = canon // its real case (indexes from before kept it lowercased on Windows)
   const latest = idx.versions[idx.versions.length - 1]
   const noFold = !!extra?.noFold
   if (latest && latest.hash === hash) return null
   const now = extra?.at ?? Date.now()
-  await putObject(bytes, path.extname(file)) // the object exists before any index points at it
+  const seen = lastStored.get(key)
+  lastStored.set(key, await storeObject(bytes, path.extname(file))) // the object exists before any index points at it
   const canFold =
     !noFold &&
     !!latest &&
@@ -160,7 +200,9 @@ export async function recordVersion(
     sameAuthors(latest.authors, ctx.authors) &&
     now - latest.firstAt <= FOLD_MS
   let version: HistoryVersion
+  let replaced: string | null = null
   if (canFold && latest) {
+    replaced = latest.hash
     Object.assign(latest, { at: now, hash, size: stat.size, mtime: stat.mtime, summary: ctx.summary ?? latest.summary })
     version = latest
   } else {
@@ -180,6 +222,7 @@ export async function recordVersion(
     idx.versions.push(version)
   }
   writeIndex(key, idx)
+  if (replaced) await dropReplaced(key, idx, replaced, seen)
   if (extra?.restoredFrom === undefined) {
     // restoreVersion logs its own "restored" event
     const outside = ctx.authors.length > 0 && ctx.authors.every(a => a.by === 'outside')
@@ -247,7 +290,7 @@ async function adoptMoved(canon: string, key: string, hash: string): Promise<boo
       /* a hook must never break recording */
     }
     return true
-  })
+  }, oldPath)
 }
 
 /** The file as it was before gauzzaDocs first wrote it. Only the bytes are taken before the write; the rest waits. */
@@ -315,6 +358,12 @@ async function flushPending(file: string, key: string): Promise<boolean> {
 }
 
 /**
+ * Records what an earlier history failure left unrecorded for this file, credited to whoever wrote it. The caller
+ * holds the file's lock. Returns true when something is still stuck.
+ */
+export const flushPendingLocked = (file: string): Promise<boolean> => flushPending(file, historyKey(file))
+
+/**
  * Looks at the file on disk before it is written over and records an outside change. With `onBaseline`, a file
  * without history hands its current bytes to the callback instead (to be kept after the write). Caller holds the lock.
  */
@@ -364,7 +413,7 @@ export function checkOutside(file: string, opts: { low?: boolean } = {}): Promis
       key,
       async () => {
         try {
-          resolve(await withLock(key, async () => ((await flushPending(file, key)) ? null : inspect(file))))
+          resolve(await withLock(key, async () => ((await flushPending(file, key)) ? null : inspect(file)), file))
         } catch (e) {
           pause(e)
           resolve(null)
@@ -457,7 +506,7 @@ export function guardedWrite(file: string, ctx: WriteContext, write: () => Promi
             pause(e)
             stash(key, own)
           }
-        })
+        }, file)
       } catch (e) {
         pause(e)
         if (!locked) {

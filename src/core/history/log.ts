@@ -145,7 +145,7 @@ function readTail(target: string): Tail {
 
 /** Appends an event under the file's lock. Do not call this while holding that lock: use appendEventLocked. */
 export function appendEvent(file: string, ev: HistoryEvent): Promise<void> {
-  return withLock(historyKey(file), () => appendEventLocked(file, ev))
+  return withLock(historyKey(file), () => appendEventLocked(file, ev), file)
 }
 
 /** The work history of a file, newest first. Lines that do not parse are skipped. */

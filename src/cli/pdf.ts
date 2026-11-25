@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Command } from 'commander'
+import { saveFile } from '../core/files'
 import { mergePdfs } from '../core/ops/pdf'
 import type { PdfEdit } from '../shared/types'
 import { type Ctx, liveOptions } from './common'
@@ -12,7 +13,7 @@ const number = (v: string) => {
 }
 
 /** gdocs pdf ...: read, mark up and rearrange PDFs. Edits land live in the app when the file is open there. */
-export function registerPdfCommands(program: Command, ctx: Ctx) {
+export function registerPdfCommands(program: Command, ctx: Ctx, agentName: () => string) {
   const pdf = program
     .command('pdf')
     .description('Read, edit and mark up PDFs: edit existing text, fill forms, highlights, whiteout, page rotate/delete/move, merge.\nCoordinates are points (1/72 in) from the top-left of the page; pages are 1-based.')
@@ -172,7 +173,8 @@ export function registerPdfCommands(program: Command, ctx: Ctx) {
       if (fs.existsSync(dest) && !o.force) throw new Error(`${dest} exists; add --force to overwrite`)
       const [first, ...rest] = inputs.map(f => new Uint8Array(fs.readFileSync(path.resolve(f))))
       const bytes = await mergePdfs(first, rest)
-      fs.writeFileSync(dest, bytes)
+      // Written atomically and kept as a version (with --force, what <out> held before is kept first), credited to the agent.
+      await saveFile(dest, { kind: 'pdf', bytes }, { authors: [{ name: agentName(), by: 'agent' }] })
       const { PDFDocument } = await import('pdf-lib')
       const pages = (await PDFDocument.load(bytes)).getPageCount()
       ctx.out({ path: dest, pages }, () => `Wrote ${dest} (${pages} pages)`)

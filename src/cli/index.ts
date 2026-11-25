@@ -4,6 +4,7 @@ import { Command } from 'commander'
 import { createFile, loadFile } from '../core/files'
 import { HOME, freeName, getRecent, getSettings, readServer } from '../core/paths'
 import { DOC_ID, docId } from '../shared/docId'
+import { resolveDocId } from './docIds'
 import { listProjects } from '../core/projects'
 import { type AgentTarget, detectAgents, installSkills, removeSkills } from '../core/agentSkills'
 import { getGlobal, instructionsFor, setDocInstructions, setGlobal } from '../core/instructions'
@@ -40,6 +41,9 @@ program
   .showHelpAfterError()
 
 const json = () => !!program.opts().json
+/** Who the versions this command keeps are credited to: --agent, $GDOCS_AGENT, or "Agent". */
+const agentName = (): string => program.opts().agent || process.env.GDOCS_AGENT || 'Agent'
+const asAgent = () => ({ authors: [{ name: agentName(), by: 'agent' as const }] })
 const out = (data: unknown, human: () => string) => console.log(json() ? JSON.stringify(data, null, 2) : human())
 const input = (v: string | undefined): string => {
   if (v === undefined) return fs.readFileSync(0, 'utf8')
@@ -98,7 +102,7 @@ program
     const ext = o.ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
     const stemName = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
     const file = freeName(path.resolve(o.dir || s.docsDir), stemName, ext)
-    await createFile(file)
+    await createFile(file, asAgent())
     if (o.open) await call('open', { path: file }).catch(() => null)
     out({ path: file }, () => file)
   })
@@ -305,7 +309,7 @@ program
     const f = await loadFile(from)
     if (kindOf(to) !== f.kind) throw new Error(`Cannot convert a ${f.kind} to ${path.extname(to)}`)
     const { saveFile } = await import('../core/files')
-    await saveFile(to, f.payload)
+    await saveFile(to, f.payload, asAgent())
     out({ path: path.resolve(to) }, () => path.resolve(to))
   })
 
@@ -434,7 +438,7 @@ program
     if (o.set !== undefined || o.clear) {
       const text = o.clear ? '' : input(o.set)
       if (o.global) setGlobal(text)
-      else if (file) await setDocInstructions(path.resolve(file), text)
+      else if (file) await setDocInstructions(path.resolve(file), text, asAgent())
       else throw new Error('Give a file, or --global')
       return out({ ok: true }, () => (o.clear ? 'cleared' : 'saved'))
     }
@@ -454,13 +458,13 @@ program
     `app data: ${HOME}\nnew files: ${getSettings().docsDir}\nplugins:   ${path.join(HOME, 'plugins')}`))
 
 registerProjectCommands(program, ctx)
-registerCommentCommands(program, ctx, () => program.opts().agent || process.env.GDOCS_AGENT || 'Agent')
+registerCommentCommands(program, ctx, agentName)
 registerSubscribeCommands(program, ctx)
 registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)
-registerPdfCommands(program, ctx)
+registerPdfCommands(program, ctx, agentName)
 registerSlidesCommands(program, ctx) // slides
-registerHistoryCommands(program, ctx, () => program.opts().agent || process.env.GDOCS_AGENT || 'Agent')
+registerHistoryCommands(program, ctx, agentName)
 
 // Always node-style argv: installed copies run this under the app's Electron runtime (ELECTRON_RUN_AS_NODE),
 // where Commander would otherwise treat the script path as the first command.
@@ -477,26 +481,19 @@ resolveDocIds(process.argv)
 
 /**
  * Lets any command take a short document ID (doc:k3x9q2, shown in the app's status bar and comments panel) instead of
- * a path. Looked up among the files open in the app first, then recent files, files with version history, then files at the top of projects.
+ * a path. Looked up among the files open in the app, recent files and files at the top of projects; files with version
+ * history (which include files that no longer exist) only when none of those match. See resolveDocId.
  */
 async function resolveDocIds(argv: string[]): Promise<string[]> {
   if (!argv.some(a => DOC_ID.test(a))) return argv
-  const candidates = new Set<string>()
+  const places = new Set<string>()
   const open = ((await call('list').catch(() => null)) as { path: string }[] | null) || []
-  for (const t of open) candidates.add(t.path)
-  for (const r of getRecent()) candidates.add(r.path)
-  for (const p of listHistoryPaths()) candidates.add(p) // files that no longer exist still have history
+  for (const t of open) places.add(t.path)
+  for (const r of getRecent()) places.add(r.path)
   for (const p of listProjects()) {
     try {
-      for (const f of fs.readdirSync(p.path)) candidates.add(path.join(p.path, f))
+      for (const f of fs.readdirSync(p.path)) places.add(path.join(p.path, f))
     } catch { /* missing project */ }
   }
-  return argv.map(a => {
-    if (!DOC_ID.test(a)) return a
-    const want = a.toLowerCase()
-    const hits = [...new Set([...candidates].filter(c => docId(c) === want).map(c => path.resolve(c)))]
-    if (!hits.length) throw new Error(`${a} isn't open in gauzzaDocs or in your recent files. Use the file's path instead.`)
-    if (hits.length > 1) throw new Error(`${a} matches more than one file (${hits.join(', ')}). Use the path instead.`)
-    return hits[0]
-  })
+  return argv.map(a => (DOC_ID.test(a) ? resolveDocId(a, places, listHistoryPaths) : a))
 }
