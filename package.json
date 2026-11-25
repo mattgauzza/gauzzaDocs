@@ -273,6 +273,7 @@
     "@turbodocx/html-to-docx": "^1.23.3",
     "@xmldom/xmldom": "^0.9.12",
     "commander": "^15.1.0",
+    "diff": "^9.0.0",
     "electron-updater": "^6.8.11",
     "exceljs": "^4.4.0",
     "mammoth": "^1.13.0",

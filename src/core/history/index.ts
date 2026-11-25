@@ -14,3 +14,4 @@ export {
   recordVersion,
   type WriteContext,
 } from './record'
+export { COMPARE_MAX_BYTES, compareVersions, versionText } from './compare'
