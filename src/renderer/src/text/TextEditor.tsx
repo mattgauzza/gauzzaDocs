@@ -213,7 +213,10 @@ export default function TextEditor(props: EditorProps) {
     computeStats(view.state.doc)
 
     // Syntax highlighting, loaded on demand (skipped for very large files).
-    if (text.length < BIG) {
+    if (text.length < BIG && language === 'dotenv') {
+      setLangName('.env')
+      import('./dotenv').then(m => view.dispatch({ effects: c.lang.reconfigure(m.dotenv) })).catch(() => {})
+    } else if (text.length < BIG) {
       const desc =
         LanguageDescription.matchFilename(languages, baseName(props.path)) ||
         (language !== 'text' ? LanguageDescription.matchLanguageName(languages, language, true) : null)

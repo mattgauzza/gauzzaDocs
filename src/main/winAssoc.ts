@@ -19,7 +19,8 @@ export const APP_NAME = 'gauzzaDocs'
 export const TYPES: [string, string][] = [
   ['docx', 'Word document'], ['md', 'Markdown document'], ['markdown', 'Markdown document'], ['xlsx', 'Excel workbook'],
   ['pptx', 'PowerPoint presentation'], ['csv', 'CSV file'], ['tsv', 'TSV file'], ['pdf', 'PDF document'], ['txt', 'Text file'], ['log', 'Log file'],
-  ['json', 'JSON file'], ['yaml', 'YAML file'], ['yml', 'YAML file']
+  ['json', 'JSON file'], ['jsonc', 'JSON file'], ['yaml', 'YAML file'], ['yml', 'YAML file'], ['toml', 'TOML file'],
+  ['env', 'Environment file'], ['ini', 'Settings file'], ['cfg', 'Settings file'], ['conf', 'Settings file']
 ]
 
 const q = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')

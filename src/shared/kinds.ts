@@ -39,7 +39,8 @@ const LANG: Record<string, string> = {
   less: 'less', md: 'markdown', markdown: 'markdown', py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java',
   kt: 'kotlin', c: 'c', h: 'c', cpp: 'c++', cc: 'c++', hpp: 'c++', cs: 'c#', php: 'php', sh: 'shell', bash: 'shell',
   ps1: 'powershell', psm1: 'powershell', bat: 'shell', cmd: 'shell', sql: 'sql', yml: 'yaml', yaml: 'yaml',
-  toml: 'toml', ini: 'properties', env: 'properties', properties: 'properties', csv: 'csv', tsv: 'csv',
+  toml: 'toml', ini: 'properties', env: 'dotenv', properties: 'properties', cfg: 'properties', conf: 'properties',
+  config: 'xml', plist: 'xml', csproj: 'xml', props: 'xml', csv: 'csv', tsv: 'csv',
   lua: 'lua', swift: 'swift', dart: 'dart', r: 'r', pl: 'perl', vue: 'vue', svelte: 'svelte', dockerfile: 'dockerfile',
   txt: 'text', log: 'text'
 }
@@ -47,6 +48,11 @@ export function languageOf(file: string): string {
   const base = baseName(file).toLowerCase()
   if (base === 'dockerfile') return 'dockerfile'
   if (base === 'makefile') return 'shell'
+  // Config dotfiles have no extension before the dot: .env, .env.local, .prettierrc, .bashrc ...
+  if (/^\.env(\.|$)/.test(base) || base.endsWith('.env')) return 'dotenv'
+  if (/^\.(prettierrc|eslintrc|babelrc|swcrc|jshintrc|stylelintrc)$/.test(base)) return 'json'
+  if (/^\.(npmrc|yarnrc|editorconfig|gitconfig|gitattributes|gitignore|dockerignore|npmignore|prettierignore|eslintignore)$/.test(base)) return 'properties'
+  if (/^\.(bashrc|bash_profile|zshrc|zprofile|profile|bash_aliases)$/.test(base)) return 'shell'
   return LANG[extOf(file)] || 'text'
 }
 
