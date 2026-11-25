@@ -155,8 +155,8 @@ export function markBeforeRestore(file: string): HistoryVersion | null {
 
 
 // ---- detection and deferred work (caller holds the file's lock) ----
-/** A file is only "missing" when its drive and folder are reachable and it is not there (a disconnected drive is not a move). */
-const reallyMissing = (p: string) => fs.existsSync(path.parse(p).root) && fs.existsSync(path.dirname(p)) && !fs.existsSync(p)
+/** A file is only "missing" when its drive or share is reachable and it is not there (a disconnected drive is not a move). The folder may be gone: it may have been renamed. */
+const reallyMissing = (p: string) => fs.existsSync(path.parse(p).root) && !fs.existsSync(p)
 
 /** A missing file's history whose latest version has this hash moves to `canon`. Returns whether one was adopted. */
 async function adoptMoved(canon: string, key: string, hash: string): Promise<boolean> {
@@ -200,6 +200,7 @@ async function adoptMoved(canon: string, key: string, hash: string): Promise<boo
 
 /** The file as it was before gauzzaDocs first wrote it. Only the bytes are taken before the write; the rest waits. */
 interface Captured {
+  at: number // when it was taken, so the baseline keeps its place before the write that follows
   bytes: Uint8Array
   mtime: number
 }
@@ -233,7 +234,7 @@ async function baselineStep(file: string, cap: Captured): Promise<void> {
   const canon = canonicalPath(file)
   if (readIndex(key, canon)?.versions.length) return // history appeared meanwhile: not a first write any more
   if (cap.bytes.length > 0 && (await adoptMoved(canon, key, sha256(cap.bytes)))) return
-  await recordVersion(file, cap.bytes, { size: cap.bytes.length, mtime: cap.mtime }, { authors: [OUTSIDE] }, { baseline: true, noFold: true })
+  await recordVersion(file, cap.bytes, { size: cap.bytes.length, mtime: cap.mtime }, { authors: [OUTSIDE] }, { baseline: true, noFold: true, at: cap.at })
 }
 
 /** Records what an earlier failure left unrecorded. Returns true when something is still stuck (do not record or inspect now). */
@@ -276,7 +277,7 @@ async function inspect(file: string, onBaseline?: (c: Captured) => void): Promis
   const idx = readIndex(key, canonicalPath(file))
   const latest = idx?.versions[idx.versions.length - 1]
   if (!idx || !latest) {
-    if (onBaseline) onBaseline({ bytes: await fs.promises.readFile(file), mtime: st.mtimeMs }) // opening or watching records nothing
+    if (onBaseline) onBaseline({ at: Date.now(), bytes: await fs.promises.readFile(file), mtime: st.mtimeMs }) // opening or watching records nothing
     return null
   }
   if (latest.size === st.size && latest.mtime === st.mtimeMs) return null

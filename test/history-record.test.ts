@@ -271,22 +271,62 @@ test('a write made while the lock was unavailable is later recorded under its re
   assert.deepEqual(authorsOf(f), ['Matt', 'Claude', 'Matt'])
 })
 
-test('adoption needs the old folder to be reachable: a missing folder is not a move', async () => {
-  const a = fresh('gone.md')
-  const b = fresh('here.md')
-  await guardedWrite(a, agent('Claude'), writeText(a, 'ruling-three'))
+test('a baseline keeps its place before the write it precedes, also when its record is deferred by a failure', async () => {
+  const f = fresh()
+  fs.writeFileSync(f, 'order-original')
+  await guardedWrite(f, agent('Claude'), writeText(f, 'order-edit'))
   await flushHistory()
-  const before = listVersions(a).length
-  fs.rmSync(path.dirname(a), { recursive: true }) // like a disconnected drive: the folder is not there
-  fs.writeFileSync(b, 'ruling-three')
+  let v = listVersions(f)
+  assert.deepEqual(v.map(x => x.n), [1, 2])
+  assert.ok(v[0].baseline && v[0].at <= v[1].at && v[0].firstAt <= v[1].firstAt)
+  const g = fresh()
+  onHistoryPaused(() => {})
+  fs.writeFileSync(g, 'order2-original')
+  const unblock = blockObject('order2-original')
+  await guardedWrite(g, agent('Claude'), writeText(g, 'order2-edit'))
+  await flushHistory()
+  await new Promise(r => setTimeout(r, 30))
+  unblock()
+  await guardedWrite(g, person, writeText(g, 'order2-later'))
+  await flushHistory()
+  v = listVersions(g)
+  assert.deepEqual(v.map(x => [x.n, x.baseline ?? false]), [[1, true], [2, false], [3, false]])
+  assert.ok(v[0].at <= v[1].at && v[1].at <= v[2].at)
+})
+
+test('adoption is blocked when the old drive is unreachable, and the old index is untouched', { skip: process.platform !== 'win32' }, async () => {
+  const letter = 'ZYXWVUTSRQPONMLKJIHGFED'.split('').find(l => !fs.existsSync(`${l}:\\`))
+  if (!letter) return
+  const old = `${letter}:\\Docs\\gone.md`
+  const key = historyKey(old)
+  const canon = h.canonicalPath(old)
+  h.writeIndex(key, { path: canon, versions: [{ n: 1, firstAt: 1, at: 1, hash: sha('drive-content'), size: 13, mtime: 1, authors: [], summary: '' }] })
+  const b = fresh('here.md')
+  fs.writeFileSync(b, 'drive-content')
   const moves: string[] = []
   historyHooks.onMoved = o => moves.push(o)
-  await guardedWrite(b, agent('Codex'), writeText(b, 'ruling-three-edited'))
+  await guardedWrite(b, agent('Codex'), writeText(b, 'drive-content-edited'))
   await flushHistory()
   historyHooks.onMoved = () => {}
   assert.deepEqual(moves, [])
   assert.deepEqual(authorsOf(b), ['outside gauzzaDocs*', 'Codex'])
-  assert.equal(listVersions(a).length, before) // old history untouched
+  assert.equal(h.readIndex(key, canon)?.versions.length, 1)
+})
+
+test('a folder renamed away does not stop its files adopting their history', async () => {
+  const a = fresh('inside.md')
+  await guardedWrite(a, agent('Claude'), writeText(a, 'renamed-folder'))
+  await flushHistory()
+  const renamed = path.join(work, `renamed-${++seq}`)
+  fs.renameSync(path.dirname(a), renamed)
+  const b = path.join(renamed, 'inside.md')
+  const moves: string[] = []
+  historyHooks.onMoved = o => moves.push(o)
+  await guardedWrite(b, agent('Codex'), writeText(b, 'renamed-folder-edited'))
+  await flushHistory()
+  historyHooks.onMoved = () => {}
+  assert.equal(moves.length, 1)
+  assert.deepEqual(authorsOf(b), ['Claude', 'Codex'])
 })
 
 test('an empty file never adopts a moved history', async () => {
