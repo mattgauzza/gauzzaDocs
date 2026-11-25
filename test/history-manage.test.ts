@@ -294,3 +294,15 @@ test('moveHistory refuses to overwrite an existing history', async () => {
   assert.deepEqual(listVersions(a), va)
   assert.deepEqual(listVersions(b), vb)
 })
+
+test('moveHistory clears a missingSince mark', async () => {
+  const f = fresh('mark.md')
+  fs.writeFileSync(f, 'one')
+  await save(f, Buffer.from('two'))
+  const key = historyKey(f)
+  h.writeIndex(key, { ...h.readIndex(key)!, missingSince: 123 })
+  const to = path.join(path.dirname(f), 'moved-mark.md')
+  fs.renameSync(f, to)
+  await moveHistory(f, to)
+  assert.equal(h.readIndex(historyKey(to))!.missingSince, undefined)
+})

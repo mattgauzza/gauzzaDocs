@@ -129,9 +129,12 @@ export async function moveHistory(from: string, to: string): Promise<void> {
       const old = readIndex(j.oldKey, j.oldPath)
       if (!old) return
       if (hasHistory(j.newKey)) throw new Error(`${j.newPath} already has a history, so ${j.oldPath} can't be moved onto it.`)
-      writeIndex(j.newKey, { ...old, path: j.newPath })
+      const moved: HistoryIndex = { ...old, path: j.newPath }
+      delete moved.missingSince // it is where it belongs again
+      writeIndex(j.newKey, moved)
       try {
         const bak = JSON.parse(fs.readFileSync(bakPath(j.oldKey), 'utf8')) as HistoryIndex
+        delete bak.missingSince
         fs.writeFileSync(bakPath(j.newKey), JSON.stringify({ ...bak, path: j.newPath }))
       } catch {
         /* no usable backup to carry over */

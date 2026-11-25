@@ -45,6 +45,20 @@ export function canonicalPath(file: string): string {
   }
   return process.platform === 'win32' ? real.toLowerCase() : real
 }
+/**
+ * The drive, share or mounted volume a file lives on: the thing that has to be reachable before "the file is not
+ * there" means anything. A disconnected drive makes the whole volume root vanish.
+ */
+export function volumeRoot(file: string, platform: string = process.platform): string {
+  if (platform === 'win32') return path.win32.parse(file).root
+  const m =
+    platform === 'darwin'
+      ? file.match(/^\/Volumes\/[^/]+/)
+      : platform === 'linux'
+        ? file.match(/^(?:\/media\/[^/]+\/[^/]+|\/run\/media\/[^/]+\/[^/]+|\/mnt\/[^/]+)(?=\/|$)/)
+        : null
+  return m ? m[0] : '/'
+}
 export const historyKey = (file: string) => sha256(canonicalPath(file))
 
 export const objectPath = (hash: string) => path.join(OBJECTS_DIR, hash.slice(0, 2), hash)

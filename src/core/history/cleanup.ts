@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { HISTORY_DIR, indexPath, bakPath, logPath, withLock, writeAtomic, writeIndex, type HistoryIndex, type HistoryVersion } from './store'
+import { HISTORY_DIR, volumeRoot, indexPath, bakPath, logPath, withLock, writeAtomic, writeIndex, type HistoryIndex, type HistoryVersion } from './store'
 
 const DAY = 24 * 60 * 60 * 1000
 const FILES_DIR = path.join(HISTORY_DIR, 'files')
@@ -85,7 +85,7 @@ function scan(): Scan {
     const idx = parse(indexPath(key))
     const bak = parse(bakPath(key))
     if (idx === null || bak === null) out.bad = true
-    if (idx === undefined && bak === undefined) out.unstable = true
+    if (idx === undefined) out.unstable = true // an index vanished since the listing (a move or removal); a .bak may lack the latest version
     for (const i of [idx, bak]) for (const v of i?.versions ?? []) out.refs.add(v.hash)
     if (idx) out.json.set(key, idx)
     else if (bak) out.bakOnly.set(key, bak)
@@ -142,7 +142,7 @@ function presence(file: string): Presence {
     if (!cleanupHooks.reachable(file)) return 'unknown'
   } else {
     try {
-      fs.statSync(path.parse(file).root)
+      fs.statSync(volumeRoot(file))
     } catch {
       return 'unknown' // a disconnected drive or share
     }
@@ -341,7 +341,9 @@ export async function cleanupHistory(now: number, capBytes: number): Promise<Cle
         // Missing is measured from when cleanup first saw the file missing, never from the last save.
         const here = presence(idx.path)
         let missingSince = idx.missingSince
-        if (here === 'present') missingSince = undefined
+        // A mark older than a version is stale: the file came back and was saved since. Start over from now.
+        if (missingSince !== undefined && idx.versions.some(v => v.at >= missingSince!)) missingSince = here === 'absent' ? now : undefined
+        else if (here === 'present') missingSince = undefined
         else if (here === 'absent') missingSince ??= now
         const gone = here === 'absent' && missingSince !== undefined && now - missingSince > GONE_MS
         const p = plan.get(key)!

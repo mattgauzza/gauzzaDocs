@@ -137,10 +137,10 @@ test('a file whose file has been missing 91 days loses all but named versions; a
   const nofolder = path.join(work, 'deleted-folder', 'x', 'doc.bin') // folder gone too, drive fine: can still expire
   const away = path.join(work, 'no-such-drive', 'doc.bin')
   const miss = NOW - 91 * DAY
-  const g = await seed(gone, [{ days: 95 }, { days: 91 }], { missingSince: miss })
-  const nm = await seed(named, [{ days: 95, name: 'final' }, { days: 91 }], { missingSince: miss })
-  const nf = await seed(nofolder, [{ days: 95 }, { days: 91 }], { missingSince: miss })
-  await seed(away, [{ days: 200 }, { days: 150 }, { days: 91 }], { missingSince: miss })
+  const g = await seed(gone, [{ days: 95 }, { days: 93 }], { missingSince: miss })
+  const nm = await seed(named, [{ days: 95, name: 'final' }, { days: 93 }], { missingSince: miss })
+  const nf = await seed(nofolder, [{ days: 95 }, { days: 93 }], { missingSince: miss })
+  await seed(away, [{ days: 200 }, { days: 150 }, { days: 93 }], { missingSince: miss })
   ;(cleanupHooks as any).reachable = (file: string) => !file.includes('no-such-drive')
   for (const f of [gone, named]) writeLog(historyKey(f), [{ at: atDay(91), summary: 's' }])
   const r = await clean()
@@ -167,8 +167,7 @@ test('an old file that was only just deleted keeps everything and starts its 90 
   // a later run keeps the original date
   await cleanupHistory(NOW + 30 * DAY, BIG)
   assert.equal(readIndex(historyKey(f))!.missingSince, NOW)
-  assert.deepEqual(ns(f), [1, 2, 3].filter(n => ns(f).includes(n)))
-  assert.ok(ns(f).includes(3), 'latest still there')
+  assert.deepEqual(ns(f), [1, 2, 3])
 })
 
 test('missing for under 90 days keeps everything; a file that came back clears the mark', async () => {
@@ -346,4 +345,32 @@ test('orphan logs are thinned by age, and removed once their newest event is 90 
   assert.equal(fs.existsSync(logPath(dead)), false, 'no index, newest event over 90 days')
   assert.deepEqual(logSummaries(live), ['b', 'c'], 'no index but recent: kept and thinned')
   assert.deepEqual(logSummaries(bakOnly), ['q'], 'a .bak remains: thinned, never deleted')
+})
+
+test('a stale missingSince (a version was saved after it) never wipes recent versions', async () => {
+  reset()
+  const f = fresh()
+  const mark = NOW - 100 * DAY
+  // the file came back and was saved after the mark; it is absent again at this run
+  await seed(f, [{ days: 150 }, { days: 120 }, { days: 50 }, { days: 1 }, { days: 0 }], { missingSince: mark })
+  await clean()
+  assert.deepEqual(ns(f), [1, 2, 3, 4, 5])
+  assert.equal(readIndex(historyKey(f))!.missingSince, NOW)
+})
+
+test('an index that vanishes after the listing makes the run keep every object, even when its .bak is still there', async () => {
+  reset()
+  const f = fresh()
+  const vs = await seed(f, [{ days: 5 }, { days: 0 }], { exists: true })
+  const orphan = await putObject(crypto.randomBytes(50), 'bin')
+  age(objectPath(orphan), 3 * DAY)
+  // a .bak that lacks the latest version
+  fs.writeFileSync(bakPath(historyKey(f)), JSON.stringify({ path: f, versions: [{ ...vs[0] }] }))
+  let scans = 0
+  ;(cleanupHooks as any).afterList = () => {
+    if (++scans === 2) fs.rmSync(indexPath(historyKey(f)), { force: true })
+  }
+  await clean()
+  assert.equal(scans, 2)
+  assert.ok(exists(vs[0].hash) && exists(vs[1].hash) && exists(orphan), 'no object deleted this run')
 })

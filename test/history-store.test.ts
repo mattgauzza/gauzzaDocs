@@ -185,3 +185,15 @@ test('exclusions: secrets are not versioned', () => {
 test('identity: one history for one file however it is written', { skip: process.platform !== 'win32' }, () => {
   assert.equal(historyKey('C:\\Docs\\Plan.md'), historyKey('c:/docs/plan.md'))
 })
+
+test('volumeRoot finds the drive, share or mounted volume of a file', () => {
+  const { volumeRoot } = s
+  assert.equal(volumeRoot('/Volumes/X/a/b.docx', 'darwin'), '/Volumes/X')
+  assert.equal(volumeRoot('/media/u/X/a.txt', 'linux'), '/media/u/X')
+  assert.equal(volumeRoot('/run/media/u/X/a.txt', 'linux'), '/run/media/u/X')
+  assert.equal(volumeRoot('/mnt/x/a.txt', 'linux'), '/mnt/x')
+  assert.equal(volumeRoot('/home/u/a.txt', 'linux'), '/')
+  assert.equal(volumeRoot('/home/u/a.txt', 'darwin'), '/')
+  assert.equal(volumeRoot('C:\\a\\b.txt', 'win32'), 'C:\\')
+  assert.equal(volumeRoot('\\\\server\\share\\a.txt', 'win32'), '\\\\server\\share\\')
+})
