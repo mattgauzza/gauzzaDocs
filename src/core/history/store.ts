@@ -173,7 +173,16 @@ export function writeIndex(key: string, index: HistoryIndex): void {
   fs.mkdirSync(FILES_DIR, { recursive: true })
   const current = parseIndex(file)
   if (current === null) setAsideCorrupt(file) // never write over a corrupt index
-  else if (current) fs.copyFileSync(file, bakPath(key)) // keep the last good one
+  else if (current) {
+    const bak = tmpName(bakPath(key)) // keep the last good one, written whole or not at all
+    try {
+      fs.writeFileSync(bak, fs.readFileSync(file))
+      renameRetrySync(bak, bakPath(key))
+    } catch (e) {
+      fs.rmSync(bak, { force: true })
+      throw e
+    }
+  }
   const tmp = tmpName(file)
   try {
     fs.writeFileSync(tmp, JSON.stringify(index))

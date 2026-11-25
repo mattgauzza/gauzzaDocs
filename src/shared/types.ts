@@ -214,7 +214,12 @@ export interface HistoryVersion {
   restoredFrom?: number
 }
 
-export interface HistoryIndex { path: string; versions: HistoryVersion[] }
+export interface HistoryIndex {
+  path: string
+  versions: HistoryVersion[]
+  /** Set by cleanup when it first sees the file absent from a reachable drive; cleared when it is back. */
+  missingSince?: number
+}
 
 export interface PluginManifest {
   id: string

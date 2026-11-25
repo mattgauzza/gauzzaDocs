@@ -13,7 +13,14 @@ const ASIDE_MS = 30 * DAY // a set-aside corrupt index may still be the only rec
 const FRESH_MS = DAY // objects and temp files younger than this may belong to a writer in flight
 
 /** Test seam: runs after the first scan and before any index is rewritten. */
-export const cleanupHooks: { afterScan?: () => void | Promise<void> } = {}
+export const cleanupHooks: {
+  afterScan?: () => void | Promise<void>
+  /** Runs inside each scan, after the folder listing and before the files are read (argument: which scan of this run). */
+  afterList?: (scanNo: number) => void
+  /** Overrides the check that a file's drive or share root can be reached. */
+  reachable?: (file: string) => boolean
+} = {}
+let scanCount = 0
 
 export interface CleanupResult {
   removedVersions: number
@@ -22,7 +29,7 @@ export interface CleanupResult {
   skipped?: 'corrupt-index'
 }
 
-type Mode = 'normal' | 'early' | 'protected'
+type Mode = 'normal' | 'early'
 
 /** Index state: a parsed index, undefined when missing, null when it cannot be trusted. */
 function parse(file: string): HistoryIndex | undefined | null {
@@ -50,6 +57,8 @@ const readdir = (dir: string): string[] => {
 
 interface Scan {
   bad: boolean
+  /** A listed history had neither index nor .bak when read: a move or removal was in progress. */
+  unstable: boolean
   json: Map<string, HistoryIndex> // keys with a readable index
   bakOnly: Map<string, HistoryIndex>
   refs: Set<string>
@@ -58,17 +67,25 @@ interface Scan {
 
 /** Reads every index and .bak directly. Unlike listHistoryPaths, an unreadable one is reported, not skipped. */
 function scan(): Scan {
-  const names = readdir(FILES_DIR)
+  let names: string[] = []
+  let listFailed = false
+  try {
+    names = fs.readdirSync(FILES_DIR)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') listFailed = true // cannot tell what is referenced
+  }
+  cleanupHooks.afterList?.(++scanCount)
   const keys = new Set<string>()
   for (const n of names) {
     const m = n.match(/^(.+)\.json(\.bak)?$/)
     if (m) keys.add(m[1])
   }
-  const out: Scan = { bad: false, json: new Map(), bakOnly: new Map(), refs: new Set(), names }
+  const out: Scan = { bad: listFailed, unstable: false, json: new Map(), bakOnly: new Map(), refs: new Set(), names }
   for (const key of keys) {
     const idx = parse(indexPath(key))
     const bak = parse(bakPath(key))
     if (idx === null || bak === null) out.bad = true
+    if (idx === undefined && bak === undefined) out.unstable = true
     for (const i of [idx, bak]) for (const v of i?.versions ?? []) out.refs.add(v.hash)
     if (idx) out.json.set(key, idx)
     else if (bak) out.bakOnly.set(key, bak)
@@ -92,7 +109,7 @@ function bucketOf(at: number, now: number, mode: Mode): string | null {
 }
 
 /** The versions that remain. Protected ones always do; of the rest, the newest in each bucket does. */
-function thin(versions: HistoryVersion[], now: number, mode: Mode, gone: boolean): HistoryVersion[] {
+function thin(versions: HistoryVersion[], now: number, mode: Mode, gone: boolean, drop = 0): HistoryVersion[] {
   if (gone) return versions.filter(v => !!v.name)
   const last = versions[versions.length - 1]
   const keep = new Set<HistoryVersion>()
@@ -105,37 +122,40 @@ function thin(versions: HistoryVersion[], now: number, mode: Mode, gone: boolean
   }
   for (const v of [...versions].sort((a, b) => b.at - a.at)) {
     if (keep.has(v)) continue
-    if (mode === 'protected') continue
     const b = bucketOf(v.at, now, mode)
     if (b === null) keep.add(v)
     else if (!taken.has(b)) (taken.add(b), keep.add(v))
   }
+  // Beyond that: the oldest unprotected versions, one at a time (only used when the cap still is not met).
+  const last2 = versions[versions.length - 1]
+  for (const v of versions) {
+    if (drop <= 0) break
+    if (keep.has(v) && !isProtected(v, last2, now)) (keep.delete(v), drop--)
+  }
   return versions.filter(v => keep.has(v))
 }
 
-/** True only when the file's folder is reachable and the file is not in it, and it was last known 90 days ago. */
-function isGone(idx: HistoryIndex, indexFile: string, now: number): boolean {
-  try {
-    if (!fs.statSync(path.dirname(idx.path)).isDirectory()) return false
-  } catch {
-    return false // unreachable (missing drive, share, folder): never gone
-  }
-  try {
-    fs.lstatSync(idx.path)
-    return false
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return false
-  }
-  let known = idx.versions[idx.versions.length - 1]?.at
-  if (known === undefined) {
+type Presence = 'present' | 'absent' | 'unknown'
+/** Whether the file is there. 'absent' only when its drive or share root can be reached and the file is not in it. */
+function presence(file: string): Presence {
+  if (cleanupHooks.reachable) {
+    if (!cleanupHooks.reachable(file)) return 'unknown'
+  } else {
     try {
-      known = fs.statSync(indexFile).mtimeMs
+      fs.statSync(path.parse(file).root)
     } catch {
-      return false
+      return 'unknown' // a disconnected drive or share
     }
   }
-  return now - known > GONE_MS
+  try {
+    fs.lstatSync(file)
+    return 'present'
+  } catch (e) {
+    const c = (e as NodeJS.ErrnoException).code
+    return c === 'ENOENT' || c === 'ENOTDIR' ? 'absent' : 'unknown'
+  }
 }
+const isGone = (idx: HistoryIndex, now: number) => idx.missingSince !== undefined && now - idx.missingSince > GONE_MS
 
 const asideTime = (name: string, dir: string): number | null => {
   const m = name.match(/\.corrupt-(\d+)$/)
@@ -200,7 +220,7 @@ function sweep(dir: string, now: number): number {
       if (!st.isFile()) continue
       const aside = asideTime(n, dir)
       if (aside !== null) old = now - aside > ASIDE_MS
-      else if (n.endsWith('.tmp') || n.includes('.lock.stale-')) old = now - st.mtimeMs > FRESH_MS
+      else if (n.endsWith('.tmp') || n.includes('.lock.stale-')) old = Date.now() - st.mtimeMs > FRESH_MS // a writer's temp file: judged by the real clock
       else continue
       if (!old) continue
       fs.rmSync(f, { force: true })
@@ -212,11 +232,38 @@ function sweep(dir: string, now: number): number {
   return freed
 }
 
+/** Age-thins a log file, deleting it when `deleteIfOld` and its newest event is over 90 days old. Returns bytes freed. */
+async function thinLogFile(key: string, now: number, deleteIfOld: boolean): Promise<number> {
+  let text: string
+  try {
+    text = fs.readFileSync(logPath(key), 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0
+    throw e
+  }
+  const next = thinLog(text, now)
+  let newest = 0
+  for (const line of next.split('\n')) {
+    if (line) newest = Math.max(newest, (JSON.parse(line) as { at: number }).at)
+  }
+  if (!newest) newest = fs.statSync(logPath(key)).mtimeMs
+  if (deleteIfOld && now - newest > GONE_MS) {
+    fs.rmSync(logPath(key), { force: true })
+    return Buffer.byteLength(text)
+  }
+  if (next === text) return 0
+  if (next) await writeAtomic(logPath(key), Buffer.from(next))
+  else fs.rmSync(logPath(key), { force: true })
+  return Buffer.byteLength(text) - Buffer.byteLength(next)
+}
+
 /**
- * Retention and the size cap. Thins versions and log events, removes history of files gone 90 days, then deletes
+ * Retention and the size cap. Thins versions and log events, removes history of files missing 90 days, then deletes
  * objects nothing refers to. Reads every index directly and does nothing at all if any cannot be read.
+ * Retention ages use `now`; the 24 hour protection of objects and temp files uses the real clock.
  */
 export async function cleanupHistory(now: number, capBytes: number): Promise<CleanupResult> {
+  scanCount = 0
   const first = scan()
   if (first.bad) return { removedVersions: 0, freedBytes: 0, skipped: 'corrupt-index' }
 
@@ -226,17 +273,19 @@ export async function cleanupHistory(now: number, capBytes: number): Promise<Cle
     return t === null || now - t <= ASIDE_MS
   })
 
-  // Plan: which mode each file gets, so the biggest files are thinned first when over the cap.
+  // Plan: how hard each file is thinned, so the biggest files go first when over the cap.
   const sizes = new Map<string, number>()
   const recent = new Set<string>()
   for (const o of objectFiles()) {
     sizes.set(o.hash, o.size)
-    if (now - o.mtime < FRESH_MS) recent.add(o.hash)
+    if (Date.now() - o.mtime < FRESH_MS) recent.add(o.hash)
   }
-  const gone = new Map<string, boolean>()
-  for (const [key, idx] of first.json) gone.set(key, isGone(idx, indexPath(key), now))
-  const modes = new Map<string, Mode>([...first.json.keys()].map(k => [k, 'normal']))
-  const planned = (key: string) => thin(first.json.get(key)!.versions, now, modes.get(key)!, gone.get(key)!)
+  const plan = new Map<string, { mode: Mode; drop: number }>([...first.json.keys()].map(k => [k, { mode: 'normal', drop: 0 }]))
+  const planned = (key: string) => {
+    const idx = first.json.get(key)!
+    const p = plan.get(key)!
+    return thin(idx.versions, now, p.mode, isGone(idx, now), p.drop)
+  }
   const usage = () => {
     const refs = new Map<string, Set<string>>()
     const all = new Set<string>()
@@ -250,17 +299,29 @@ export async function cleanupHistory(now: number, capBytes: number): Promise<Cle
     for (const [h, s] of sizes) if (all.has(h) || recent.has(h)) total += s
     return { total, refs }
   }
-  if (!blocked) {
-    for (const stage of ['early', 'protected'] as const) {
-      let u = usage()
-      if (u.total <= capBytes) break
-      const bySpace = [...first.json.keys()]
+  if (!blocked && usage().total > capBytes) {
+    const order = () => {
+      const u = usage()
+      return [...first.json.keys()]
         .map(key => ({ key, bytes: [...u.refs.get(key)!].reduce((a, h) => a + (sizes.get(h) ?? 0), 0) }))
         .sort((a, b) => b.bytes - a.bytes)
-      for (const { key } of bySpace) {
-        modes.set(key, stage)
-        u = usage()
-        if (u.total <= capBytes) break
+        .map(x => x.key)
+    }
+    // Stage 1: one per day from 7 days on, largest file first.
+    for (const key of order()) {
+      plan.get(key)!.mode = 'early'
+      if (usage().total <= capBytes) break
+    }
+    // Stage 2: still over, so unprotected versions go one at a time, oldest first, largest file first.
+    if (usage().total > capBytes) {
+      outer: for (const key of order()) {
+        const p = plan.get(key)!
+        const all = first.json.get(key)!.versions
+        const unprotected = planned(key).filter(v => !isProtected(v, all[all.length - 1], now)).length
+        for (let i = 0; i < unprotected; i++) {
+          p.drop++
+          if (usage().total <= capBytes) break outer
+        }
       }
     }
   }
@@ -277,9 +338,15 @@ export async function cleanupHistory(now: number, capBytes: number): Promise<Cle
         const idx = parse(indexPath(key))
         if (idx === null) return void (bad = true)
         if (!idx) return
-        const isGoneNow = isGone(idx, indexPath(key), now)
-        const versions = thin(idx.versions, now, modes.get(key)!, isGoneNow)
-        if (isGoneNow && versions.length === 0) {
+        // Missing is measured from when cleanup first saw the file missing, never from the last save.
+        const here = presence(idx.path)
+        let missingSince = idx.missingSince
+        if (here === 'present') missingSince = undefined
+        else if (here === 'absent') missingSince ??= now
+        const gone = here === 'absent' && missingSince !== undefined && now - missingSince > GONE_MS
+        const p = plan.get(key)!
+        const versions = thin(idx.versions, now, p.mode, gone, p.drop)
+        if (gone && versions.length === 0) {
           removedVersions += idx.versions.length
           for (const f of [indexPath(key), bakPath(key), logPath(key)]) {
             try {
@@ -291,35 +358,45 @@ export async function cleanupHistory(now: number, capBytes: number): Promise<Cle
           }
           return
         }
-        if (versions.length !== idx.versions.length) {
+        if (versions.length !== idx.versions.length || missingSince !== idx.missingSince) {
           removedVersions += idx.versions.length - versions.length
-          writeIndex(key, { ...idx, versions })
-          fs.copyFileSync(indexPath(key), bakPath(key)) // the .bak must not keep the thinned versions' objects alive
+          const next: HistoryIndex = { ...idx, versions }
+          if (missingSince === undefined) delete next.missingSince
+          else next.missingSince = missingSince
+          writeIndex(key, next)
+          // the .bak must not keep the thinned versions' objects alive
+          if (versions.length !== idx.versions.length) await writeAtomic(bakPath(key), fs.readFileSync(indexPath(key)))
         }
-        try {
-          const text = fs.readFileSync(logPath(key), 'utf8')
-          const next = thinLog(text, now)
-          if (next !== text) {
-            if (next) await writeAtomic(logPath(key), Buffer.from(next))
-            else fs.rmSync(logPath(key), { force: true })
-            freedBytes += Buffer.byteLength(text) - Buffer.byteLength(next)
-          }
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
-        }
+        freedBytes += await thinLogFile(key, now, false)
       })
     } catch {
       /* busy or failing: leave this one for the next run */
     }
   }
 
+  // Logs with no readable index of their own: thinned by age; removed when old and no index or .bak is left.
+  for (const n of first.names) {
+    const m = n.match(/^(.+)\.log\.jsonl$/)
+    if (!m || first.json.has(m[1])) continue
+    const key = m[1]
+    try {
+      await withLock(key, async () => {
+        const hasIndex = fs.existsSync(indexPath(key)) || fs.existsSync(bakPath(key))
+        freedBytes += await thinLogFile(key, now, !hasIndex)
+      })
+    } catch {
+      /* next run */
+    }
+  }
+
   // Objects: a fresh scan decides what is referenced; nothing recent, and nothing while a corrupt index may still need it.
   const second = scan()
   if (bad || second.bad) return { removedVersions, freedBytes, skipped: 'corrupt-index' }
-  if (!blocked) {
+  if (!blocked && !second.unstable) {
     for (const o of objectFiles()) {
-      if (second.refs.has(o.hash) || now - o.mtime < FRESH_MS) continue
+      if (second.refs.has(o.hash) || Date.now() - o.mtime < FRESH_MS) continue
       try {
+        if (Date.now() - fs.statSync(o.file).mtimeMs < FRESH_MS) continue // touched since it was listed: a writer is reusing it
         fs.rmSync(o.file, { force: true })
         freedBytes += o.size
         try {
