@@ -126,3 +126,15 @@ test('history works for a file that no longer exists', async () => {
   assert.equal(r.code, 0, r.stderr)
   assert.equal(fs.readFileSync(f, 'utf8'), 'keep me\n')
 })
+
+test('forget says so when there is nothing to delete', async () => {
+  const f = doc('never.md', 'untouched\n')
+  const r = await gdocs('history', 'forget', f)
+  assert.equal(r.code, 0, r.stderr)
+  assert.match(r.stdout, /^No history for /)
+  const unknown = await gdocs('history', 'forget', path.join(work, 'nope.md'))
+  assert.equal(unknown.code, 0)
+  assert.match(unknown.stdout, /^No history for /)
+  await gdocs('replace', f, 'untouched', 'touched', '--agent', 'Claude', '--offline')
+  assert.match((await gdocs('history', 'forget', f)).stdout, /^Deleted the history of /)
+})

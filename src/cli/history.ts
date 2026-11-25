@@ -145,8 +145,9 @@ export function registerHistoryCommands(program: Command, ctx: Ctx, agentName: (
     .description('delete all history of a file, for good')
     .action(async (file: string) => {
       const f = abs(file)
+      const had = listVersions(f).length > 0 || readLog(f).length > 0
       const r = await call('historyForget', { path: f })
       if (r === null) await forgetHistory(f)
-      ctx.out({ forgotten: f }, () => `Deleted the history of ${file}.`)
+      ctx.out({ forgotten: had ? f : null }, () => (had ? `Deleted the history of ${file}.` : `No history for ${file}.`))
     })
 }

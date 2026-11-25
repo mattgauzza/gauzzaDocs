@@ -259,8 +259,8 @@ versions you named.
 Changes made outside gauzzaDocs are kept too, and they're credited to "outside gauzzaDocs". Word, git and other
 programs don't leave a name, so I can't tell who made them.
 
-Secret files are skipped. That means `.env` files, keys like `*.pem` and `*.key`, `id_rsa` and `id_ed25519` files and
-anything in `.ssh`, `.aws`, `.gnupg` or `.azure`. You can change that list in Settings.
+Secret files are skipped. That means `.env` and `.env.*`, `*.pem`, `*.key`, `*.pfx`, `*.p12` and `*.kdbx`, `id_rsa*` and
+`id_ed25519*`, and anything under `.ssh`, `.aws`, `.gnupg` or `.azure`. You can change that list in Settings.
 
 History lives in `~/.gauzzadocs/history`, and nothing is written next to your files. It's stored unencrypted.
 
@@ -268,7 +268,7 @@ History lives in `~/.gauzzadocs/history`, and nothing is written next to your fi
 gdocs history report.md                   # versions and who made them
 gdocs history diff report.md v7           # what changed since v7
 gdocs history restore report.md v7        # put v7 back
-gdocs history name report.md v7 "Sent to Dave"
+gdocs history name report.md v7 "Sent to the client"
 gdocs history log report.md               # the work history
 gdocs history forget report.md            # delete this file's history
 ```
