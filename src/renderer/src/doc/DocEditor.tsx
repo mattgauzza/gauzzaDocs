@@ -15,6 +15,7 @@ import { Icon } from './icons'
 import { flash, outline, replaceRanges, runDocOp, searchDoc } from './live'
 import { FONTS, Toolbar, ZOOMS, applyStyle, currentSize } from './Toolbar'
 import { stepZoom } from '../shell/zoom'
+import { marginPress } from './marginSelect'
 import './doc.css'
 import { usePanelSize } from '../shell/resize'
 
@@ -601,10 +602,10 @@ export default function DocEditor(props: EditorProps) {
             className={`doc-page${pageless ? '' : ' paged'}`}
             style={{ zoom: zoom / 100, ...(pageless ? {} : { minHeight: pageInfo.pages * PAGE_H + (pageInfo.pages - 1) * GAP }) }}
             onMouseDown={e => {
-            // Clicks in the page margins put the cursor in the text, as in Google Docs.
-            if (e.target === e.currentTarget) {
+            // Clicks in the page margins put the cursor on the line beside them, as in Google Docs.
+            if (e.target === e.currentTarget && e.button === 0) {
               e.preventDefault()
-              editor.commands.focus('end')
+              marginPress(editor, e)
             }
           }}>
             <EditorContent editor={editor} />
