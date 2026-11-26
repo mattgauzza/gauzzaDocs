@@ -82,14 +82,17 @@ const ELEMENT_NOTES: Record<string, string> = {
   listener: 'an event listener'
 }
 
-/** Presentation attributes, which are also the CSS properties a style may set. Their values are checked for url(). */
+/**
+ * Presentation attributes, which are also the CSS properties a style may set. Their values are checked for url().
+ * Not `marker`: browsers ignore it as an attribute, and as a style it is written out as its three longhands.
+ */
 export const PRESENTATION = new Set([
   'alignment-baseline', 'baseline-shift', 'clip', 'clip-path', 'clip-rule', 'color', 'color-interpolation',
   'color-interpolation-filters', 'color-rendering', 'direction', 'display', 'dominant-baseline', 'enable-background',
   'fill', 'fill-opacity', 'fill-rule', 'filter', 'flood-color', 'flood-opacity', 'font-family', 'font-size',
   'font-size-adjust', 'font-stretch', 'font-style', 'font-variant', 'font-weight', 'glyph-orientation-horizontal',
-  'glyph-orientation-vertical', 'image-rendering', 'kerning', 'letter-spacing', 'lighting-color', 'marker',
-  'marker-end', 'marker-mid', 'marker-start', 'mask', 'mask-type', 'opacity', 'overflow', 'paint-order',
+  'glyph-orientation-vertical', 'image-rendering', 'kerning', 'letter-spacing', 'lighting-color', 'marker-end',
+  'marker-mid', 'marker-start', 'mask', 'mask-type', 'opacity', 'overflow', 'paint-order',
   'pointer-events', 'shape-rendering', 'stop-color', 'stop-opacity', 'stroke', 'stroke-dasharray', 'stroke-dashoffset',
   'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'stroke-opacity', 'stroke-width', 'text-anchor',
   'text-decoration', 'text-rendering', 'transform-origin', 'unicode-bidi', 'vector-effect', 'visibility',
@@ -298,7 +301,12 @@ export function cleanDeclarations(text: string, note: (s: string) => void, ids?:
   return keptDeclarations(text, note, ids).list.join(';')
 }
 
-/** cleanDeclarations as a list, and how many properties it sets (one, unless a reference is still to be checked). */
+const MARKER_LONGHANDS = ['marker-start', 'marker-mid', 'marker-end']
+
+/**
+ * cleanDeclarations as a list, and how many properties it sets (one, unless a reference is still to be checked). The
+ * `marker` shorthand is checked once and written as its three longhands, in its place (so later ones still win).
+ */
 function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<string, Element>): { list: string[]; props: number } {
   // per property: the declaration that wins, after any it would replace that stay until its reference is checked
   const keep = new Map<string, { text: string; important: boolean }[]>()
@@ -308,7 +316,7 @@ function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<str
       continue
     }
     if (d.prop.startsWith('-')) continue // vendor properties such as -inkscape-font-specification
-    if (!PRESENTATION.has(d.prop) && !STYLE_ONLY.has(d.prop)) {
+    if (d.prop !== 'marker' && !PRESENTATION.has(d.prop) && !STYLE_ONLY.has(d.prop)) {
       note(`a style property (${short(d.prop)})`)
       continue
     }
@@ -328,13 +336,15 @@ function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<str
       note(`a reference to a missing id (#${short(missing)})`)
       continue
     }
-    const had = keep.get(d.prop)
-    if (had && had[had.length - 1].important && !d.important) continue
-    const entry = { text: `${d.prop}:${v.value}${d.important ? ' !important' : ''}`, important: d.important }
-    const list = had && !ids && v.value.includes('url(#') ? had : []
-    list.push(entry)
-    keep.delete(d.prop) // the later one takes the later place
-    keep.set(d.prop, list)
+    for (const prop of d.prop === 'marker' ? MARKER_LONGHANDS : [d.prop]) {
+      const had = keep.get(prop)
+      if (had && had[had.length - 1].important && !d.important) continue
+      const entry = { text: `${prop}:${v.value}${d.important ? ' !important' : ''}`, important: d.important }
+      const list = had && !ids && v.value.includes('url(#') ? had : []
+      list.push(entry)
+      keep.delete(prop) // the later one takes the later place
+      keep.set(prop, list)
+    }
   }
   const list: string[] = []
   for (const entries of keep.values()) for (const e of entries) list.push(e.text)
@@ -345,7 +355,14 @@ function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<str
 export const MAX_RULE_DECLARATIONS = 64
 /** Most simple parts (element, .class, #id) one selector may chain. */
 export const MAX_SELECTOR_PARTS = 4
-const SIMPLE = /^([A-Za-z][\w-]*)?((?:[.#][\w-]+)*)$/
+/**
+ * An element, then .class and #id parts, each name a CSS identifier as a browser reads one: no leading digit, and no
+ * hyphen followed by a digit (.1a and .-1 are not selectors at all, so cleanStylesheet drops a list holding one whole,
+ * as a browser drops the rule).
+ */
+const SIMPLE = /^([A-Za-z][\w-]*)?((?:[.#](?:--|-?[A-Za-z_])[\w-]*)*)$/
+/** An element's classes, split on ASCII white space only, as a browser splits them (a no-break space is part of a name). */
+export const classesOf = (el: Element): Set<string> => new Set((el.getAttribute('class') ?? '').split(/[ \t\n\f\r]+/).filter(Boolean))
 /**
  * Whether one selector (one part of a comma list) is a simple one gauzzaDocs supports: an element, .class or #id, or
  * a chain of them on the same element (rect.logo, .a.b) up to 4 parts. No combinators, no *, no pseudo-classes.
@@ -374,6 +391,11 @@ export function cleanStylesheet(css: string, note: (s: string) => void, ids?: Ma
       continue
     }
     const selectors = b.selector.split(',').map(s => s.trim())
+    // a class or id that isn't an identifier makes the whole list invalid: a browser drops the rule, so it goes
+    if (selectors.some(s => /[.#]-?\d/.test(s))) {
+      note(UNSUPPORTED)
+      continue
+    }
     const simple = selectors.filter(simpleSelector)
     for (let i = simple.length; i < selectors.length; i++) note(UNSUPPORTED)
     if (!simple.length) continue
@@ -637,6 +659,10 @@ function cleanAttributes(el: Element, notes: Notes): void {
       else drop()
       continue
     }
+    if (local === 'marker') {
+      drop('a marker attribute (browsers ignore it)') // only marker-start, marker-mid and marker-end are attributes
+      continue
+    }
     if (!ATTRIBUTES.has(local) && !PRESENTATION.has(local)) {
       drop(`${article(local)} attribute`)
       continue
@@ -664,15 +690,22 @@ function cleanAttributes(el: Element, notes: Notes): void {
 }
 
 function cleanElement(el: Element, notes: Notes): void {
-  cleanAttributes(el, notes)
   if (el.localName === 'style') {
+    // A browser applies a style sheet only for its media and of type text/css; rather than judge which, any other goes.
+    const type = el.getAttribute('type')
+    if (el.hasAttribute('media') || (type !== null && !/^[ \t\n\r]*(text\/css)?[ \t\n\r]*$/i.test(type))) {
+      notes.add('a style sheet for some media only, or not of type text/css')
+      el.parentNode?.removeChild(el)
+      return
+    }
     const css = cleanStylesheet(el.textContent ?? '', s => notes.add(s))
     while (el.firstChild) el.removeChild(el.firstChild)
     if (css) el.appendChild(el.ownerDocument.createTextNode(css))
     else el.parentNode?.removeChild(el)
-    for (const a of Array.from(el.attributes)) if (a.name !== 'type' && a.name !== 'media') el.removeAttributeNode(a)
+    for (const a of Array.from(el.attributes)) el.removeAttributeNode(a)
     return
   }
+  cleanAttributes(el, notes)
   if ((el.localName === 'image' || el.localName === 'use') && !hrefAttr(el)) {
     el.parentNode?.removeChild(el)
     return
@@ -843,51 +876,18 @@ const MAX_PAINT_STEPS = 100_000
 /** A style rule's selector as the cleaner keeps it (an element, .class or #id, or a chain of them), with its declarations. */
 interface SheetRule { tag: string | null; ids: string[]; classes: string[]; decls: Decl[] }
 
-/** The CSS color keywords, which a browser always accepts as a paint. */
-const COLOR_NAMES = new Set((
-  'aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown burlywood ' +
-  'cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray ' +
-  'darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen ' +
-  'darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue ' +
-  'firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray green greenyellow grey honeydew ' +
-  'hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan ' +
-  'lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen lightskyblue lightslategray ' +
-  'lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon mediumaquamarine mediumblue ' +
-  'mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred ' +
-  'midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid ' +
-  'palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple ' +
-  'rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue ' +
-  'slateblue slategray slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet wheat white ' +
-  'whitesmoke yellow yellowgreen currentcolor transparent'
-).split(' '))
-const isColor = (v: string): boolean => /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v) || COLOR_NAMES.has(v)
-/**
- * Whether a browser certainly accepts a value of one of REPAINT_PROPS (or marker), so the property doesn't come from
- * the parent: none, initial, one url(#id) (with a color or none after it for a paint), or for a paint a hex or named
- * color. Anything else might be dropped as it's parsed (fill:x, two urls, a function this doesn't read), leaving the
- * property to whatever is under it: another source, or the parent.
- */
-function surelyValid(prop: string, value: string): boolean {
-  const v = value.trim().toLowerCase()
-  if (v === 'none' || v === 'initial') return true
-  const paint = prop === 'fill' || prop === 'stroke'
-  if (paint && (isColor(v) || v === 'context-fill' || v === 'context-stroke')) return true
-  const m = /^url\(#[^()\s]+\)(?:\s+(\S+))?$/.exec(v)
-  return !!m && (m[1] === undefined || (paint && (m[1] === 'none' || isColor(m[1]))))
-}
-/** Whether a declaration of a style rule can matter to what an element paints. */
+/** Whether a declaration of a style rule can add a definition an element paints: it names one, or takes the parent's. */
 const repaintDecl = (d: Decl): boolean =>
-  (REPAINTS.has(d.prop) || d.prop === 'marker') && (d.value.includes('url(#') || FROM_PARENT.has(d.value.trim().toLowerCase()) || surelyValid(d.prop, d.value))
+  (REPAINTS.has(d.prop) || d.prop === 'marker') && (d.value.includes('url(#') || FROM_PARENT.has(d.value.trim().toLowerCase()))
 
 /**
  * How many elements the SVG's markers, patterns, masks and clip paths paint: the content of each, every time it's
- * painted. A browser drops a value it can't parse and takes the one under it (the next style rule, the presentation
- * attribute, or the parent's), and the cleaner keeps values it can't tell are invalid (fill:x, clip-path:none none).
- * So which definitions an element paints is not read from one winning value: it's every definition any of its sources
- * names (its presentation attributes, each style rule that matches it and its style attribute, up to MAX_VALUE_REFS
- * from each), together with its parent's when any source takes the parent's (inherit, unset, revert, revert-layer) or,
- * for a property that inherits, when no source holds a value a browser surely accepts. Counting more is the safe side.
- * Inheritance runs through a <use> as well. A definition painted inside its own painting paints nothing there (no
+ * painted. The count is conservative and never models the cascade, since any difference from a browser's (a value it
+ * drops when parsing, a rule it never applies, an attribute it ignores) would hide a painting. Which definitions an
+ * element paints is every definition any of its sources names (its presentation attributes, each kept style rule that
+ * matches it and its style attribute, up to MAX_VALUE_REFS from each). A property that inherits (fill, stroke and the
+ * markers) always adds the parent's too, whatever the element sets itself; a mask or clip path adds the parent's when
+ * a source takes it (inherit, unset, revert, revert-layer). Inheritance runs through a <use> as well. A definition painted inside its own painting paints nothing there (no
  * browser paints that). What one painting of a definition comes to is remembered unless a loop back past it cut it
  * short, and the walk over such loops is charged its work against MAX_PAINT_STEPS. Reading which definitions each
  * element paints is charged too, against MAX_PAINTS (every one read is at least one painting). Throws as soon as the
@@ -895,8 +895,8 @@ const repaintDecl = (d: Decl): boolean =>
  */
 function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Element, number>): number {
   const all = allElements(root)
-  // style rules that can name a definition, take one from the parent or keep the parent's away, indexed by an id,
-  // class or element of their selector
+  // style rules that can name a definition or take one from the parent, indexed by an id, class or element of their
+  // selector
   const rules = new Map<string, SheetRule[]>()
   for (const st of all) {
     if (st.localName !== 'style') continue
@@ -925,30 +925,27 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     if ((read += n) > MAX_PAINTS) throw new Error(TOO_SLOW)
   }
 
-  // What an element sets itself, by property, over all its sources: the definitions they name, whether any takes the
-  // parent's, and whether any holds a value a browser surely accepts (which keeps an inherited property's parent value
-  // away). A value that does none of these adds nothing.
-  interface Own { refs: readonly Element[]; parent: boolean; valid: boolean }
+  // What an element sets itself, by property, over all its sources: the definitions they name, and whether any takes
+  // the parent's. A value that does neither adds nothing (and, being only the element's own, takes nothing away).
+  interface Own { refs: readonly Element[]; parent: boolean }
   const owns = new Map<Element, Map<string, Own> | null>()
   const ownOf = (el: Element) => {
     if (owns.has(el)) return owns.get(el)!
-    const found = new Map<string, { refs: Set<Element>; parent: boolean; valid: boolean }>()
+    const found = new Map<string, { refs: Set<Element>; parent: boolean }>()
     const put = (prop: string, value: string) => {
       const props = prop === 'marker' ? MARKER_PROPS : REPAINTS.has(prop) ? [prop] : null
       if (!props) return
       const parent = FROM_PARENT.has(value.trim().toLowerCase())
       const named = parent ? [] : urlRefs(value).slice(0, MAX_VALUE_REFS)
-      const valid = !parent && surelyValid(prop, value)
-      if (!parent && !valid && !named.length) return
+      if (!parent && !named.length) return
       for (const p of props) {
         let o = found.get(p)
-        if (!o) found.set(p, (o = { refs: new Set(), parent: false, valid: false }))
+        if (!o) found.set(p, (o = { refs: new Set(), parent: false }))
         for (const id of named) {
           const t = ids.get(id)
           if (t && t.localName === REPAINTS.get(p)) o.refs.add(t)
         }
         o.parent ||= parent
-        o.valid ||= valid
       }
     }
     const attrs = el.attributes
@@ -961,7 +958,7 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     }
     if (rules.size) {
       const id = el.getAttribute('id')
-      const classes = new Set((el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean))
+      const classes = classesOf(el)
       const check = (list: SheetRule[] | undefined) => {
         if (!list) return
         for (const r of list) {
@@ -978,13 +975,13 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     let own: Map<string, Own> | null = null
     for (const [p, o] of found) {
       own ??= new Map()
-      own.set(p, { refs: o.refs.size ? [...o.refs] : NONE, parent: o.parent, valid: o.valid })
+      own.set(p, { refs: o.refs.size ? [...o.refs] : NONE, parent: o.parent })
     }
     owns.set(el, own)
     return own
   }
 
-  /** An element's paints, given its parent's. */
+  /** An element's paints, given its parent's: its own, and the parent's wherever it can inherit them. */
   const paintsOf = (el: Element, parent: Paints): Paints => {
     const own = ownOf(el)
     if (!own && parent.mask === NONE && parent['clip-path'] === NONE) return parent
@@ -996,7 +993,7 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
         out[p] = inherits ? parent[p] : NONE
         continue
       }
-      const up = o.parent || (inherits && !o.valid) ? parent[p] : NONE
+      const up = inherits || o.parent ? parent[p] : NONE
       if (!up.length) out[p] = o.refs
       else if (!o.refs.length) out[p] = up
       else {

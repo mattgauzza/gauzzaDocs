@@ -6,7 +6,9 @@ import { assetName } from '../src/core/formats/design'
 import { fontsFor, type FontSource } from '../src/shared/design/fonts'
 import { newDesign } from '../src/shared/design/model'
 import { parsePath, pathBounds } from '../src/shared/design/path'
-import { type Downgrade, MAX_SVG_OUTPUT, SVG_NOT_CONVERTED, SVG_OVER_BUDGET, designToSvg } from '../src/shared/design/render'
+import {
+  type Downgrade, MAX_RENDER_OUTPUT, NOT_DRAWN, OVER_BUDGET, SVG_NOT_CONVERTED, TOO_MANY_INSTANCES, designToSvg
+} from '../src/shared/design/render'
 import { sharedAssetName } from '../src/shared/design/sha256'
 import { PRESENTATION, STYLE_ONLY, cleanSvg } from '../src/shared/design/svgClean'
 import { inlineSvg } from '../src/shared/design/svgFragment'
@@ -1145,7 +1147,9 @@ test('markers, patterns, masks and clip paths count each time they are painted',
   const marker = `<marker id="m">${rect.repeat(2)}</marker>`
   // a marker at every vertex that carries it
   assert.equal(painted(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" marker-mid="url(#m)"/>`), 3 * 2)
-  assert.equal(painted(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" marker="url(#m)"/>`), 5 * 2)
+  assert.equal(painted(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" style="marker:url(#m)"/>`), 5 * 2)
+  // (as an attribute, marker is ignored by browsers, and dropped: Ruling 17)
+  assert.equal(painted(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" marker="url(#m)"/>`), 0)
   assert.equal(painted(`<defs>${marker}</defs><polyline points="0 0 1 1 2 2 3 3" style="marker-start:url(#m);marker-end:url(#m)"/>`), 2 * 2)
   // a pattern for every element painted with it: set on each, inherited from a group, from a style rule (which also
   // matches the pattern's own rects, a loop that paints nothing), or taken back by a rule's inherit over an attribute
@@ -1350,11 +1354,12 @@ test('painting counts every source of a property, since a browser skips a value 
   assert.equal(painted(`<style>rect{fill:url(#p)}</style>${pats}${rects('style="fill:x"')}`), 100 * 3)
   // every source counts, even under a valid one (the safe side)
   assert.equal(painted(pats + rects('fill="url(#p)" style="fill:url(#q)"')), 100 * 8)
-  // an inherited paint: a value a browser may drop leaves the parent's, a color surely keeps it away, and inherit or
-  // revert-layer take the parent's as well as the attribute's
+  // an inherited paint: the parent's always counts (Ruling 17), and inherit or revert-layer take it as well as the
+  // attribute's
   assert.equal(painted(`${pats}<g fill="url(#p)">${rects('style="fill:x"')}</g>`), 100 * 3)
   assert.equal(painted(`${pats}<g fill="url(#p)">${rects('fill="url(#q) url(#q)"')}</g>`), 100 * 8)
-  assert.equal(painted(`${pats}<g fill="url(#p)">${rects('fill="#fff"')}${rects('style="fill:White"')}${rects('fill="url(#q) red"')}</g>`), 100 * 5)
+  // (Ruling 17: an element's own value never hides its parent's, so even a color counts the group's pattern)
+  assert.equal(painted(`${pats}<g fill="url(#p)">${rects('fill="#fff"')}${rects('style="fill:White"')}${rects('fill="url(#q) red"')}</g>`), 300 * 3 + 100 * 5)
   assert.equal(painted(`${pats}<g fill="url(#p)">${rects('fill="url(#q)" style="fill:revert-layer"')}</g>`), 100 * 8)
   assert.equal(painted(`${pats}<g fill="url(#p)"><style>.x{fill:inherit}</style>${rects('class="x" fill="url(#q)"')}</g>`), 100 * 8)
   // a mask or clip path under a value a browser drops
@@ -1407,23 +1412,23 @@ test('the walk over paintings that loop is charged its work, not only the defini
   assert.equal(cleanSvg(svgOf(`<defs>${chain}</defs><rect width="1" height="1" fill="url(#P0)"/>`)).painted, 2001)
 })
 
-test('an export keeps its svg layers within 64 MB, lists the ones left out and never throws', async () => {
+test('an export keeps within one budget, lists the layers left out and never throws', async () => {
   // zE: each layer inlines to about 7.9 MB (a dash array a rule copies onto 3,900 rects, inside the style budget);
-  // 80 of them joined whole would pass what one string can hold
+  // 80 of them joined whole would pass what one string can hold (Ruling 17: one 128 MB budget over every part)
   const svg = svgOf(`<style>rect{stroke-dasharray:${R(999, '1 ').trim()}}</style>${R(3900, '<rect/>')}`, 'viewBox="0 0 10 10"')
   const layer = (id: string, s: string): Layer => ({ ...base, id, name: `Layer ${id}`, type: 'svg', x: 0, y: 0, width: 10, height: 10, svg: s })
   const d = newDesign('instagram')
   for (let i = 0; i < 80; i++) d.artboards[0].layers.push(layer(`L${i}`, svg))
   const downgrades: Downgrade[] = []
-  let out = ''
   const fonts = await fontsOf(d)
-  underASecond('80 large svg layers, exported', () => (out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'export', downgrades })))
+  // (writing 128 MB takes most of a second, so this one isn't timed)
+  const out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'export', downgrades })
   const inlined = out.split('preserveAspectRatio="none"').length - 1
-  assert.ok(inlined >= 7 && inlined <= 8, `${inlined} inlined`)
-  assert.ok(out.length < MAX_SVG_OUTPUT + 100_000, `${out.length} characters`)
+  assert.ok(inlined >= 15 && inlined <= 17, `${inlined} inlined`)
+  assert.ok(out.length < MAX_RENDER_OUTPUT + 100_000, `${out.length} characters`)
   assert.equal(downgrades.length, 80 - inlined)
-  assert.deepEqual(downgrades[0], { layer: `L${inlined}`, name: `Layer L${inlined}`, reason: SVG_OVER_BUDGET })
-  assert.ok(downgrades.every(g => g.reason === SVG_OVER_BUDGET))
+  assert.deepEqual(downgrades[0], { layer: `L${inlined}`, name: `Layer L${inlined}`, reason: OVER_BUDGET })
+  assert.ok(downgrades.every(g => g.reason === OVER_BUDGET))
   // a layer that can't be converted is listed too, and the layers after it still draw
   const d2 = newDesign('instagram')
   const bomb = svgOf(`<defs><pattern id="P2">${R(100, RECT)}</pattern><pattern id="P1">${R(100, '<rect width="1" height="1" fill="url(#P2)"/>')}</pattern></defs>${R(100, '<rect width="1" height="1" fill="url(#P1)"/>')}`, 'viewBox="0 0 10 10"')
@@ -1457,4 +1462,142 @@ test('a dropped reference never joins a name past ASCII to what follows, so clea
     assert.match(once, want)
     assert.equal(cleanSvg(once).svg, once)
   }
+})
+
+// Ruling 17: a conservative paint count, style kept only where a browser applies it, and one render budget
+
+test("an element's own value never hides its parent's paint, so the reviewer's vU bombs are refused", () => {
+  const pat = (k: number) => `<pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse">${R(k, '<rect width="10" height="10" fill="red"/>')}</pattern>`
+  const marker = (k: number) => `<marker id="m" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="5" refY="5" overflow="visible">${R(k, '<rect width="10" height="10" fill="red"/>')}</marker>`
+  const under = (child: string, sheet = '') => (k: number, n: number) => `${sheet}<defs>${pat(k)}</defs><g fill="url(#p)">${R(n, child)}</g>`
+  const marked = (attrs: string, sheet = '') => (k: number, n: number) => `${sheet}<defs>${marker(k)}</defs><g marker-mid="url(#m)">${R(n, `<path d="M0 0L5 5L10 10" fill="none" ${attrs}/>`)}</g>`
+  const rect = (attrs: string) => `<rect width="10" height="10" ${attrs}/>`
+  const cases: [string, (k: number, n: number) => string][] = [
+    ['fill="initial"', under(rect('fill="initial"'))],
+    ['style fill:context-fill', under(rect('style="fill:context-fill"'))],
+    ['fill="#ffff"', under(rect('fill="#ffff"'))],
+    ['fill="currentcolor"', under(rect('fill="currentcolor"'))],
+    ['a rule in <style media="print">', under(rect(''), '<style media="print">rect{fill:#00f}</style>')],
+    ['a rule in <style type="text/plain">', under(rect(''), '<style type="text/plain">rect{fill:#00f}</style>')],
+    ['.1a', under(rect('class="1a"'), '<style>.1a{fill:#00f}</style>')],
+    ['.1a, rect', under(rect('class="1a"'), '<style>.1a, rect{fill:#00f}</style>')],
+    ['.-1', under(rect('class="-1"'), '<style>.-1{fill:#00f}</style>')],
+    ['a no-break space in a class', under(rect('class="a&#160;b"'), '<style>.a{fill:#00f}</style>')],
+    ['an ideographic space in a class', under(rect('class="a&#12288;b"'), '<style>.a{fill:#00f}</style>')],
+    ['marker="none"', marked('marker="none"')],
+    ['style marker:none', marked('style="marker:none"')],
+    ['marker-mid="initial"', marked('marker-mid="initial"')],
+    ['path{marker:none} for print', marked('', '<style media="print">path{marker:none}</style>')]
+  ]
+  for (const [label, body] of cases) {
+    // one user of a one-element definition counts it (a marker at each of 3 vertices); 1,100 users of 1,000 are refused
+    assert.equal(cleanSvg(svgOf(body(1, 1), 'width="10" height="10"')).painted, label.includes('marker') ? 3 : 1, label)
+    const svg = svgOf(body(1000, 1100), 'width="10" height="10"')
+    underASecond(label, () => assert.throws(() => cleanSvg(svg), { message: TOO_SLOW }))
+  }
+  // vU2: style marker:none on a filtered path (kept as an svg layer) no longer hides the group's marker from the import
+  const vU2 = (k: number, v: number) =>
+    svgOf(`<defs>${marker(k)}<filter id="f"><feOffset/></filter></defs><g marker-mid="url(#m)"><path d="M0 0${R(v, 'L5 5')}L10 10" fill="none" stroke="black" filter="url(#f)" style="marker:none"/></g>`, 'width="10" height="10"')
+  const found: Layer[] = []
+  const find = (ls: Layer[]) => ls.forEach(l => (l.type === 'svg' ? found.push(l) : find(kids(l))))
+  find(kids(importSvg(vU2(1, 1), 'I').group))
+  const layer = found[0]
+  assert.ok(layer && layer.type === 'svg')
+  assert.doesNotMatch(layer.svg, / marker="/)
+  assert.match(layer.svg, / marker-start="none" marker-mid="none" marker-end="none"/)
+  assert.equal(cleanSvg(layer.svg).painted, 3)
+  underASecond('vU2 2,000 x 2,000', () => assert.throws(() => importSvg(vU2(2000, 2000), 'I'), { message: TOO_SLOW }))
+})
+
+test('style is kept only where a browser applies it: media, type, identifiers, ASCII class lists, marker longhands', () => {
+  const sheets = cleanSvg(svgOf('<style media="print">rect{fill:#00f}</style><style type="text/plain">rect{fill:#0f0}</style><style type="text/css">rect{fill:#f00}</style><rect width="1" height="1"/>'))
+  assert.match(sheets.svg, /><style>rect\{fill:#f00\}<\/style><rect width="1" height="1"\/><\/svg>$/)
+  assert.ok(sheets.removed.includes('a style sheet for some media only, or not of type text/css (2 times)'), JSON.stringify(sheets.removed))
+  // selectors: CSS identifiers only, and a list holding one that isn't is dropped whole, as a browser drops it
+  const sel = cleanSvg(svgOf('<style>.1a{fill:red}.1a, rect{fill:red}#-1{fill:red}._a, .--b, .a-1, #x2{fill:#00f}</style><rect width="1" height="1" class="_a"/>'))
+  assert.match(sel.svg, /<style>\._a, \.--b, \.a-1, #x2\{fill:#00f\}<\/style>/)
+  // classes split on ASCII white space only: a no-break space is part of the name
+  const fill = (cls: string) => kids(importSvg(svgOf(`<style>.a{fill:#00f}</style><rect width="1" height="1" class="${cls}"/>`), 'C').group)[0]?.fill
+  assert.deepEqual(fill('a b'), { type: 'color', color: '#0000ff' })
+  assert.deepEqual(fill('a&#9;b'), { type: 'color', color: '#0000ff' })
+  assert.deepEqual(fill('a&#160;b'), { type: 'color', color: '#000000' })
+  assert.deepEqual(fill('a&#12288;b'), { type: 'color', color: '#000000' })
+  // marker: the attribute goes (browsers ignore it); the style shorthand becomes its longhands, later ones still winning
+  const m = cleanSvg(svgOf('<marker id="m"/><path d="M0 0L1 1" marker="url(#m)" style="marker:url(#m);marker-end:none"/><style>path{marker:none}</style>'))
+  assert.match(m.svg, /<path d="M0 0L1 1" style="marker-start:url\(#m\);marker-mid:url\(#m\);marker-end:none"\/>/)
+  assert.match(m.svg, /<style>path\{marker-start:none;marker-mid:none;marker-end:none\}<\/style>/)
+  assert.ok(m.removed.includes('a marker attribute (browsers ignore it)'), JSON.stringify(m.removed))
+  for (const svg of [sheets.svg, sel.svg, m.svg]) assert.equal(cleanSvg(svg).svg, svg)
+})
+
+test('the style budget charges only what is written: quoted font families import again (vD)', () => {
+  // 45,000 Illustrator labels whose rule names quoted families, which are written without their quotes
+  const css = `.st0{fill:#231F20;}.st1{font-family:'MyriadPro-Regular', 'Myriad Pro', 'Helvetica Neue', Arial;}.st2{font-size:7px;}`
+  const labels = Array.from({ length: 45_000 }, (_, i) => `<text transform="matrix(1 0 0 1 ${i % 300} ${Math.floor(i / 300)})" class="st0 st1 st2">L${i}</text>`).join('')
+  const r = importSvg(svgOf(`<style type="text/css">${css}</style>${labels}`, 'viewBox="0 0 300 200"'), 'map')
+  assert.equal(kids(r.group).length, 45_000)
+  const first = kids(r.group)[0]
+  assert.ok(first.type === 'text')
+  assert.equal(first.runs[0].font.family, 'MyriadPro-Regular')
+})
+
+test('a drawing keeps one 128 MB budget over every part, caps names and instances, and never throws (vE, vE2)', async () => {
+  const d0 = newDesign('instagram')
+  const fonts = await fontsOf(d0)
+  const at = { x: 0, y: 0, width: 10, height: 10 }
+  const draw = (d: Design, mode: 'export' | 'raster', assets: Record<string, Uint8Array> = {}) => {
+    const downgrades: Downgrade[] = []
+    const out = designToSvg(d, d.artboards[0].id, { fonts, assets, mode, downgrades })
+    assert.ok(out.length <= MAX_RENDER_OUTPUT + 1_000_000, `${out.length} characters`)
+    return { out, downgrades, reasons: [...new Set(downgrades.map(g => g.reason))] }
+  }
+  const withComponent = (root: Layer, n: number): Design => {
+    const d = newDesign('instagram')
+    d.components = [{ id: 'C', name: 'C', root: { ...base, id: 'g', name: 'g', type: 'group', ...at, children: [root] } }]
+    for (let i = 0; i < n; i++) d.artboards[0].layers.push({ ...base, id: `i${i}`, name: `i${i}`, type: 'instance', ...at, component: 'C', overrides: {} })
+    return d
+  }
+  // a 10 MB photo in a component, 60 instances: about 9 fit, the rest are listed
+  const photo = new Uint8Array(10 * 1024 * 1024)
+  photo.set([0xff, 0xd8, 0xff])
+  for (const mode of ['export', 'raster'] as const) {
+    const r = draw(withComponent({ ...base, id: 'p', name: 'photo', type: 'image', ...at, asset: 'photo.jpg', fit: 'cover' }, 60), mode, { 'photo.jpg': photo })
+    assert.equal(r.out.split('<image ').length - 1, 9)
+    assert.deepEqual(r.reasons, [OVER_BUDGET])
+  }
+  // a 4.5 MB svg layer in a component, 120 instances: inlined in export, an image in raster
+  const fat = svgOf(`<rect width="1" height="1"/><title>${R(4_500_000, 'x')}</title>`, 'viewBox="0 0 10 10"')
+  for (const mode of ['export', 'raster'] as const) assert.deepEqual(draw(withComponent({ ...base, id: 's', name: 's', type: 'svg', ...at, svg: fat }, 120), mode).reasons, [OVER_BUDGET])
+  // names are written up to 1,000 characters: a 1 MB name of & on 60 instances, and one of 120 M on one layer
+  const named = (name: string): Layer => ({ ...base, id: 'r', name, type: 'rect', ...at, fill: { type: 'color', color: '#ff0000' } })
+  const many = draw(withComponent(named(R(1_000_000, '&')), 60), 'export')
+  assert.deepEqual(many.downgrades, [])
+  assert.ok(many.out.includes(`data-name="${R(1000, '&amp;')}"`))
+  assert.ok(many.out.length < 2_000_000)
+  const huge = newDesign('instagram')
+  huge.artboards[0].layers.push(named(R(120_000_000, '&')))
+  assert.ok(draw(huge, 'raster').out.length < 20_000)
+  // instances nested 10 wide and 7 deep (10 million): 10,000 are drawn, the rest listed
+  const comps = [{ id: 'C0', name: 'C0', root: { ...base, id: 'g0', name: 'g0', type: 'group' as const, ...at, children: [named('dot')] } }]
+  for (let k = 1; k <= 7; k++) {
+    comps.push({ id: `C${k}`, name: `C${k}`, root: { ...base, id: `g${k}`, name: `g${k}`, type: 'group', ...at, children: Array.from({ length: 10 }, (_, i): Layer => ({ ...base, id: `i${k}-${i}`, name: `i${k}-${i}`, type: 'instance', ...at, component: `C${k - 1}`, overrides: {} })) } })
+  }
+  const nested = newDesign('instagram')
+  nested.components = comps
+  nested.artboards[0].layers.push({ ...base, id: 'top', name: 'top', type: 'instance', ...at, component: 'C7', overrides: {} })
+  let deep = draw(nested, 'raster')
+  underASecond('10 million nested instances', () => (deep = draw(nested, 'raster')))
+  assert.deepEqual(deep.reasons, [TOO_MANY_INSTANCES])
+  assert.equal(deep.out.split('id="l-top-').length - 1 > 0, true)
+  // a refused svg layer in a component, 30 instances (vE2): cleaned once per drawing, not once per instance
+  const bomb = svgOf(`<defs><pattern id="p" width="10" height="10">${R(20_000, '<rect width="1" height="1" fill="red"/>')}</pattern></defs><g fill="url(#p)">${R(25_000, '<rect width="5" height="5" style="fill:x"/>')}</g>`, 'viewBox="0 0 10 10"')
+  let refused = draw(newDesign('instagram'), 'export')
+  underASecond('a refused svg layer drawn 30 times', () => (refused = draw(withComponent({ ...base, id: 's', name: 's', type: 'svg', ...at, svg: bomb }, 30), 'export')))
+  assert.deepEqual(refused.downgrades, [{ layer: 's', name: 's', reason: SVG_NOT_CONVERTED }])
+  // a layer that fails to draw is left out and listed, and the drawing goes on
+  const broken = newDesign('instagram')
+  broken.artboards[0].layers.push({ ...base, id: 't', name: 't', type: 'text', ...at, runs: null } as unknown as Layer, named('after'))
+  const b = draw(broken, 'raster')
+  assert.deepEqual(b.downgrades, [{ layer: 't', name: 't', reason: NOT_DRAWN }])
+  assert.match(b.out, /data-name="after"/)
 })

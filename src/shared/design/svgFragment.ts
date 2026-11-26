@@ -1,7 +1,7 @@
 import type { Box } from './geometry'
 import {
-  INKSCAPE_NS, MAX_RULE_DECLARATIONS, MAX_STYLE_STEPS, PRESENTATION, TOO_COMPLEX_STYLES, XLINK_NS, allElements, cleanSvgRoot, cleanValue,
-  escapedLength, serializeSvg, simpleSelector
+  INKSCAPE_NS, MAX_RULE_DECLARATIONS, MAX_STYLE_STEPS, PRESENTATION, TOO_COMPLEX_STYLES, XLINK_NS, allElements, classesOf, cleanSvgRoot,
+  cleanValue, escapedLength, serializeSvg, simpleSelector
 } from './svgClean'
 import { len } from './svgPaint'
 import { type Decl, cssBlocks, splitDeclarations } from './svgStyle'
@@ -133,15 +133,25 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
   const factsOf = (el: Element): Facts => {
     let f = facts.get(el)
     if (!f) {
-      f = { tag: el.localName, id: el.getAttribute('id'), classes: new Set((el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean)) }
+      f = { tag: el.localName, id: el.getAttribute('id'), classes: classesOf(el) }
       facts.set(el, f)
     }
     return f
   }
-  // Every candidate costs a check plus, if it matches, a pass over each of its declarations, and writing their values
-  // (a step per 16 characters as written, escapes and all, so the budget also bounds the markup a sheet writes to about
-  // 8 MB): count it all first, so a sheet that asks too much is refused before any work. (A declaration applies as at
-  // most four attributes: a font shorthand as its longhands.)
+  // a rule's declarations apply to every element it matches: each is checked once, as what would be written
+  const seenDecls = new Map<Decl, Decl[]>()
+  const checked = (d: Decl): Decl[] => {
+    let out = seenDecls.get(d)
+    if (!out) {
+      out = (d.prop === 'font' ? expandFont(d.value) : [d]).map(safeDecl).filter((x): x is Decl => x !== null)
+      seenDecls.set(d, out)
+    }
+    return out
+  }
+  // Every candidate costs a check plus, if it matches, a pass over each of its declarations, and writing what they
+  // write (a step per 16 characters of it, escaped as written; a declaration that won't be written, such as one with a
+  // quote, writes nothing), so the budget also bounds the markup a sheet writes to about 8 MB. It's all counted first,
+  // so a sheet that asks too much is refused before any work.
   if (indexed) {
     const costs = new Map<Rule[], number>()
     const cost = (list: Rule[] | undefined): number => {
@@ -151,7 +161,7 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
         c = 0
         for (const r of list) {
           let chars = 0
-          for (const d of r.decls) chars += d.prop.length + escapedLength(d.value)
+          for (const d of r.decls) for (const w of checked(d)) chars += w.prop.length + escapedLength(w.value)
           c += 1 + r.decls.length + Math.floor(chars / 16)
         }
         costs.set(list, c)
@@ -166,16 +176,6 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
       for (const c of f.classes) steps += cost(byClass.get(c))
       if (steps > MAX_STYLE_STEPS) throw new Error(TOO_COMPLEX_STYLES)
     }
-  }
-  // a rule's declarations apply to every element it matches: each is checked once
-  const seenDecls = new Map<Decl, Decl[]>()
-  const checked = (d: Decl): Decl[] => {
-    let out = seenDecls.get(d)
-    if (!out) {
-      out = (d.prop === 'font' ? expandFont(d.value) : [d]).map(safeDecl).filter((x): x is Decl => x !== null)
-      seenDecls.set(d, out)
-    }
-    return out
   }
   const matches = (sel: Selector, f: Facts): boolean =>
     (!sel.tag || sel.tag === f.tag) && sel.ids.every(i => i === f.id) && sel.classes.every(x => f.classes.has(x))
@@ -251,19 +251,28 @@ function prefixIds(root: Element, prefix: string): void {
  * from attributes, its style attribute and style rules alike (a nested svg clips its content by default, but a filter
  * or transform on it could paint outside). Empty when the fragment can't be read, asks too much (elements, painting
  * or style rules), or can't be written out (a RangeError for a string too long, say): it never throws, so an export
- * with such a layer still comes out, without it.
+ * with such a layer still comes out, without it. With `cache`, each fragment is cleaned once (or found refused once)
+ * however many times it's inlined, as instances of one component inline the same layer.
  */
-export function inlineSvg(svg: string, box: Box, prefix: string): string {
+export function inlineSvg(svg: string, box: Box, prefix: string, cache?: Map<string, Element | null>): string {
   try {
-    return inlined(svg, box, prefix)
+    return inlined(svg, box, prefix, cache)
   } catch {
+    cache?.set(svg, null)
     return ''
   }
 }
 
-function inlined(svg: string, box: Box, prefix: string): string {
-  const root = cleanSvgRoot(svg).root
-  applyStyles(root, () => undefined)
+function inlined(svg: string, box: Box, prefix: string, cache?: Map<string, Element | null>): string {
+  let clean = cache?.get(svg)
+  if (clean === null) return ''
+  if (!clean) {
+    clean = cleanSvgRoot(svg).root
+    applyStyles(clean, () => undefined)
+    cache?.set(svg, clean)
+  }
+  // the cached copy stays as cleaned; each use changes its own
+  const root = cache ? (clean.cloneNode(true) as Element) : clean
   let viewBox = root.getAttribute('viewBox')
   if (!viewBox) {
     // as an image, a fragment without a viewBox is stretched from its own size

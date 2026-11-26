@@ -1,6 +1,7 @@
 import type { FontSource } from './fonts'
 import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, midpoint, transformedBounds, union } from './geometry'
 import { artboardOf, walk } from './model'
+import { escapedLength } from './svgClean'
 import { inlineSvg } from './svgFragment'
 import { cleanText, layoutText, num as n, runSize, textPaths, textRuns } from './text'
 import type { Artboard, Design, Layer, Override, Paint, TextLayer } from './types'
@@ -12,8 +13,9 @@ export { connectorPath } from './geometry'
 // Raster mode draws text as glyph outlines and skips hidden layers. Export mode keeps text live (naming the family,
 // never embedding the font) unless outlines are asked for, and keeps hidden layers with display="none". An svg layer
 // is an image in raster mode (the window never inlines outside SVG) and its cleaned fragment inline in export mode.
+// One budget bounds what a drawing writes, so it never throws: past it, layers are left out and listed.
 
-/** A layer an export drew less faithfully than the editor shows it (an svg layer left out), and why, for the reply. */
+/** A layer a drawing left out, and why, for the reply. */
 export interface Downgrade { layer: string; name: string; reason: string }
 
 export interface RenderOptions {
@@ -22,37 +24,68 @@ export interface RenderOptions {
   mode: 'raster' | 'export'
   outlines?: boolean
   seconds?: number
-  /** Export mode adds a Downgrade here for each svg layer it leaves out. */
+  /** Each layer the drawing leaves out is added here once, with why. */
   downgrades?: Downgrade[]
 }
 
 /**
- * Most characters the svg layers of one export may add, inlined. Each fragment is bounded on its own, but enough of
- * them would add up past what one string can hold; once one doesn't fit, it and every later svg layer draw nothing.
+ * Most characters one drawing may write, over every part (shapes, text, images, names, instances and svg layers) in
+ * either mode. Once a layer doesn't fit, it and every layer after it draw nothing and are listed as downgrades, so no
+ * drawing builds a string past what one can hold.
  */
-export const MAX_SVG_OUTPUT = 64 * 1024 * 1024
+export const MAX_RENDER_OUTPUT = 128 * 1024 * 1024
+/** Most instances one drawing expands: components can hold instances, so a small design could ask for millions. */
+export const MAX_INSTANCES = 10_000
+/** Longest a layer name is written (as data-name and as inkscape:label). */
+export const MAX_NAME_OUTPUT = 1000
+export const OVER_BUDGET = 'This layer was left out: the drawing passed 128 MB.'
+export const TOO_MANY_INSTANCES = 'This instance was left out: the drawing passed 10,000 instances.'
+export const NOT_DRAWN = 'This layer could not be drawn, so it was left out.'
 export const SVG_NOT_CONVERTED = 'This SVG layer could not be converted for export, so it was left out.'
-export const SVG_OVER_BUDGET = 'The export reached 64 MB of SVG layers, so this one was left out.'
+/** Most stops a gradient is written with (an import never makes more). */
+const MAX_STOPS = 256
 
 interface Scope { prefix: string; overrides: Record<string, Override>; top: boolean; board: Artboard; comps: string[] }
 interface Ctx {
   design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string>
   /** svg layers inlined so far, which numbers each one's id prefix */
   svgs: number
-  /** characters the inlined svg layers have added, and whether one has found MAX_SVG_OUTPUT reached */
-  svgOutput: number
-  svgFull: boolean
+  /** characters written so far, and whether MAX_RENDER_OUTPUT has been reached (after which nothing more is drawn) */
+  used: number
+  full: boolean
+  /** instances expanded so far */
+  instances: number
+  /** svg layers cleaned for inlining, by their markup (null: it couldn't be), so each is cleaned once per drawing */
+  svgCache: Map<string, Element | null>
+  /** downgrades already listed, by layer and reason */
+  listed: Set<string>
 }
 
 const ENTITIES: Record<string, string> = {
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;', '\t': '&#9;', '\n': '&#10;', '\r': '&#13;',
   '\u0085': '&#133;', '\u2028': '&#8232;'
 }
+const ESCAPED = /[&<>"'\t\n\r\u0085\u2028]/g
+const PIECE = 1 << 20
 /**
  * Text or an attribute value made safe for XML. Tab, LF, CR, NEL and LINE SEPARATOR become references, so names read
  * back exactly (a parser turns them into spaces or line ends) and cleanSvg leaves the output byte for byte the same.
+ * A long value is escaped a megabyte at a time (never splitting a surrogate pair), so no one replace holds millions
+ * of matches.
  */
-export const esc = (s: unknown): string => cleanText(String(s ?? '')).replace(/[&<>"'\t\n\r\u0085\u2028]/g, c => ENTITIES[c])
+export const esc = (s: unknown): string => {
+  const t = String(s ?? '')
+  if (t.length <= PIECE) return cleanText(t).replace(ESCAPED, c => ENTITIES[c])
+  const out: string[] = []
+  for (let i = 0; i < t.length; ) {
+    let j = Math.min(t.length, i + PIECE)
+    const last = t.charCodeAt(j - 1)
+    if (j < t.length && last >= 0xd800 && last <= 0xdbff) j++
+    out.push(cleanText(t.slice(i, j)).replace(ESCAPED, c => ENTITIES[c]))
+    i = j
+  }
+  return out.join('')
+}
 const safeId = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_')
 const has = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k)
 
@@ -71,6 +104,51 @@ function nextId(ctx: Ctx, prefix: string, key: string): string {
   const count = (ctx.ids.get(k) ?? 0) + 1
   ctx.ids.set(k, count)
   return `${k}-${count}`
+}
+
+/** Takes `size` characters from the drawing's budget; false, and the budget reached for good, when they don't fit. */
+function spend(ctx: Ctx, size: number): boolean {
+  if (ctx.full || ctx.used + size > MAX_RENDER_OUTPUT) {
+    ctx.full = true
+    return false
+  }
+  ctx.used += size
+  return true
+}
+
+/** A definition the drawing needs (a gradient, filter or marker, a few KB at most): counted, never refused. */
+function addDef(ctx: Ctx, def: string): void {
+  ctx.defs.push(def)
+  ctx.used += def.length
+  if (ctx.used > MAX_RENDER_OUTPUT) ctx.full = true
+}
+
+/** Lists a layer as left out (once per layer and reason) and draws nothing for it. */
+function leftOut(ctx: Ctx, l: Layer, reason: string): string {
+  const id = String(l.id ?? '')
+  const key = `${id}\u0000${reason}`
+  if (!ctx.listed.has(key)) {
+    ctx.listed.add(key)
+    ctx.opts.downgrades?.push({ layer: id, name: cleanText(String(l.name ?? '').slice(0, MAX_NAME_OUTPUT)), reason })
+  }
+  return ''
+}
+
+/** How many characters base64 makes of `bytes` bytes. */
+const base64Size = (bytes: number): number => 4 * Math.ceil(bytes / 3)
+
+/**
+ * The least a layer's own drawing will write, read cheaply before it's built: an image's base64, path data and text
+ * as escaped. A layer whose least doesn't fit is left out before any of it is built.
+ */
+function leastSize(ctx: Ctx, l: Layer): number {
+  if ((l.type === 'image' || l.type === 'paint') && typeof l.asset === 'string' && has(ctx.opts.assets, l.asset)) {
+    return base64Size(ctx.opts.assets[l.asset]?.length ?? 0)
+  }
+  if (l.type === 'svg' && ctx.opts.mode === 'raster') return base64Size(String(l.svg ?? '').length)
+  if (l.type === 'path') return escapedLength(String(l.d ?? ''))
+  if (l.type === 'text') return (Array.isArray(l.runs) ? l.runs : []).reduce((a, r) => a + String(r?.text ?? '').length, 0)
+  return 0
 }
 
 const boxAttrs = (b: Box): string => `x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}"`
@@ -116,7 +194,7 @@ function gradient(ctx: Ctx, p: Extract<Paint, { stops: unknown }>, key: string, 
   const known = ctx.paints.get(sig)
   if (known) return known
   const id = nextId(ctx, 'g', key)
-  const stops = (Array.isArray(p.stops) ? p.stops : [])
+  const stops = (Array.isArray(p.stops) ? p.stops.slice(0, MAX_STOPS) : [])
     .map(s => {
       const c = color(s.color)
       const at = Math.min(1, Math.max(0, fin(s.offset, 0)))
@@ -131,13 +209,14 @@ function gradient(ctx: Ctx, p: Extract<Paint, { stops: unknown }>, key: string, 
     const dx = Math.cos(a)
     const dy = Math.sin(a)
     const half = (Math.abs(b.w * dx) + Math.abs(b.h * dy)) / 2
-    ctx.defs.push(
+    addDef(
+      ctx,
       `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${n(cx - dx * half)}" y1="${n(cy - dy * half)}" ` +
         `x2="${n(cx + dx * half)}" y2="${n(cy + dy * half)}">${stops}</linearGradient>`
     )
   } else {
     const r = Math.hypot(b.w, b.h) / 2
-    ctx.defs.push(`<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${n(cx)}" cy="${n(cy)}" r="${n(r)}">${stops}</radialGradient>`)
+    addDef(ctx, `<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${n(cx)}" cy="${n(cy)}" r="${n(r)}">${stops}</radialGradient>`)
   }
   ctx.paints.set(sig, id)
   return id
@@ -226,7 +305,7 @@ function filterFor(ctx: Ctx, l: Layer, key: string, extent: () => Box): string {
     input = 'm'
   }
   if (blur) body += `<feGaussianBlur in="${input}" stdDeviation="${n(blur)}"/>`
-  ctx.defs.push(`<filter id="${id}" ${region} color-interpolation-filters="sRGB">${body}</filter>`)
+  addDef(ctx, `<filter id="${id}" ${region} color-interpolation-filters="sRGB">${body}</filter>`)
   return id
 }
 
@@ -244,29 +323,47 @@ const offstage = (l: Layer, s: number | undefined): boolean =>
   s !== undefined && !!l.timing &&
   ((typeof l.timing.start === 'number' && s < l.timing.start) || (typeof l.timing.end === 'number' && s >= l.timing.end))
 
-/** The opening attributes every layer group carries: id, name and Inkscape label. */
-const layerAttrs = (key: string, name: unknown): string =>
-  `id="l-${key}" data-name="${esc(name)}" inkscape:label="${esc(name)}"`
+/** The opening attributes every layer group carries: id, name and Inkscape label (the name cut at 1,000 characters). */
+const layerAttrs = (key: string, name: unknown): string => {
+  const shown = esc(String(name ?? '').slice(0, MAX_NAME_OUTPUT))
+  return `id="l-${key}" data-name="${shown}" inkscape:label="${shown}"`
+}
 
+/**
+ * A layer's group and what it draws, within the drawing's budget: a layer that doesn't fit, or that fails to draw,
+ * draws nothing and is listed, and once the budget is reached every later layer is left out without being built.
+ */
 function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
-  const o = has(scope.overrides, src.id) ? scope.overrides[src.id] : undefined
-  const l = withOverride(src, o)
-  const hidden = !l.visible || offstage(l, ctx.opts.seconds)
-  if (hidden && ctx.opts.mode === 'raster') return ''
-  const key = safeId(scope.prefix + l.id)
-  let a = layerAttrs(key, l.name)
-  if (scope.top) a += ' inkscape:groupmode="layer"'
-  if (hidden) a += ' display="none"'
-  const opacity = Math.min(1, Math.max(0, fin(l.opacity, 1)))
-  if (opacity < 1) a += ` opacity="${n(opacity, 3)}"`
-  if (BLENDS.has(l.blend)) a += ` style="mix-blend-mode:${l.blend}"`
-  const tf = l.type === 'connector' ? '' : transformOf(l)
-  if (tf) a += ` transform="${tf}"`
-  const overrideText = typeof o?.text === 'string' ? o.text : undefined
-  const pts = l.type === 'connector' ? connectorPath(ctx.design, scope.board, l) : []
-  const fid = filterFor(ctx, l, key, () => extentOf(ctx, l, overrideText, pts))
-  if (fid) a += ` filter="url(#${fid})"`
-  return `<g ${a}>${content(ctx, l, key, scope, o, pts)}</g>`
+  if (ctx.full) return leftOut(ctx, src, OVER_BUDGET)
+  try {
+    const o = has(scope.overrides, src.id) ? scope.overrides[src.id] : undefined
+    const l = withOverride(src, o)
+    const hidden = !l.visible || offstage(l, ctx.opts.seconds)
+    if (hidden && ctx.opts.mode === 'raster') return ''
+    const key = safeId(scope.prefix + l.id)
+    let a = layerAttrs(key, l.name)
+    if (scope.top) a += ' inkscape:groupmode="layer"'
+    if (hidden) a += ' display="none"'
+    const opacity = Math.min(1, Math.max(0, fin(l.opacity, 1)))
+    if (opacity < 1) a += ` opacity="${n(opacity, 3)}"`
+    if (BLENDS.has(l.blend)) a += ` style="mix-blend-mode:${l.blend}"`
+    const tf = l.type === 'connector' ? '' : transformOf(l)
+    if (tf) a += ` transform="${tf}"`
+    const least = leastSize(ctx, l)
+    if (!spend(ctx, a.length + 8 + least)) return leftOut(ctx, src, OVER_BUDGET)
+    const overrideText = typeof o?.text === 'string' ? o.text : undefined
+    const pts = l.type === 'connector' ? connectorPath(ctx.design, scope.board, l) : []
+    const fid = filterFor(ctx, l, key, () => extentOf(ctx, l, overrideText, pts))
+    if (fid) a += ` filter="url(#${fid})"`
+    const inner = content(ctx, l, key, scope, o, pts)
+    // a group's or instance's layers paid for themselves; anything else pays for what it drew beyond its least
+    if (l.type !== 'group' && l.type !== 'instance' && !spend(ctx, Math.max(0, inner.length - least))) {
+      return leftOut(ctx, src, OVER_BUDGET)
+    }
+    return `<g ${a}>${inner}</g>`
+  } catch {
+    return leftOut(ctx, src, NOT_DRAWN)
+  }
 }
 
 function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | undefined, pts: Point[]): string {
@@ -285,9 +382,8 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
       // The window only ever draws outside SVG as an image; an export inlines it. Its ids are prefixed s1-, s2-, ...
       // by the order svg layers are drawn: the number ends at the dash, so no two prefixes can run into each other
       // (as layer ids a and a-b would), duplicate layer ids don't matter, and no id the renderer makes starts with s.
-      return ctx.opts.mode === 'export'
-        ? exportSvgLayer(ctx, l)
-        : imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
+      if (ctx.opts.mode === 'export') return exportSvgLayer(ctx, l)
+      return imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
     case 'group':
       return groupSvg(ctx, l, key, scope)
     case 'instance':
@@ -299,24 +395,12 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
 }
 
 /**
- * An svg layer's fragment inline, within MAX_SVG_OUTPUT for the whole export. One that can't be converted, or doesn't
- * fit, draws nothing and is listed in opts.downgrades; once one doesn't fit, no later one is tried.
+ * An svg layer's fragment inline. Each fragment is cleaned once per drawing (instances of a component share it), and
+ * one that can't be converted draws nothing and is listed.
  */
 function exportSvgLayer(ctx: Ctx, l: Layer & { type: 'svg' }): string {
-  const prefix = `s${++ctx.svgs}-`
-  const left = (reason: string): string => {
-    ctx.opts.downgrades?.push({ layer: String(l.id), name: String(l.name ?? ''), reason })
-    return ''
-  }
-  if (ctx.svgFull) return left(SVG_OVER_BUDGET)
-  const out = inlineSvg(String(l.svg ?? ''), boxOf(l), prefix)
-  if (!out) return left(SVG_NOT_CONVERTED)
-  if (ctx.svgOutput + out.length > MAX_SVG_OUTPUT) {
-    ctx.svgFull = true
-    return left(SVG_OVER_BUDGET)
-  }
-  ctx.svgOutput += out.length
-  return out
+  const out = inlineSvg(String(l.svg ?? ''), boxOf(l), `s${++ctx.svgs}-`, ctx.svgCache)
+  return out || leftOut(ctx, l, SVG_NOT_CONVERTED)
 }
 
 /** A rect, ellipse, line or path element; painted, or bare geometry for a clip path. */
@@ -411,6 +495,7 @@ function groupSvg(ctx: Ctx, g: Layer & { type: 'group' }, key: string, scope: Sc
     const id = nextId(ctx, 'c', key)
     const maskKey = safeId(scope.prefix + mask.id)
     const holder = `<g ${layerAttrs(maskKey, mask.name)}><clipPath id="${id}">${clipShape(ctx, mask, maskKey, scope)}</clipPath></g>`
+    if (!spend(ctx, holder.length)) return leftOut(ctx, g, OVER_BUDGET)
     return holder + `<g clip-path="url(#${id})">${kids.slice(1).map(k => renderLayer(ctx, k, inner)).join('')}</g>`
   }
   return kids.map(k => renderLayer(ctx, k, inner)).join('')
@@ -428,10 +513,14 @@ function clipShape(ctx: Ctx, l: Layer, key: string, scope: Scope): string {
   return `<rect ${boxAttrs(boxOf(l))}${t}/>`
 }
 
-/** The component's root mapped onto the instance box, with overrides by inner layer id. Unknown or cyclic: nothing. */
+/**
+ * The component's root mapped onto the instance box, with overrides by inner layer id. Unknown or cyclic: nothing.
+ * Past MAX_INSTANCES expanded in one drawing, an instance is left out and listed.
+ */
 function instanceSvg(ctx: Ctx, l: Layer & { type: 'instance' }, key: string, scope: Scope): string {
   const comp = (ctx.design.components ?? []).find(c => c.id === l.component)
   if (!comp?.root || scope.comps.includes(comp.id) || scope.comps.length >= MAX_NESTING) return ''
+  if (++ctx.instances > MAX_INSTANCES) return leftOut(ctx, l, TOO_MANY_INSTANCES)
   const r = boxOf(comp.root)
   const b = boxOf(l)
   const sx = r.w ? b.w / r.w : 1
@@ -451,7 +540,8 @@ function instanceSvg(ctx: Ctx, l: Layer & { type: 'instance' }, key: string, sco
 function marker(ctx: Ctx, key: string, hex: string, start: boolean): string {
   const id = nextId(ctx, 'm', key)
   const d = start ? 'M10 0L0 5L10 10Z' : 'M0 0L10 5L0 10Z'
-  ctx.defs.push(
+  addDef(
+    ctx,
     `<marker id="${id}" viewBox="0 0 10 10" refX="${start ? 0 : 10}" refY="5" markerWidth="4" markerHeight="4" ` +
       `markerUnits="strokeWidth" orient="auto"><path d="${d}" fill="${hex}"/></marker>`
   )
@@ -491,10 +581,13 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 }
 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
-  return { design, opts, defs: [], ids: new Map(), paints: new Map(), svgs: 0, svgOutput: 0, svgFull: false }
+  return {
+    design, opts, defs: [], ids: new Map(), paints: new Map(), svgs: 0, used: 0, full: false, instances: 0, svgCache: new Map(),
+    listed: new Set()
+  }
 }
 
-/** One artboard as a standalone SVG document. */
+/** One artboard as a standalone SVG document. Never throws for what a layer holds: see MAX_RENDER_OUTPUT. */
 export function designToSvg(design: Design, artboardId: string, opts: RenderOptions): string {
   const board = artboardOf(design, artboardId)
   const ctx = newCtx(design, opts)
