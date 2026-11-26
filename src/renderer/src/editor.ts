@@ -34,8 +34,8 @@ export interface EditorHandle {
    * and must call props.onChange(). Throw an Error with a helpful message for bad input. The shell handles 'save'.
    */
   agent(op: AgentOp, agent: AgentInfo): Promise<unknown>
-  /** HTML for Print and Export → PDF (doc and sheet). */
-  getPrintHtml?(): string
+  /** HTML for Print and export to PDF (doc and sheet). A design's waits for its fonts, and throws when it can't print. */
+  getPrintHtml?(): string | Promise<string>
   /** Plain-text access, used by plugin formatters, previews and commands. */
   getText?(): string
   setText?(text: string): void // one undoable change

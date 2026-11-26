@@ -7,7 +7,7 @@ import type { HistoryEventType, WriteContext } from '../core/history'
 import {
   HOME, PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
 } from '../core/paths'
-import { wrapHtml } from '../shared/convert'
+import { withPrintPolicy, wrapHtml } from '../shared/convert'
 import { describeOps } from '../shared/history/describe'
 import { type Kind, OPEN_FILTERS, extOf, kindOf, stem } from '../shared/kinds'
 import type { AgentInfo, AgentOp, FilePayload, OpenFile } from '../shared/types'
@@ -443,20 +443,23 @@ let forceQuit = false
 /** Renders HTML to PDF bytes in a hidden window (Export → PDF for documents, sheets and printing). */
 async function htmlToPdf(html: string, title: string): Promise<Uint8Array> {
   const w = new BrowserWindow({ show: false, webPreferences: { javascript: false, offscreen: true } })
-  const page = html.startsWith('<!doctype') ? html : wrapHtml(html, title)
+  // the page may load only what a data: URL page could (PRINT_POLICY), however it's loaded
+  const page = withPrintPolicy(html.startsWith('<!doctype') ? html : wrapHtml(html, title))
   const url = 'data:text/html;charset=utf-8,' + encodeURIComponent(page)
   // Chromium won't load a URL over 2 MB (a design with a picture, a document with big images): such a page is read
-  // from a file in temp instead.
-  const tmp = url.length > 2_000_000 ? path.join(os.tmpdir(), `gauzzadocs-print-${process.pid}-${Date.now()}.html`) : null
+  // from a file only this user can read, in a folder of its own in temp
+  let dir: string | null = null
   try {
-    if (tmp) {
-      await fs.promises.writeFile(tmp, page)
-      await w.loadFile(tmp)
+    if (url.length > 2_000_000) {
+      dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gauzzadocs-print-'))
+      const file = path.join(dir, 'page.html')
+      await fs.promises.writeFile(file, page, { mode: 0o600, flag: 'wx' })
+      await w.loadFile(file)
     } else await w.loadURL(url)
     return await w.webContents.printToPDF({ pageSize: 'Letter', printBackground: true, preferCSSPageSize: true }) // slides: @page sets 16:9
   } finally {
     w.destroy()
-    if (tmp) await fs.promises.rm(tmp, { force: true })
+    if (dir) await fs.promises.rm(dir, { recursive: true, force: true })
   }
 }
 

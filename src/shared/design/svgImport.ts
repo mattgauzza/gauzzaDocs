@@ -882,9 +882,9 @@ export function layerAsSvg(design: Design, layer: Layer, opts: RenderOptions): s
     return cleanSvg(serializeSvg(root)).svg
   }
   const move = b.x || b.y ? ` transform="translate(${num(-b.x, 3)} ${num(-b.y, 3)})"` : ''
-  const counts = { svg: 0 }
+  const counts = { svg: 0, layers: 0 }
   const doc =
     `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" xmlns:inkscape="${INKSCAPE_NS}" width="${W}" height="${H}" ` +
     `viewBox="0 0 ${W} ${H}"><g${move}>${layerToSvg(design, layer, { ...opts, mode: 'export', counts })}</g></svg>`
-  return cleanSvg(doc, exportLimits(counts.svg)).svg
+  return cleanSvg(doc, exportLimits(counts)).svg
 }

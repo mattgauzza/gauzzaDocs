@@ -30,9 +30,12 @@ export interface RenderOptions {
   downgrades?: Downgrade[]
   /** The size the document says it is (its width and height), when not the artboard's. The view box stays the artboard. */
   size?: { width: number; height: number }
-  /** Set to how many svg layers the drawing inlined (export mode), for the limits cleaning it allows (exportLimits). */
-  counts?: { svg: number }
+  /** Set to what the drawing holds, for the limits cleaning it allows (exportLimits). */
+  counts?: DrawCounts
 }
+
+/** What a drawing holds: svg layers inlined (export mode) and layers drawn (instances' inner layers included). */
+export interface DrawCounts { svg: number; layers: number }
 
 /**
  * Most characters one drawing may write, over every part (shapes, text, images, names, instances and svg layers) in
@@ -66,6 +69,8 @@ interface Ctx {
   paintLog: string[]
   /** svg layers inlined so far, which numbers each one's id prefix */
   svgs: number
+  /** layers drawn so far (an upper bound: one inside a layer left out later still counts) */
+  drawn: number
   /** characters written so far, and whether MAX_RENDER_OUTPUT has been reached (after which nothing more is drawn) */
   used: number
   full: boolean
@@ -561,6 +566,7 @@ function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
       if (inner.length < least) ctx.used -= least - inner.length
       else if (!spend(ctx, inner.length - least)) return out(OVER_BUDGET)
     }
+    ctx.drawn++
     return `<g ${a}>${inner}</g>`
   } catch (e) {
     return out(e instanceof OverBudget || e instanceof OutlinesTooLong ? OVER_BUDGET : NOT_DRAWN)
@@ -808,7 +814,7 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
   return {
-    design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, used: 0, full: false, instances: 0,
+    design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, drawn: 0, used: 0, full: false, instances: 0,
     svgCache: inlineCaches(), listed: new Set(), compEnds: new Map(), room: MAX_RENDER_OUTPUT, failed: new Map(),
     escLens: { d: new WeakMap(), glyphs: new WeakMap() }, glyphCosts: new WeakMap()
   }
@@ -843,7 +849,7 @@ export function designToSvg(design: Design, artboardId: string, opts: RenderOpti
   const bg = background(ctx, board, W, H)
   const scope: Scope = { prefix: '', overrides: [], top: true, ends: { layers: board.layers }, comps: [] }
   const body = board.layers.map(l => renderLayer(ctx, l, scope)).join('')
-  if (opts.counts) opts.counts.svg = ctx.svgs
+  if (opts.counts) Object.assign(opts.counts, { svg: ctx.svgs, layers: ctx.drawn })
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
     `xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" ${shown} viewBox="0 0 ${W} ${H}">` +
@@ -868,7 +874,7 @@ export function layerToSvg(design: Design, layer: Layer, opts: RenderOptions): s
   }
   const ctx = newCtx(design, opts)
   const out = renderLayer(ctx, layer, { prefix: '', overrides: [], top, ends: { layers: board.layers }, comps: [] })
-  if (opts.counts) opts.counts.svg = ctx.svgs
+  if (opts.counts) Object.assign(opts.counts, { svg: ctx.svgs, layers: ctx.drawn })
   if (!out || !ctx.defs.length) return out
   const at = out.indexOf('>') + 1
   return out.slice(0, at) + `<defs>${ctx.defs.join('')}</defs>` + out.slice(at)

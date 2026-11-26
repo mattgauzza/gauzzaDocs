@@ -132,6 +132,9 @@ test('export names: one file per artboard as <name> <artboard>.svg, --artboard p
   // --out a folder: the same names in it
   const into = fs.mkdtempSync(path.join(work, 'out-'))
   assert.deepEqual(ok(['design', 'export', file, '--out', into]).trim().split(/\r?\n/), both.map(b => path.join(into, path.basename(b))))
+  // an --out ending in a separator is a folder, made when it isn't there
+  const made = path.join(work, 'made-for-export')
+  assert.deepEqual(ok(['design', 'export', file, '--out', 'made-for-export/']).trim().split(/\r?\n/), both.map(b => path.join(made, path.basename(b))))
   // --out a file or "-" needs one artboard
   for (const out of ['one.svg', '-']) {
     const r = gdocs(['design', 'export', file, '--out', out])

@@ -3,9 +3,10 @@
 // unsaved changes are in it, and on disk otherwise. This module takes it from there: one artboard or each in turn, the
 // cleaning, the file names, what the format can't hold and the writing. SVG works anywhere; a PNG needs a window to
 // draw it in (the app's), which `rasterize` stands for.
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Downgrade } from '../../shared/design/render'
+import type { DrawCounts, Downgrade } from '../../shared/design/render'
 import { cleanSvg, exportLimits } from '../../shared/design/svgClean'
 import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../../shared/ops/design'
 import { list } from '../../shared/ops/designLayers'
@@ -29,7 +30,10 @@ export interface ExportOptions {
   scale?: number | string
   /** The width, keeping the shape: svg, the size it opens at; png, the pixels before scale. */
   width?: number | string
-  /** A file, a folder or "-" for the SVG back as `content`. Left out, files go beside the design. */
+  /**
+   * A file, a folder (one ending in a path separator is made if it isn't there) or "-" for the SVG back as `content`.
+   * Left out, files go beside the design.
+   */
   out?: string
 }
 
@@ -60,10 +64,11 @@ interface Drawn {
   artboard: { id: string; name: string }
   width: number
   height: number
-  artboards: { id: string; name: string }[]
-  svgLayers?: number
+  drawn?: DrawCounts
   leftOut?: Downgrade[]
 }
+/** What the `export` op gives with `plan`: the artboards to export, at their export sizes. */
+interface Plan { artboards: { id: string; name: string; width: number; height: number }[] }
 
 /**
  * A name made safe for a file name on any system: no characters Windows refuses (\ / : * ? " < > | and control
@@ -88,13 +93,35 @@ function svgNotes(svg: string): string[] {
 }
 
 /**
+ * Writes each file whole or not at all: every one goes to a new name beside its target first, and only once all of
+ * them are written are they renamed into place, so a failure leaves no file behind and an export already there as it
+ * was. `folder`, when given, is made first.
+ */
+async function writeAll(files: { to: string; data: string | Uint8Array }[], folder: string | null): Promise<void> {
+  if (folder) await fs.promises.mkdir(folder, { recursive: true })
+  const temps: string[] = []
+  try {
+    for (const f of files) {
+      const temp = path.join(path.dirname(f.to), `.${path.basename(f.to)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`)
+      temps.push(temp)
+      await fs.promises.writeFile(temp, f.data, { flag: 'wx' })
+    }
+    for (const [i, f] of files.entries()) await fs.promises.rename(temps[i], f.to)
+  } finally {
+    for (const t of temps) await fs.promises.rm(t, { force: true })
+  }
+}
+
+/**
  * Exports a design's artboards: the one `artboard` names, else every artboard. Files are named after the design, and
  * after the artboard when there are several or one was named: `<stem>.<ext>`, or `<stem> <artboard>.<ext>` (made safe
- * for a file name, by id when nothing is left of the name or two names come out the same). They go beside the design,
- * into `out` when it's a folder, or to `out` itself for one artboard; a file or "-" with several artboards is refused
- * before anything is drawn. Every SVG is cleaned before it's written, with room for the svg layers it inlines
- * (exportLimits). A PNG is drawn as the editor draws it, by `rasterize`. Returns the files, what the format can't hold
- * and the layers the drawing left out.
+ * for a file name, by id when nothing is left of the name or two names come out the same). They go beside the design
+ * unless `out` says where: into it when it's a folder (one ending in a path separator is made), else to it for one
+ * artboard; a file or "-" with several artboards is refused. Every artboard's size is checked before any is drawn (a
+ * PNG past its limits is refused) and every file is made before any is written. Then they're written whole
+ * (writeAll), so a refusal or failure writes nothing. Every SVG is cleaned, with room for what it draws (exportLimits). A PNG is drawn
+ * as the editor draws it, by `rasterize`. Returns the files, what the format can't hold and the layers the drawing left
+ * out.
  */
 export async function exportDesign(file: string, o: ExportOptions, deps: ExportDeps): Promise<ExportResult> {
   const p = path.resolve(file)
@@ -102,18 +129,11 @@ export async function exportDesign(file: string, o: ExportOptions, deps: ExportD
   if (format !== 'svg' && format !== 'png') throw new Error('The format must be svg or png.')
   if (format === 'png' && !deps.rasterize) throw new Error(RENDER_NEEDS_APP)
   if (format === 'png' && o.out === '-') throw new Error(PNG_TO_STDOUT)
-  const folder = o.out !== undefined && o.out !== '-' && isFolder(o.out)
-  const oneFile = o.artboard === undefined && o.out !== undefined && !folder
-  if (oneFile) {
-    const { artboards } = (await deps.run({ op: 'info' })) as { artboards: number }
-    if (artboards > 1) throw new Error(several(artboards))
-  }
-  const draw = async (artboard: string | undefined): Promise<Drawn> =>
-    (await deps.run({ op: 'export', format, artboard, width: o.width, scale: format === 'png' ? o.scale : undefined })) as Drawn
-  const first = await draw(o.artboard)
-  const boards = o.artboard === undefined ? first.artboards : [first.artboard]
-  // the design may have changed since info (an edit in the app)
-  if (oneFile && boards.length > 1) throw new Error(several(boards.length))
+  const toFolder = o.out !== undefined && o.out !== '-' && (/[\\/]$/.test(o.out) || isFolder(o.out))
+  const given = { format, width: o.width, scale: format === 'png' ? o.scale : undefined }
+  // every artboard and its size, each checked, before anything is drawn
+  const { artboards: boards } = (await deps.run({ op: 'export', ...given, artboard: o.artboard, plan: true })) as Plan
+  if (o.artboard === undefined && o.out !== undefined && !toFolder && boards.length > 1) throw new Error(several(boards.length))
 
   const stem = path.basename(p, path.extname(p))
   const used = new Set<string>()
@@ -128,29 +148,31 @@ export async function exportDesign(file: string, o: ExportOptions, deps: ExportD
   const target = (a: { id: string; name: string }): string => {
     const name = `${nameOf(a)}.${format}`
     if (o.out === undefined) return path.join(path.dirname(p), name)
-    return folder ? path.join(path.resolve(o.out), name) : path.resolve(o.out)
+    return toFolder ? path.join(path.resolve(o.out!), name) : path.resolve(o.out!)
   }
 
   const out: ExportResult = { files: [], downgrades: [], leftOut: [] }
   const notes = new Set<string>()
+  const made: { to: string; data: string | Uint8Array }[] = []
   for (const a of boards) {
-    const r = a.id === first.artboard.id ? first : await draw(a.id)
+    const r = (await deps.run({ op: 'export', ...given, artboard: a.id })) as Drawn
     for (const l of r.leftOut ?? []) out.leftOut.push({ artboard: r.artboard.name, ...l })
     let data: string | Uint8Array
     if (format === 'svg') {
-      const clean = cleanSvg(r.svg, exportLimits(r.svgLayers ?? 0))
+      const clean = cleanSvg(r.svg, exportLimits(r.drawn ?? { svg: 0, layers: 0 }))
       for (const n of svgNotes(clean.svg)) notes.add(n)
       if (clean.removed.length) notes.add(`Cleaning removed ${list(clean.removed)}.`)
       data = clean.svg
-    } else data = await deps.rasterize!(r.svg, r.width, r.height)
-    if (o.out === '-') {
-      out.content = data as string
-      break
+    } else {
+      // not cleaned: the window draws it as an image, which runs no script and fetches nothing, and its svg layers
+      // (drawn as data URI images, which cleaning would drop) were cleaned on import and again on read
+      data = await deps.rasterize!(r.svg, r.width, r.height)
     }
-    const to = target(r.artboard)
-    await fs.promises.writeFile(to, data)
-    out.files.push(to)
+    if (o.out === '-') out.content = data as string
+    else made.push({ to: target(r.artboard), data })
   }
+  await writeAll(made, toFolder ? path.resolve(o.out!) : null)
+  out.files = made.map(m => m.to)
   out.downgrades = [...notes]
   return out
 }

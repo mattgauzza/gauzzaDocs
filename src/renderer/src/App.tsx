@@ -857,15 +857,19 @@ export default function App() {
   const print = async (t: Tab) => {
     const hh = handles.current.get(t.id)
     if (t.kind === 'pdf') return api.reveal(t.path)
-    const html = hh?.getPrintHtml?.() ?? `<pre style="font: 10pt Consolas, monospace; white-space: pre-wrap">${(hh?.getText?.() || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</pre>`
-    say('Preparing to print…')
-    await api.print(html, stem(t.path))
+    try {
+      const html = (await hh?.getPrintHtml?.()) ?? `<pre style="font: 10pt Consolas, monospace; white-space: pre-wrap">${(hh?.getText?.() || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</pre>`
+      say('Preparing to print...')
+      await api.print(html, stem(t.path))
+    } catch (e) {
+      say(`Could not print ${baseName(t.path)}: ${errorText(e)}`)
+    }
   }
   const exportAs = async (t: Tab, format: string) => {
     const hh = handles.current.get(t.id)
     if (!hh) return
     const payload = await (hh.peekPayload ?? hh.getPayload)()
-    const out = await api.exportFile(t.path, payload, format, hh.getPrintHtml?.())
+    const out = await api.exportFile(t.path, payload, format, format === 'pdf' ? await hh.getPrintHtml?.() : undefined)
     if (out) say(`Saved ${baseName(out)}`)
   }
 

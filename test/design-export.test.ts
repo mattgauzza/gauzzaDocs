@@ -199,6 +199,89 @@ test('every svg export is cleaned, with room for each svg layer: two legal 30,00
   assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`)
 })
 
+/** Every file in a folder, with its bytes. */
+const snapshot = (dir: string): Record<string, string> =>
+  Object.fromEntries(fs.readdirSync(dir).map(f => [f, fs.readFileSync(path.join(dir, f)).toString('base64')]))
+
+test('a refused or failed export writes nothing and leaves an export already there as it was', async () => {
+  const two = await build(
+    { design: newDesign('1000x1000'), assets: {} },
+    { op: 'artboard', action: 'rename', name: 'A' },
+    { op: 'artboard', action: 'add', name: 'B', size: '100x8192' }
+  )
+  const out = folder()
+  const p = path.join(out, 'X.gdesign')
+  fs.writeFileSync(path.join(out, 'X A.png'), 'the export from before')
+  fs.writeFileSync(path.join(out, 'X A.svg'), 'the export from before')
+  const before = snapshot(out)
+  // the second artboard past the PNG limit: refused before anything is drawn
+  let drawn = 0
+  const png = { rasterize: async () => (drawn++, new Uint8Array(4)) }
+  await assert.rejects(exportDesign(p, { format: 'png', width: 1000 }, await inMemory(two, png)), /16,384 px per side.*1,000 x 81,920/)
+  assert.equal(drawn, 0)
+  assert.deepEqual(snapshot(out), before)
+  // the second artboard's drawing fails, after the first was made
+  const failing = await inMemory(two, { rasterize: async (_svg, w) => (w === 100 ? Promise.reject(new Error('no memory')) : new Uint8Array(4)) })
+  await assert.rejects(exportDesign(p, { format: 'png' }, failing), /no memory/)
+  assert.deepEqual(snapshot(out), before)
+  // the second artboard's SVG can't be cleaned
+  const deps = await inMemory(two)
+  const run = deps.run
+  deps.run = async op => {
+    const r = (await run(op)) as Record<string, unknown>
+    return op.artboard === two.design.artboards[1].id && !op.plan ? { ...r, svg: '<html>not svg</html>' } : r
+  }
+  await assert.rejects(exportDesign(p, { format: 'svg' }, deps), /not an SVG/)
+  assert.deepEqual(snapshot(out), before)
+  // and one that works replaces the old file whole, leaving nothing else behind
+  const r = await exportDesign(p, { format: 'svg' }, await inMemory(two))
+  assert.deepEqual(r.files, [path.join(out, 'X A.svg'), path.join(out, 'X B.svg')])
+  assert.deepEqual(fs.readdirSync(out).sort(), ['X A.png', 'X A.svg', 'X B.svg'])
+  assert.match(fs.readFileSync(path.join(out, 'X A.svg'), 'utf8'), /^<svg /)
+})
+
+test('--out ending in a path separator is a folder, made when it is not there', async () => {
+  const two = await build({ design: newDesign('logo'), assets: {} }, { op: 'artboard', action: 'add', name: 'Back', size: '400x300' })
+  const base = folder()
+  const into = path.join(base, 'made', 'here') + path.sep
+  const r = await exportDesign(path.join(base, 'Card.gdesign'), { format: 'svg', out: into }, await inMemory(two))
+  assert.deepEqual(r.files, [path.join(base, 'made', 'here', 'Card Logo.svg'), path.join(base, 'made', 'here', 'Card Back.svg')])
+  const one = path.join(base, 'solo') + '/'
+  const s = await exportDesign(path.join(base, 'Solo.gdesign'), { format: 'svg', out: one }, await inMemory({ design: newDesign('logo'), assets: {} }))
+  assert.deepEqual(s.files, [path.join(base, 'solo', 'Solo.svg')])
+})
+
+test('every layer drawn gets room in the clean: 30,000 plain layers export, and svg --get of their group works', async () => {
+  const design = newDesign('1000x1000')
+  const children: Layer[] = Array.from({ length: 30_000 }, (_, i) => ({
+    ...base, id: `r${i}`, name: `Dot ${i}`, type: 'rect', x: i % 1000, y: Math.floor(i / 1000) * 10, width: 1, height: 1,
+    fill: { type: 'color', color: '#123456' }
+  }))
+  design.artboards[0].layers.push({ ...base, id: 'many', name: 'Many', type: 'group', x: 0, y: 0, width: 1000, height: 300, children })
+  const file: DesignFile = { design, assets: {} }
+  const fonts = await fontsOf(design)
+  const raw = designToSvg(design, design.artboards[0].id, { fonts, assets: {}, mode: 'export' })
+  assert.ok(elements(raw) > 60_000)
+  assert.throws(() => cleanSvg(raw), /too many elements \(over 50,000\)/, 'the outside limits alone would refuse it')
+  const t0 = Date.now()
+  const r = await exportDesign(path.join(folder(), 'Dots.gdesign'), { format: 'svg' }, await inMemory(file))
+  assert.ok(elements(fs.readFileSync(r.files[0], 'utf8')) > 60_000)
+  const got = (await applyDesignOp(file, { op: 'svg', get: 'Many' }, { fonts })).result as { svg: string }
+  assert.ok(elements(got.svg) > 60_000)
+  const whole = (await applyDesignOp(file, { op: 'svg', get: true }, { fonts })).result as { svg: string }
+  assert.ok(elements(whole.svg) > 60_000)
+  assert.ok(Date.now() - t0 < 15_000, `took ${Date.now() - t0} ms`)
+})
+
+test('raster mode, which PNG draws without cleaning, holds an svg layer only as a data URI image', async () => {
+  const design = newDesign('logo')
+  design.artboards[0].layers.push(svgLayerOf('mark', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle id="only-inside" r="4"/></svg>'))
+  const svg = designToSvg(design, design.artboards[0].id, { fonts: await fontsOf(design), assets: {}, mode: 'raster' })
+  assert.match(svg, /<image [^>]*xlink:href="data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+"\/>/)
+  assert.doesNotMatch(svg, /only-inside|<circle/)
+  assert.equal((svg.match(/<svg[\s>]/g) ?? []).length, 1, 'no inline svg but the root')
+})
+
 test('layers the drawing left out come back with the artboard they were on', async () => {
   const design = newDesign('logo')
   design.artboards[0].layers.push(svgLayerOf('bad', 'this is not svg'))
@@ -304,6 +387,15 @@ test('the thumbnail is 512 px on its long side', async () => {
   assert.deepEqual(thumbnailSize(1080, 1920), { width: 288, height: 512 })
   assert.deepEqual(thumbnailSize(1600, 900), { width: 512, height: 288 })
   assert.deepEqual(thumbnailSize(8192, 1), { width: 512, height: 1 })
+})
+
+test('a printed page may load only what a data URL page could: data and blob images, inline styles, data fonts', async () => {
+  const { PRINT_POLICY, withPrintPolicy } = await import('../src/shared/convert')
+  assert.equal(PRINT_POLICY, "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:")
+  const page = withPrintPolicy('<!doctype html><html><head><meta charset="utf-8"><title>T</title></head><body><img src="file:///C:/secret.png"></body></html>')
+  assert.ok(page.startsWith(`<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${PRINT_POLICY}"><meta charset="utf-8">`))
+  assert.ok(withPrintPolicy('<HTML><HEAD lang="en"><title>T</title></HEAD></HTML>').includes(`<HEAD lang="en"><meta http-equiv`))
+  assert.ok(withPrintPolicy('<p>No head</p>').startsWith('<meta http-equiv="Content-Security-Policy"'))
 })
 
 test('print puts each artboard on its own page, drawn in raster mode and scaled to fit', async () => {

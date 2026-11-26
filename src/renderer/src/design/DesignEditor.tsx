@@ -419,13 +419,22 @@ export default function DesignEditor(props: EditorProps) {
     })
     return { boards, downgrades }
   }, [file, fonts])
-  // The first fit, once there is something to fit and a canvas to fit it in.
+  // The first fit, once there is something to fit and a canvas with a size to fit it in. A tab opened behind another
+  // has none yet (it isn't shown): it fits when it first gets one.
   useLayoutEffect(() => {
     if (zoom !== null || !drawn || !scroller.current) return
     const el = scroller.current
-    const z = fitZoom(fileRef.current.design, el.clientWidth, el.clientHeight)
-    zoomRef.current = z
-    setZoomState(z)
+    const fitted = (): boolean => {
+      if (!el.clientWidth || !el.clientHeight) return false
+      const z = fitZoom(fileRef.current.design, el.clientWidth, el.clientHeight)
+      zoomRef.current = z
+      setZoomState(z)
+      return true
+    }
+    if (fitted()) return
+    const watch = new ResizeObserver(() => fitted() && watch.disconnect())
+    watch.observe(el)
+    return () => watch.disconnect()
   }, [drawn, zoom])
 
   // ---------- status bar (cached; the shell polls it) ----------
@@ -489,10 +498,14 @@ export default function DesignEditor(props: EditorProps) {
     const size = thumbnailSize(a.width, a.height)
     return rasterize(designToSvg(f.design, a.id, { fonts, assets: f.assets, mode: 'raster', size }), size.width, size.height)
   }
-  /** Each artboard on its own page, drawn as the canvas draws it and scaled to fit (File > Print). */
-  const printHtml = (): string => {
+  /**
+   * Each artboard on its own page, drawn as the canvas draws it and scaled to fit (File > Print). It waits for the
+   * design's fonts, and refuses (the shell says why) rather than print a design it can't draw.
+   */
+  const printHtml = async (): Promise<string> => {
+    if (!fontsRef.current) await firstFonts.current
     const fonts = fontsRef.current?.source
-    if (!fonts) return '<p>This design is still loading. Try printing again in a moment.</p>'
+    if (!fonts) throw new Error(failedRef.current || 'This design is still loading. Try again in a moment.')
     const f = fileRef.current
     return designPrintHtml(f.design, { fonts, assets: f.assets }, stem(propsRef.current.path))
   }

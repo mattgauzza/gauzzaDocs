@@ -364,8 +364,8 @@ export function registerDesignCommands(program: Command, ctx: Ctx) {
         .option('--width <px>', 'width, keeping the shape (svg: the size it opens at; png: the pixels before --scale)')
         .option(
           '--out <path>',
-          'a file, a folder or "-" to print the SVG (default: beside the design as <name>.<ext>, or <name> <artboard>.<ext> ' +
-            'for each of several artboards or with --artboard)'
+          'a file, a folder (one ending in / is made) or "-" to print the SVG (default: beside the design as <name>.<ext>, ' +
+            'or <name> <artboard>.<ext> for each of several artboards or with --artboard)'
         )
     )
   ).action(async (file: string, o) => {
@@ -373,7 +373,9 @@ export function registerDesignCommands(program: Command, ctx: Ctx) {
     if (format !== 'svg' && format !== 'png') throw new Error('--format must be svg or png')
     const p = path.resolve(design(file))
     if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
-    const opts: ExportOptions = { format, artboard: o.artboard, width: o.width, out: o.out === undefined || o.out === '-' ? o.out : path.resolve(o.out) }
+    // an --out ending in a path separator is a folder (made if it isn't there): resolving would drop the separator
+    const out = o.out === undefined || o.out === '-' ? o.out : path.resolve(o.out) + (/[\\/]$/.test(o.out) ? path.sep : '')
+    const opts: ExportOptions = { format, artboard: o.artboard, width: o.width, out }
     let r: ExportResult
     if (format === 'svg') r = await exportDesign(p, opts, { run: op => ctx.run(p, op, o) })
     else {
