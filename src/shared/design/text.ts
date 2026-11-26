@@ -259,13 +259,11 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
   return { lines, height, overflow: wrap && height > box.h + EPS }
 }
 
-/** What one character's glyph outlines came to in all (`sum`) over the `n` times it was drawn. */
-interface Seen { sum: number; n: number }
 /**
- * What each character's glyph outline came to where it was drawn, by font, then by scale, then by code point. A
+ * The most each character's glyph outline came to wherever it was drawn, by font, then by scale, then by code point. A
  * drawing fills it in as it builds outlines, so a text like one already drawn is costed from it.
  */
-export type GlyphCosts = WeakMap<object, Map<number, Map<number, Seen>>>
+export type GlyphCosts = WeakMap<object, Map<number, Map<number, number>>>
 
 /** Characters of outline a caller still allows; building past it throws OutlinesTooLong. */
 export interface OutlineBudget {
@@ -275,14 +273,8 @@ export interface OutlineBudget {
 }
 export class OutlinesTooLong extends Error {}
 
-/**
- * The share of a glyph's average cost counted for it elsewhere: the digits of its coordinates change with where it's
- * drawn, so a glyph nearer the origin writes a little less.
- */
-const SEEN_SHARE = 0.9
-
 /** The costs recorded for one font at one scale, made when `make` is set. */
-function costsFor(costs: GlyphCosts | undefined, font: any, k: number, make: boolean): Map<number, Seen> | undefined {
+function costsFor(costs: GlyphCosts | undefined, font: any, k: number, make: boolean): Map<number, number> | undefined {
   if (!costs || !font || typeof font !== 'object') return undefined
   let byScale = costs.get(font)
   if (!byScale) {
@@ -295,8 +287,11 @@ function costsFor(costs: GlyphCosts | undefined, font: any, k: number, make: boo
 }
 
 /**
- * About how many characters `text` in `run` writes as outlines: each visible character at nine tenths of what its
- * glyph came to on average before in this drawing (from `costs`), or `perGlyph` when it hasn't been drawn yet.
+ * About how many characters `text` in `run` writes as outlines: each visible character at the most its glyph has come
+ * to anywhere in this drawing for the same font at the same scale (from `costs`), or `perGlyph` when it hasn't been
+ * drawn yet. A character seen before is never counted for less than it was seen to cost, so a text like one that
+ * didn't fit is left out before any of it is built. (A glyph's coordinates write more digits further from the origin,
+ * so a text drawn further out than any glyph before it can still come to a little more.)
  */
 export function outlineEstimate(fonts: FontSource, run: TextRun, text: string, perGlyph: number, costs?: GlyphCosts): number {
   const font = fonts.get(run.font).font
@@ -312,8 +307,7 @@ export function outlineEstimate(fonts: FontSource, run: TextRun, text: string, p
         i++
       }
     }
-    const known = seen?.get(c)
-    total += known === undefined ? perGlyph : Math.floor((known.sum / known.n) * SEEN_SHARE)
+    total += seen?.get(c) ?? perGlyph
   }
   return total
 }
@@ -349,14 +343,12 @@ export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: numb
       else if (c.command === 'closePath') out.push('Z')
     }
     if (seen && budget) {
-      // one character's glyph (not a ligature): what it came to here
+      // one character's glyph (not a ligature): the most it has come to anywhere
       const codes = glyphs[i]?.codePoints
       if (Array.isArray(codes) && codes.length === 1 && typeof codes[0] === 'number') {
-        const was = seen.get(codes[0])
-        if (was) {
-          was.sum += start - budget.left
-          was.n++
-        } else seen.set(codes[0], { sum: start - budget.left, n: 1 })
+        const cost = start - budget.left
+        const most = seen.get(codes[0])
+        if (most === undefined || cost > most) seen.set(codes[0], cost)
       }
     }
     pen += advance(glyphs[i], p) * k + spacing

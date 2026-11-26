@@ -1346,14 +1346,41 @@ const ESC: Record<string, string> = {
   '\u0085': '&#133;', '\u2028': '&#8232;'
 }
 const escAttr = (s: string): string => cleanText(s).replace(/[&<>"'\t\n\r\u0085\u2028]/g, c => ESC[c])
+/** What escaping adds for each character code up to LINE SEPARATOR (the highest ESC escapes). */
+const ESC_EXTRA = new Uint8Array(0x2029)
+for (const [c, e] of Object.entries(ESC)) ESC_EXTRA[c.charCodeAt(0)] = e.length - 1
+/** Any character ESC escapes (made from its keys, none of which means anything inside [ ]). */
+const ESCAPES = new RegExp(`[${Object.keys(ESC).join('')}]`)
 /** How many characters a value takes once escaped as an attribute (& is 5, a quote 6), so a charge counts what's written. */
 export function escapedLength(s: string): number {
+  // most long values (path data) hold nothing to escape: one native scan says so
+  if (!ESCAPES.test(s)) return s.length
   let n = s.length
   for (let i = 0; i < s.length; i++) {
-    const e = ESC[s[i]]
-    if (e) n += e.length - 1
+    const c = s.charCodeAt(i)
+    if (c <= 0x2028) n += ESC_EXTRA[c]
   }
   return n
+}
+
+/**
+ * A key a Map can find a long string by. V8 hashes a string over 16,383 characters by its length alone, so long
+ * strings of one length used as keys would all share one bucket, and every lookup would compare against all of them.
+ * A string up to 1,024 characters is its own key; a longer one is keyed by its length and two 32-bit hashes of it.
+ * Two different strings can share a key (a long one with another, or with a short one that reads like its key), so
+ * whatever is found by one must be checked against the string itself.
+ */
+export function shortKey(s: string): string {
+  if (s.length <= 1024) return s
+  let a = 0x811c9dc5
+  let b = s.length
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    a = Math.imul(a ^ c, 0x01000193)
+    b = Math.imul(b ^ c, 0x5bd1e995)
+    b ^= b >>> 15
+  }
+  return `#${s.length}:${(a >>> 0).toString(36)}:${(b >>> 0).toString(36)}`
 }
 const escText = (s: string): string => cleanText(s).replace(/[&<>"'\t\r\u0085\u2028]/g, c => ESC[c])
 const PREFIX: Record<string, string> = { [XLINK_NS]: 'xlink:', [INKSCAPE_NS]: 'inkscape:', [XML_NS]: 'xml:' }

@@ -55,14 +55,43 @@ export const TOO_LARGE_REPAIRED = 'This design is too large to open (over 64 MB 
 /** How deep, and how much in all, the values of fields this release doesn't know may be; past it they're dropped. */
 export const MAX_UNKNOWN_DEPTH = 32
 export const MAX_UNKNOWN_BYTES = 8 * 1024 * 1024
-/** Most SVG markup the svg layers of one design may hold; layers past it are dropped. */
+/**
+ * Most SVG markup the svg layers of one design may hold; reading drops layers past it, so the ops refuse to go past it
+ * (SVG_LAYERS_FULL) and saving refuses a design past it, and a saved design never loses a layer when it's opened.
+ */
 export const MAX_SVG_MARKUP = 16 * 1024 * 1024
+export const SVG_LAYERS_FULL = 'This design already holds 16 MB of SVG layers.'
+
+/** The SVG markup some layers hold, with everything inside their groups, counted as reading counts it. */
+export function svgMarkupIn(layers: readonly unknown[]): number {
+  let total = 0
+  const stack = layers.slice()
+  while (stack.length) {
+    const l = stack.pop()
+    if (!isObj(l)) continue
+    if (l.type === 'svg' && typeof l.svg === 'string') total += l.svg.length
+    else if (l.type === 'group' && Array.isArray(l.children)) for (const c of l.children) stack.push(c)
+  }
+  return total
+}
+
+/** The SVG markup a design's svg layers hold between them, on every artboard and in every component. */
+export function svgMarkupOf(design: Design): number {
+  let total = 0
+  for (const a of Array.isArray(design.artboards) ? design.artboards : []) if (Array.isArray(a?.layers)) total += svgMarkupIn(a.layers)
+  for (const c of Array.isArray(design.components) ? design.components : []) if (c?.root) total += svgMarkupIn([c.root])
+  return total
+}
 /** Most different notes kept; past it they're counted as "and N more". */
 const MAX_NOTES = 200
 
 const keys = (s: string): Set<string> => new Set(s.split(' '))
 const BASE_KEYS = 'id name type visible locked opacity blend x y width height rotation scaleX scaleY fill stroke strokeWidth dash radius shadow blur timing'
-/** The fields this release reads, by kind of object. Anything else is kept as it is, within the unknown bounds. */
+/**
+ * The fields this release checks, by kind of object: each is checked for its type (and bounded) wherever an object of
+ * that kind is read. A field the kind doesn't list, including one another kind uses (a color paint's `stops`, a text
+ * style's run `text`), is kept as it is within the unknown bounds, since nothing here checks it.
+ */
 const KNOWN: Record<string, Set<string>> = {
   design: keys('format id artboards components styles kit thumbnailStale'),
   artboard: keys('id name width height background layers animation diagrams'),
@@ -76,8 +105,13 @@ const KNOWN: Record<string, Set<string>> = {
   connector: keys(`${BASE_KEYS} from to label route arrow points`),
   svg: keys(`${BASE_KEYS} svg`),
   run: keys('text font size color letterSpacing lineHeight'),
+  // a text style's run has no text of its own
+  styleRun: keys('font size color letterSpacing lineHeight'),
   font: keys('family weight style postscript asset'),
-  paintValue: keys('type color ref stops angle'),
+  // each kind of paint checks only its own fields
+  colorPaint: keys('type color'),
+  stylePaint: keys('type ref'),
+  gradient: keys('type stops angle'),
   stop: keys('offset color'),
   override: keys('text fill stroke visible asset'),
   end: keys('layer side'),
@@ -87,6 +121,7 @@ const KNOWN: Record<string, Set<string>> = {
   animation: keys('duration fps loop'),
   // direction, spacing and nodeComponent aren't read here: they're kept like unknown fields, within the same bounds
   diagram: keys('name nodes links containers'),
+  // a part's layer is checked only when it's text (a reference to follow); otherwise it's kept like an unknown field
   diagramPart: keys('layer'),
   styles: keys('colors text'),
   colorStyle: keys('name color'),
@@ -98,8 +133,9 @@ const NONE = new Set<string>()
 /**
  * A copy of what the file holds for an object of kind `kind`, so the checked fields can be set over it. Fields this
  * release doesn't know are kept as they are (a later release may have written them), as long as each is at most 32
- * levels deep and they come to at most 8 MB in the whole design; past that they're dropped with a note. A `__proto__`
- * key is never kept: it's never data.
+ * levels deep and they come to at most 8 MB in the whole design; past that they're dropped with a note. A kind KNOWN
+ * doesn't list ('unchecked') checks nothing, so every field of it goes through those bounds. A `__proto__` key is never
+ * kept: it's never data.
  */
 function kept(o: Obj, kind: string, r: Reader): Obj {
   const known = Object.prototype.hasOwnProperty.call(KNOWN, kind) ? KNOWN[kind] : NONE
@@ -157,34 +193,53 @@ class Reader {
   /**
    * Whether an unknown field can be kept: its value at most 32 levels deep, and it (`key` bytes for its name, then
    * its value) within what's left of the 8 MB.
+   *
+   * The value is walked one child at a time, keeping only the path down to where it is (at most 32 lists or objects,
+   * each with where it's up to), and what's counted is checked against what's left before each step: a list's length
+   * is counted (a comma per item) before any of its items is looked at, and an object's keys one by one. So a value far
+   * past 8 MB is dropped after about 8 MB of looking, with nothing held for the rest of it.
    */
   keepUnknown(v: unknown, key = 0): boolean {
     const left = MAX_UNKNOWN_BYTES - this.unknownBytes
-    if (v === null || typeof v !== 'object') {
-      const bytes = key + (typeof v === 'string' ? v.length + 2 : 8)
-      if (bytes > left) return this.dropUnknown()
-      this.unknownBytes += bytes
-      return true
-    }
     let bytes = key
-    const stack: [unknown, number][] = [[v, 1]]
-    while (stack.length) {
-      const [x, depth] = stack.pop()!
+    // the lists and objects being walked: each with its keys (objects), the next child and its depth
+    const path: { list?: unknown[]; obj?: Obj; keys?: string[]; next: number; depth: number }[] = []
+    /** Counts one value at `depth`; a list or object with something in it is then walked. False when it can't be kept. */
+    const count = (x: unknown, depth: number): boolean => {
       if (typeof x === 'string') bytes += x.length + 2
       else if (Array.isArray(x)) {
-        if (depth >= MAX_UNKNOWN_DEPTH && x.length) return this.dropUnknown()
+        if (depth >= MAX_UNKNOWN_DEPTH && x.length) return false
         bytes += 2 + x.length
-        for (const y of x) stack.push([y, depth + 1])
+        if (bytes <= left && x.length) path.push({ list: x, next: 0, depth })
       } else if (x && typeof x === 'object') {
-        const ks = Object.keys(x)
-        if (depth >= MAX_UNKNOWN_DEPTH && ks.length) return this.dropUnknown()
         bytes += 2
-        for (const k of ks) {
-          bytes += k.length + 4
-          stack.push([(x as Obj)[k], depth + 1])
-        }
+        if (bytes > left) return false
+        const ks = Object.keys(x)
+        if (depth >= MAX_UNKNOWN_DEPTH && ks.length) return false
+        if (ks.length) path.push({ obj: x as Obj, keys: ks, next: 0, depth })
       } else bytes += 8
-      if (bytes > left) return this.dropUnknown()
+      return bytes <= left
+    }
+    if (!count(v, 1)) return this.dropUnknown()
+    while (path.length) {
+      const at = path[path.length - 1]
+      let child: unknown
+      if (at.keys) {
+        if (at.next >= at.keys.length) {
+          path.pop()
+          continue
+        }
+        const k = at.keys[at.next++]
+        bytes += k.length + 4
+        child = at.obj![k]
+      } else {
+        if (at.next >= at.list!.length) {
+          path.pop()
+          continue
+        }
+        child = at.list![at.next++]
+      }
+      if (!count(child, at.depth + 1)) return this.dropUnknown()
     }
     this.unknownBytes += bytes
     return true
@@ -337,8 +392,8 @@ function follow(scope: Scope, raw: string): string | undefined {
  */
 function paint(v: unknown, r: Reader): Paint | undefined {
   if (!isObj(v)) return undefined
-  if (v.type === 'color') return isColor(v.color) ? ({ ...kept(v, 'paintValue', r), type: 'color', color: v.color } as Paint) : undefined
-  if (v.type === 'style') return typeof v.ref === 'string' && v.ref.length <= MAX_NAME ? ({ ...kept(v, 'paintValue', r), type: 'style', ref: v.ref } as Paint) : undefined
+  if (v.type === 'color') return isColor(v.color) ? ({ ...kept(v, 'colorPaint', r), type: 'color', color: v.color } as Paint) : undefined
+  if (v.type === 'style') return typeof v.ref === 'string' && v.ref.length <= MAX_NAME ? ({ ...kept(v, 'stylePaint', r), type: 'style', ref: v.ref } as Paint) : undefined
   if (v.type !== 'linear' && v.type !== 'radial') return undefined
   const raw = Array.isArray(v.stops) ? v.stops : []
   const stops: Obj[] = []
@@ -358,7 +413,7 @@ function paint(v: unknown, r: Reader): Paint | undefined {
     r.note('a gradient with fewer than two stops (drawn as a color)')
     return { type: 'color', color: (stops[0]?.color as string | undefined) ?? '#000000' }
   }
-  const out: Obj = { ...kept(v, 'paintValue', r), type: v.type, stops }
+  const out: Obj = { ...kept(v, 'gradient', r), type: v.type, stops }
   if (out.angle !== undefined) {
     const a = r.number(out.angle, 'a gradient angle')
     if (a === undefined || !Number.isFinite(a)) delete out.angle
@@ -401,9 +456,9 @@ function font(v: unknown, r: Reader): Obj {
   return out
 }
 
-/** A run's style (a text style's run, or a text run beside its text). */
-function runStyle(v: Obj, r: Reader): Obj {
-  const out = kept(v, 'run', r)
+/** A run's style: a text run beside its text (`kind` run), or a text style's run (`kind` styleRun). */
+function runStyle(v: Obj, r: Reader, kind: 'run' | 'styleRun'): Obj {
+  const out = kept(v, kind, r)
   out.font = font(v.font, r)
   out.size = r.num(v, 'size', 24, 0, MAX_SIZE)
   optPaint(out, 'color', r, false)
@@ -529,7 +584,7 @@ function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | nu
             text = ''
           }
           chars += (text as string).length
-          return { ...runStyle(o, r), text }
+          return { ...runStyle(o, r, 'run'), text }
         })
       if (chars > MAX_LAYER_TEXT) damaged(`${where} holds more than ${MAX_LAYER_TEXT.toLocaleString('en-US')} characters`)
       if ((r.text += chars) > MAX_DESIGN_TEXT) damaged(`it holds more than ${MAX_DESIGN_TEXT.toLocaleString('en-US')} characters of text`)
@@ -639,7 +694,7 @@ function styles(v: unknown, r: Reader): Obj {
   }
   const text: Obj[] = []
   for (const t of Array.isArray(v.text) ? v.text : []) {
-    if (isObj(t) && typeof t.name === 'string' && isObj(t.run)) text.push({ ...kept(t, 'textStyle', r), name: r.name(t.name, ''), run: runStyle(t.run, r) })
+    if (isObj(t) && typeof t.name === 'string' && isObj(t.run)) text.push({ ...kept(t, 'textStyle', r), name: r.name(t.name, ''), run: runStyle(t.run, r, 'styleRun') })
     else r.note('a text style that was not well formed (dropped)')
   }
   out.colors = colors
@@ -661,7 +716,8 @@ function diagrams(v: unknown, scope: Scope, r: Reader): Obj[] | undefined {
         r.note(`a diagram ${what} that was not an object (dropped)`)
         continue
       }
-      const o = kept(p, 'diagramPart', r)
+      // a layer that isn't text is no reference: nothing checks it, so it's kept only within the unknown bounds
+      const o = kept(p, typeof p.layer === 'string' ? 'diagramPart' : 'unchecked', r)
       if (typeof o.layer === 'string') o.layer = follow(scope, o.layer) ?? o.layer
       out.push(o)
     }

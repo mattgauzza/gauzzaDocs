@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { test } from 'node:test'
+import { designZipBytes, readDesignZip } from '../src/core/formats/design'
 import { fontsFor, type FontSource } from '../src/shared/design/fonts'
 import { newDesign, walk } from '../src/shared/design/model'
 import { designToSvg } from '../src/shared/design/render'
@@ -613,6 +614,34 @@ test('JPEG, GIF and WebP headers are read for their size, and a truncated header
   await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(webp(16384, 16384)) } }, services), /50 megapixels/)
   await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(pngHeader(10, 10).slice(0, 20)) } }, services), /PNG, JPEG, GIF or WebP/)
   await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(gif(10, 10).slice(0, 8)) } }, services), /PNG, JPEG, GIF or WebP/)
+})
+
+test('svg and duplicate refuse to take the svg layers past 16 MB, so a save always opens again whole (xB)', async () => {
+  const { file, services } = await fresh()
+  const FULL = 'This design already holds 16 MB of SVG layers.'
+  // four svg layers of 3,800,000 characters (15,200,000) and a rect
+  const markup = (i: number): string => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!--${'p'.repeat(3_800_000 - 100)}--><rect id="r${i}" width="1" height="1"/></svg>`
+  const at = { visible: true, locked: false, opacity: 1, blend: 'normal' as const, x: 0, y: 0, width: 10, height: 10, rotation: 0, scaleX: 1, scaleY: 1 }
+  file.design.artboards[0].layers.push(
+    ...Array.from({ length: 4 }, (_, i): Layer => ({ ...at, id: `s${i}`, name: `S${i}`, type: 'svg', svg: markup(i) })),
+    { ...at, id: 'box', name: 'Box', type: 'rect', fill: { type: 'color', color: '#ff0000' } }
+  )
+  // an SVG the import keeps as one svg layer (a nested viewport) of about 1,000,000 characters
+  const pts: string[] = []
+  for (let i = 0, len = 0; len < 1_000_000; i++) len += pts[pts.push(`L${i % 997} ${(i * 7) % 991}`) - 1].length + 1
+  const nested = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><svg x="0" y="0" width="50" height="50" viewBox="0 0 1000 1000"><path d="M0 0 ${pts.join(' ')}" stroke="#000" fill="none"/></svg></svg>`
+  const one = await run(file, services, { op: 'svg', svg: nested, name: 'Fits' })
+  assert.ok(all(one.file).some(l => l.type === 'svg' && l.svg.length > 1_000_000))
+  // the next would pass 16 MB, and so would a copy of any svg layer
+  await assert.rejects(applyDesignOp(one.file, { op: 'svg', svg: nested, name: 'Over' }, services), { message: FULL })
+  await assert.rejects(applyDesignOp(one.file, { op: 'duplicate', layer: 'S0' }, services), { message: FULL })
+  await assert.rejects(applyDesignOp(one.file, { op: 'apply', ops: [{ op: 'duplicate', layer: 'Box' }, { op: 'duplicate', layer: 'Fits' }] }, services), { message: `op 2: ${FULL}` })
+  // what holds no svg layer still goes in
+  const plain = await run(one.file, services, { op: 'svg', svg: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="5" height="5"/></svg>', name: 'Plain' }, { op: 'duplicate', layer: 'Box' })
+  // saved and opened again, every svg layer is there, and nothing is noted
+  const back = await readDesignZip(await designZipBytes(plain.file))
+  assert.equal(back.notes, undefined)
+  assert.equal(all({ design: back.design, assets: {} }).filter(l => l.type === 'svg').length, 5)
 })
 
 test('designOps works on a design payload and refuses others', async () => {

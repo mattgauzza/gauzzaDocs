@@ -11,7 +11,7 @@ import {
 } from '../src/shared/design/render'
 import { sharedAssetName } from '../src/shared/design/sha256'
 import { PRESENTATION, STYLE_ONLY, cleanSvg } from '../src/shared/design/svgClean'
-import { inlineSvg } from '../src/shared/design/svgFragment'
+import { inlineCaches, inlineSvg } from '../src/shared/design/svgFragment'
 import { importSvg, layerAsSvg } from '../src/shared/design/svgImport'
 import { layoutText } from '../src/shared/design/text'
 import type { Component, Design, Layer, TextLayer } from '../src/shared/design/types'
@@ -1699,8 +1699,11 @@ test('overrides are looked up through the instances, the outer one winning, and 
   let drawn = ''
   underASecond('49,000 groups drawn 200 times', () => (drawn = designToSvg(c, c.artboards[0].id, { fonts, assets: {}, mode: 'export' })))
   assert.equal(drawn.split('preserveAspectRatio="none"').length - 1, 200)
-  const cache = new Map()
+  const cache = inlineCaches()
   for (const prefix of ['s1-', 's2-']) assert.equal(inlineSvg(many, BOX, prefix, cache), inlineSvg(many, BOX, prefix))
+  // found again by the layer that holds it, and by its markup
+  const holder = {}
+  for (const prefix of ['s1-', 's2-']) assert.equal(inlineSvg(many, BOX, prefix, cache, holder), inlineSvg(many, BOX, prefix))
 })
 
 /** This thread's CPU time for `fn`, in ms (as underASecond measures it). */
@@ -1737,33 +1740,42 @@ test('a layer too big to draw costs one build per drawing, not one per instance 
   }
   const instances = (n: number): Layer[] =>
     Array.from({ length: n }, (_, i) => ({ ...base, id: `i${i}`, name: `i${i}`, type: 'instance', ...at, component: 'C', overrides: {} }) as Layer)
-  const draw = async (d: Design, mode: 'raster' | 'export') => {
+  const asset = `assets/${'a'.repeat(64)}.png`
+  const draw = async (d: Design, mode: 'raster' | 'export', photo?: Uint8Array) => {
     // a family named NoSuch is missing, so a text in it draws its stored glyphs
     const fonts = await fontsFor(d, {}, async ref => (ref.family === 'NoSuch' ? null : liberation), liberation)
     const downgrades: Downgrade[] = []
     let out = ''
-    const ms = cpuMs(() => (out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode, downgrades })))
+    const ms = cpuMs(() => (out = designToSvg(d, d.artboards[0].id, { fonts, assets: photo ? { [asset]: photo } : {}, mode, downgrades })))
     assert.ok(out.length <= MAX_RENDER_OUTPUT, `${out.length}`)
     return { ms, out, left: downgrades.map(x => [x.layer, x.reason]) }
   }
   const aboutOne = (label: string, one: number, many: number): void =>
     assert.ok(many < one * 1.5 + 250, `${label} took ${Math.round(many)} ms, against ${Math.round(one)} ms for one`)
-  // what one layer of 100,000 '@' costs (its outlines would pass 128 MB, so it's left out)
-  const at100k = (id: string): Layer => text(id, R(100_000, '@'))
-  const one = await draw(board([at100k('t')]), 'raster')
+  // A photo fills the budget until what's left is half what a text of 4,000 '@' writes as outlines. That text is then
+  // too long to draw: it's built until it passes what's left and left out, as a text too long for the whole budget
+  // would be, for about 5 MB of outlines rather than 128 (so there are more copies, to keep each one's cost plain).
+  const words = (id: string): Layer => text(id, R(4000, '@'))
+  const alone = await draw(board([words('t')]), 'raster')
+  const outlines = [...alone.out.matchAll(/ d="([^"]*)"/g)].reduce((a, m) => a + m[1].length, 0)
+  const photo = new Uint8Array(Math.floor(((MAX_RENDER_OUTPUT - outlines / 2) * 3) / 4))
+  const fill = { ...base, id: 'photo', name: 'photo', type: 'image', ...at, asset, fit: 'fill' } as Layer
+  const filled = (layers: Layer[], root?: Group): Design => board([fill, ...layers], root)
+  // what one such layer costs
+  const one = await draw(filled([words('t')]), 'raster', photo)
   assert.deepEqual(one.left, [['t', OVER_BUDGET]])
-  // 4 instances of a component holding it
-  const four = await draw(board(instances(4), group('g', [at100k('t')])), 'raster')
-  assert.deepEqual(four.left, [['t', OVER_BUDGET]])
-  aboutOne('4 instances', one.ms, four.ms)
-  // 10 separate layers of it
-  const ten = await draw(board(Array.from({ length: 10 }, (_, i) => at100k(`t${i}`))), 'raster')
-  assert.equal(ten.left.length, 10)
-  aboutOne('10 layers', one.ms, ten.ms)
-  // a clip group whose mask is that text, in 4 instances (its mask is charged for before it's built)
-  const clip = await draw(board(instances(4), group('g', [at100k('t'), rect('r')], true)), 'export')
+  // 20 instances of a component holding it
+  const many = await draw(filled(instances(20), group('g', [words('t')])), 'raster', photo)
+  assert.deepEqual(many.left, [['t', OVER_BUDGET]])
+  aboutOne('20 instances', one.ms, many.ms)
+  // 30 separate layers of it
+  const separate = await draw(filled(Array.from({ length: 30 }, (_, i) => words(`t${i}`))), 'raster', photo)
+  assert.equal(separate.left.length, 30)
+  aboutOne('30 layers', one.ms, separate.ms)
+  // a clip group whose mask is that text, in 20 instances (its mask is charged for before it's built)
+  const clip = await draw(filled(instances(20), group('g', [words('t'), rect('r')], true)), 'export', photo)
   assert.deepEqual(clip.left, [['g', OVER_BUDGET]])
-  aboutOne('4 clip groups', one.ms, clip.ms)
+  aboutOne('20 clip groups', one.ms, clip.ms)
   // stored glyphs of 22,000,000 "'" (132 MB escaped): one instance fits, and 20 cost about what one does
   const stored: Layer = { ...text('s', 'x', 'NoSuch'), glyphs: R(22_000_000, "'") } as Layer
   const g1 = await draw(board(instances(1), group('g', [stored])), 'export')
@@ -1825,4 +1837,99 @@ test('instances never copy a whole layer or artboard; connectors find their ends
   const left: Downgrade[] = []
   underASecond('4 svg layers holding every private use character', () => designToSvg(full, full.artboards[0].id, { fonts, assets: {}, mode: 'export', downgrades: left }))
   assert.deepEqual(left.map(x => x.reason), Array(4).fill(SVG_NOT_CONVERTED))
+})
+
+test('a text estimated past what is left is left out without being built, and small layers after one that failed still draw (xA)', async () => {
+  const fonts = await fontsOf(newDesign('instagram'))
+  const at = { x: 0, y: 0, width: 10, height: 10 }
+  const lib = { family: 'Liberation Sans', weight: 400, style: 'normal' as const }
+  const text = (id: string, t: string, size = 12): Layer => ({
+    ...base, id, name: id, type: 'text', x: 0, y: 0, width: 1000, height: 1000, mode: 'box', align: 'left', valign: 'top',
+    runs: [{ text: t, font: lib, size }]
+  })
+  const rect = (id: string): Layer => ({ ...base, id, name: id, type: 'rect', ...at, fill: { type: 'color', color: '#ff0000' } })
+  const asset = `assets/${'a'.repeat(64)}.png`
+  const draw = (layers: Layer[], photo?: Uint8Array, components: Component[] = []) => {
+    const d = newDesign('instagram')
+    d.components = components
+    d.artboards[0].layers.push(...layers)
+    const downgrades: Downgrade[] = []
+    let out = ''
+    const ms = cpuMs(() => (out = designToSvg(d, d.artboards[0].id, { fonts, assets: photo ? { [asset]: photo } : {}, mode: 'raster', downgrades })))
+    assert.ok(out.length <= MAX_RENDER_OUTPUT, `${out.length}`)
+    return { ms, out, left: downgrades.map(x => x.layer) }
+  }
+  // what 2,000 '@' write as outlines, drawn alone
+  const words = R(2000, '@')
+  const alone = draw([text('t', words)])
+  assert.deepEqual(alone.left, [])
+  const outlines = [...alone.out.matchAll(/ d="([^"]*)"/g)].reduce((a, m) => a + m[1].length, 0)
+  // A photo fills the budget until what's left is the outlines / 1.05. Not drawn yet, the text is estimated well under
+  // that, so it's built, and fails near its end.
+  const photo = new Uint8Array(Math.floor(((MAX_RENDER_OUTPUT - outlines / 1.05) * 3) / 4))
+  const fill: Layer = { ...base, id: 'photo', name: 'photo', type: 'image', ...at, asset, fit: 'fill' }
+  const one = draw([fill, text('t', words)], photo)
+  assert.deepEqual(one.left, ['t'])
+  const aboutOne = (label: string, many: number): void =>
+    assert.ok(many < one.ms * 1.5 + 250, `${label} took ${Math.round(many)} ms, against ${Math.round(one.ms)} ms for one`)
+  // 18 separate layers of it: the first is built; each glyph is then counted at the most it came to, so the rest are
+  // estimated past what's left and left out before any of their outlines is built
+  const sep = draw([fill, ...Array.from({ length: 18 }, (_, i) => text(`t${i}`, words))], photo)
+  assert.equal(sep.left.length, 18)
+  aboutOne('18 separate layers', sep.ms)
+  // 18 instances, each overriding the text a little differently (so none is the same layer under the same override)
+  const root: Component['root'] = { ...base, id: 'g', name: 'g', type: 'group', ...at, children: [text('t', 'x')] }
+  const instances = Array.from({ length: 18 }, (_, i) => ({ ...base, id: `i${i}`, name: `i${i}`, type: 'instance', ...at, component: 'C', overrides: { t: { text: words + i } } }) as Layer)
+  const ovr = draw([fill, ...instances], photo, [{ id: 'C', name: 'C', root }])
+  // the second text's estimate would fit an empty budget, so the budget counts as reached and later instances go whole
+  assert.deepEqual(ovr.left, ['t', ...Array.from({ length: 16 }, (_, i) => `i${i + 2}`)])
+  aboutOne('18 overridden instances', ovr.ms)
+  // after the text that didn't fit, a 40-character headline at 200 px and five rects still draw
+  const tail = draw([fill, text('big', words), text('headline', R(40, '@'), 200), ...['r0', 'r1', 'r2', 'r3', 'r4'].map(rect)], photo)
+  assert.deepEqual(tail.left, ['big'])
+  for (const id of ['headline', 'r0', 'r1', 'r2', 'r3', 'r4']) assert.match(tail.out, new RegExp(`data-name="${id}"`))
+})
+
+test('long path data, svg layers and gradients of one length never share a hash bucket: each is found by its layer or a short key (xD)', async () => {
+  const fonts = await fontsOf(newDesign('instagram'))
+  const at = { x: 0, y: 0, width: 10, height: 10 }
+  // xD: 3,000 paths whose 20,000 characters of data differ only at the end, or only at the start
+  const body = R(4000, 'L1 1 ').slice(0, 20_000 - 12)
+  for (const where of ['end', 'start']) {
+    const d = newDesign('instagram')
+    for (let i = 0; i < 3000; i++) {
+      const tag = String(i).padStart(8, '0')
+      const data = (where === 'end' ? `M0 0 ${body}L${tag}` : `M${tag} ${body}`.slice(0, 20_000)).padEnd(20_000, ' ')
+      d.artboards[0].layers.push({ ...base, id: `p${i}`, name: 'p', type: 'path', ...at, d: data })
+    }
+    for (const mode of ['export', 'raster'] as const) {
+      let out = ''
+      underASecond(`3,000 paths differing at the ${where}, ${mode}`, () => (out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode })))
+      assert.equal(out.split('<path d="M').length - 1, 3000)
+    }
+  }
+  // 600 svg layers of 16,500 characters differing only at the end, in a component drawn by 8 instances (export)
+  const head = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0 '
+  const end = (i: number): string => `L${String(i).padStart(8, '0')} 1"/></svg>`
+  const fill = R(3300, 'L1 1 ').slice(0, 16_500 - head.length - end(0).length)
+  const svgs = Array.from({ length: 600 }, (_, i) => ({ ...base, id: `s${i}`, name: 's', type: 'svg', ...at, svg: head + fill + end(i) }) as Layer)
+  const s = newDesign('instagram')
+  s.components = [{ id: 'C', name: 'C', root: { ...base, id: 'g', name: 'g', type: 'group', ...at, children: svgs } }]
+  for (let i = 0; i < 8; i++) s.artboards[0].layers.push({ ...base, id: `i${i}`, name: `i${i}`, type: 'instance', ...at, component: 'C', overrides: {} })
+  let out = ''
+  underASecond('600 svg layers of one length, 8 instances', () => (out = designToSvg(s, s.artboards[0].id, { fonts, assets: {}, mode: 'export' })))
+  assert.equal(out.split('preserveAspectRatio="none"').length - 1, 4800)
+  // 5,000 rects with 256-stop gradients under 15 levels of instances: signatures of one length past 16,383 characters
+  const stops = Array.from({ length: 256 }, (_, i) => ({ offset: i / 255, color: `#${(0x10000000 + i * 997).toString(16).slice(1, 7)}80` }))
+  const rects = Array.from({ length: 5000 }, (_, i) => ({ ...base, id: `r${String(i).padStart(8, '0')}`, name: 'r', type: 'rect', ...at, fill: { type: 'linear', stops, angle: 0 } }) as Layer)
+  const long = (i: number): string => `${R(56, 'c')}${String(i).padStart(8, '0')}`
+  const g = newDesign('instagram')
+  g.components = [{ id: long(0), name: 'C0', root: { ...base, id: 'g0', name: 'g', type: 'group', ...at, children: rects } }]
+  for (let p = 1; p < 15; p++) {
+    const inner = { ...base, id: long(100 + p), name: 'i', type: 'instance', ...at, component: long(p - 1), overrides: {} } as Layer
+    g.components.push({ id: long(p), name: `C${p}`, root: { ...base, id: `g${p}`, name: 'g', type: 'group', ...at, children: [inner] } })
+  }
+  g.artboards[0].layers = [{ ...base, id: long(999), name: 'top', type: 'instance', ...at, component: long(14), overrides: {} }]
+  underASecond('5,000 gradients of one length', () => (out = designToSvg(g, g.artboards[0].id, { fonts, assets: {}, mode: 'export' })), 2000)
+  assert.equal(out.split('<linearGradient').length - 1, 5000)
 })

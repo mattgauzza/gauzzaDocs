@@ -1,7 +1,7 @@
 import type { Box } from './geometry'
 import {
   INKSCAPE_NS, MAX_RULE_DECLARATIONS, MAX_STYLE_STEPS, PRESENTATION, TOO_COMPLEX_STYLES, XLINK_NS, allElements, classesOf, cleanSvgRoot,
-  cleanValue, escapedLength, serializeSvg, simpleSelector
+  cleanValue, escapedLength, serializeSvg, shortKey, simpleSelector
 } from './svgClean'
 import { len } from './svgPaint'
 import { type Decl, cssBlocks, splitDeclarations } from './svgStyle'
@@ -252,19 +252,54 @@ function prefixIds(root: Element, prefix: string): void {
  * or transform on it could paint outside). Empty when the fragment can't be read, asks too much (elements, painting
  * or style rules), or can't be written out (a RangeError for a string too long, say): it never throws, so an export
  * with such a layer still comes out, without it. With `cache`, each fragment is cleaned once (or found refused once)
- * however many times it's inlined, as instances of one component inline the same layer.
+ * however many times it's inlined, as instances of one component inline the same layer; `holder` is the layer that
+ * holds the markup, which finds it again without reading the markup.
  */
-export function inlineSvg(svg: string, box: Box, prefix: string, cache?: Map<string, InlineCache | null>): string {
+export function inlineSvg(svg: string, box: Box, prefix: string, cache?: InlineCaches, holder?: object): string {
   try {
-    const known = cache?.get(svg)
-    if (known === null) return ''
-    const c = known ?? converted(svg)
-    if (!known) cache?.set(svg, c)
+    let c = cache ? cachedInline(cache, svg, holder) : undefined
+    if (c === null) return ''
+    if (c === undefined) {
+      c = converted(svg)
+      if (cache) remember(cache, svg, holder, c)
+    }
     return `<svg x="${num(box.x)}" y="${num(box.y)}" width="${num(box.w)}" height="${num(box.h)}"` + c.tail.split(c.mark).join(prefix)
   } catch {
-    cache?.set(svg, null)
+    if (cache) remember(cache, svg, holder, null)
     return ''
   }
+}
+
+/**
+ * Fragments converted for inlining in one drawing (null for one that can't be), found by the layer that holds the
+ * markup, or else by the markup through its shortKey (checked against the markup), never with the markup itself as a
+ * Map key: V8 hashes a string over 16,383 characters by its length alone, so same-length fragments would share one
+ * bucket and every lookup would compare against each of them.
+ */
+export interface InlineCaches {
+  byLayer: WeakMap<object, InlineCache | null>
+  byKey: Map<string, { svg: string; c: InlineCache | null }>
+}
+export const inlineCaches = (): InlineCaches => ({ byLayer: new WeakMap(), byKey: new Map() })
+
+/** What `cache` holds for `svg` (held by `holder`): its conversion, null when it can't be converted, else undefined. */
+export function cachedInline(cache: InlineCaches, svg: string, holder?: object): InlineCache | null | undefined {
+  if (holder) {
+    const c = cache.byLayer.get(holder)
+    if (c !== undefined) return c
+  }
+  const hit = cache.byKey.get(shortKey(svg))
+  if (!hit || hit.svg !== svg) return undefined
+  if (holder) cache.byLayer.set(holder, hit.c)
+  return hit.c
+}
+
+function remember(cache: InlineCaches, svg: string, holder: object | undefined, c: InlineCache | null): void {
+  if (holder) cache.byLayer.set(holder, c)
+  const k = shortKey(svg)
+  const hit = cache.byKey.get(k)
+  if (!hit) cache.byKey.set(k, { svg, c })
+  else if (hit.svg === svg) hit.c = c
 }
 
 /**

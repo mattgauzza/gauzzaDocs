@@ -6,6 +6,7 @@ import { cleanSvg } from '../design/svgClean'
 import { importSvg, layerAsSvg } from '../design/svgImport'
 import { cleanText, num as fmt, textReport } from '../design/text'
 import type { Artboard, BlendMode, Component, Design, DesignFile, Layer, Override, Paint, TextRun } from '../design/types'
+import { MAX_SVG_MARKUP, SVG_LAYERS_FULL, svgMarkupIn, svgMarkupOf } from '../design/validate'
 import type { AgentOp } from '../types'
 import {
   DEFAULT_FONT, type DesignDoc, type GroupLayer, MAX_SIZE, boundsOf, boundsOfLayers, componentOf, contains, coord, endOf, fontOf,
@@ -526,9 +527,19 @@ function distributeOp(d: Draft, op: AgentOp): unknown {
   return { ids: layers.map(l => l.id) }
 }
 
+/**
+ * Refuses when `layers` would take the design's svg layers past 16 MB of markup between them: past that, opening the
+ * file again would drop layers.
+ */
+function roomForSvg(d: Draft, layers: Layer[]): void {
+  const adding = svgMarkupIn(layers)
+  if (adding && svgMarkupOf(d.design) + adding > MAX_SVG_MARKUP) throw new OpError(SVG_LAYERS_FULL)
+}
+
 function duplicateOp(d: Draft, op: AgentOp): unknown {
   const board = boardOf(d, op)
   const src = layerOn(board, op.layer)
+  roomForSvg(d, [src])
   const copy = structuredClone(src)
   // every layer in the copy gets a new id, and connectors inside it follow the copies of their ends
   const map = new Map<string, string>()
@@ -692,8 +703,9 @@ function svgOp(d: Draft, op: AgentOp): unknown {
   if (typeof op.svg !== 'string' || !op.svg.trim()) throw new OpError('"svg" needs svg (the SVG text to import) or get (a layer)')
   const name = op.name === undefined ? nextName(board, 'SVG') : nameOf('name', op.name)
   const r = importSvg(op.svg, name, { fonts: d.services.fonts, taken: d.taken })
-  Object.assign(d.assets, r.assets)
   const g = r.group
+  roomForSvg(d, [g])
+  Object.assign(d.assets, r.assets)
   shift(g, op.x === undefined ? 0 : coord('x', op.x) - g.x, op.y === undefined ? 0 : coord('y', op.y) - g.y)
   insert(board, g, op.parent, op.index)
   refit(board, new Set([g.id]))

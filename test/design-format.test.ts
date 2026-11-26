@@ -557,3 +557,90 @@ test('unknown fields are kept to 32 levels and 8 MB in all; notes stop at 200; s
   assert.equal(s.artboards[0].layers.length, 15)
   assert.deepEqual(svgs, ['an SVG layer past 16 MB of SVG in this design (dropped) (5 times)'])
 })
+
+const UNKNOWN_NOTE = "a field this release doesn't know, nested past 32 levels or past 8 MB of such fields (dropped)"
+
+test("a field a kind of object doesn't use is bounded like any unknown field, so saving and ops keep working (xE)", async () => {
+  const DEEP = '"__DEEP__"'
+  const deep = `${'['.repeat(100_000)}${']'.repeat(100_000)}`
+  const two = [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }]
+  const fill = (paint: Record<string, unknown>) => (d: any) => (d.artboards[0].layers[0].fill = paint)
+  const cases: [string, (d: any) => void][] = [
+    ['a color fill holding stops', fill({ type: 'color', color: '#ff0000', stops: '__DEEP__' })],
+    ['a color fill holding an angle', fill({ type: 'color', color: '#ff0000', angle: '__DEEP__' })],
+    ['a style fill holding a color', fill({ type: 'style', ref: 'Brand', color: '__DEEP__' })],
+    ['a gradient holding a ref', fill({ type: 'linear', stops: two, ref: '__DEEP__' })],
+    ['a gradient holding a color', fill({ type: 'radial', stops: two, color: '__DEEP__' })],
+    ['a diagram node whose layer is not text', d => (d.artboards[0].diagrams = [{ name: 'D', nodes: [{ layer: '__DEEP__' }], links: [], containers: [] }])],
+    ['a text style whose run holds text', d => (d.styles = { colors: [], text: [{ name: 'S', run: { font, size: 12, text: '__DEEP__' } }] })]
+  ]
+  for (const [label, tweak] of cases) {
+    const d = rawDesign([rrect('r')])
+    tweak(d)
+    const f = await readDesignZip(await storedZip(JSON.stringify(d).replace(DEEP, deep)))
+    assert.deepEqual(f.notes, [UNKNOWN_NOTE], label)
+    const again = await readDesignZip(await designZipBytes(f))
+    assert.equal(again.notes, undefined, label)
+    const op = await applyDesignOp(f, { op: 'set', layer: 'r', props: { x: 3 } } as any)
+    assert.deepEqual(op.result, { ids: ['r'] }, label)
+  }
+  // within the bounds they're kept as they are, and what the kind does use is still checked
+  const kept = validateDesign(rawDesign([rrect('r', 'R', { fill: { type: 'color', color: '#ff0000', stops: [1, 2], ref: 'x' } })]))
+  assert.deepEqual((kept.artboards[0].layers[0] as any).fill, { type: 'color', color: '#ff0000', stops: [1, 2], ref: 'x' })
+  const node = rawDesign([rrect('r')])
+  node.artboards[0].diagrams = [{ name: 'D', nodes: [{ layer: 7 }, { layer: 'r' }], links: [], containers: [] }]
+  assert.deepEqual(validateDesign(node).artboards[0].diagrams?.[0].nodes, [{ layer: 7 }, { layer: 'r' }])
+})
+
+test('an unknown value far past 8 MB is dropped after about 8 MB of looking, with nothing held for the rest (xC)', () => {
+  // 9,000,000 items: the commas between them alone pass 8 MB, so the list is dropped before any item is looked at
+  const list = new Array(9_000_000).fill(0)
+  const notes: string[] = []
+  let d: any
+  const ms = cpuMs(() => (d = validateDesign(rawDesign([rrect('r')], { future: list }), notes)))
+  assert.ok(ms < 100, `9,000,000 items took ${Math.round(ms)} ms`)
+  assert.equal(d.future, undefined)
+  assert.deepEqual(notes, [UNKNOWN_NOTE])
+  // 1,000 lists of 10,000: walked a list at a time, and dropped once they pass 8 MB
+  const lists = Array.from({ length: 1000 }, () => new Array(10_000).fill(0))
+  const later: string[] = []
+  const ms2 = cpuMs(() => (d = validateDesign(rawDesign([rrect('r')], { future: lists, small: [[1]] }), later)))
+  assert.ok(ms2 < 1000, `1,000 lists of 10,000 took ${Math.round(ms2)} ms`)
+  assert.equal(d.future, undefined)
+  assert.deepEqual(d.small, [[1]])
+  assert.deepEqual(later, [UNKNOWN_NOTE])
+  // an object whose keys pass 8 MB is dropped the same way; one just within it is kept whole
+  const wide: Record<string, string> = {}
+  for (let i = 0; i < 1_000_000; i++) wide[`k${i}`] = 'v'
+  assert.equal((validateDesign(rawDesign([rrect('r')], { wide })) as any).wide, undefined)
+  const fits: Record<string, string> = {}
+  for (let i = 0; i < 100_000; i++) fits[`k${i}`] = 'v'
+  assert.equal(Object.keys((validateDesign(rawDesign([rrect('r')], { fits })) as any).fits).length, 100_000)
+})
+
+test('a save says what stopped it, and refuses over 16 MB of SVG layers so a reopen never drops one', async () => {
+  // too deep: a value nested 100,000 levels (only possible in memory: reading drops it)
+  const deep = newDesign('instagram') as any
+  deep.future = JSON.parse(`${'['.repeat(100_000)}${']'.repeat(100_000)}`)
+  await assert.rejects(designZipBytes({ design: deep, assets: {} }), { message: 'This design is too deeply nested to save.' })
+  // a part that contains itself
+  const loop = newDesign('instagram') as any
+  loop.future = {}
+  loop.future.self = loop.future
+  await assert.rejects(designZipBytes({ design: loop, assets: {} }), { message: "This design can't be saved: part of it contains itself." })
+  // too large stays as it was
+  const big = newDesign('instagram')
+  big.artboards[0].layers.push(rect('r', 'n'.repeat(65 * 1024 * 1024)))
+  await assert.rejects(designZipBytes({ design: big, assets: {} }), { message: 'This design is too large to save (its design.json would be over 64 MB).' })
+  // svg layers: four of 4,000,000 characters (16,000,000, within 16 MB) save and reopen whole; a fifth is refused
+  const markup = (i: number): string => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!--${'p'.repeat(4_000_000 - 100)}--><rect id="r${i}" width="1" height="1"/></svg>`
+  const svgLayer = (i: number): Layer => ({ ...base, id: `s${i}`, name: 's', type: 'svg', svg: markup(i) })
+  const four = newDesign('instagram')
+  four.artboards[0].layers.push(svgLayer(0), svgLayer(1), svgLayer(2))
+  four.components = [{ id: 'C', name: 'C', root: { ...base, id: 'g', name: 'g', type: 'group', children: [svgLayer(3)] } }]
+  const back = await readDesignZip(await designZipBytes({ design: four, assets: {} }))
+  assert.equal(back.notes, undefined)
+  assert.equal(back.design.artboards[0].layers.length + back.design.components[0].root.children.length, 4)
+  four.artboards[0].layers.push(svgLayer(4))
+  await assert.rejects(designZipBytes({ design: four, assets: {} }), { message: 'This design is too large to save (its SVG layers come to over 16 MB).' })
+})

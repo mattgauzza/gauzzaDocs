@@ -1,8 +1,8 @@
 import type { FontSource } from './fonts'
 import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, layerIndex, midpoint, transformedBounds, union } from './geometry'
 import { artboardOf, walk } from './model'
-import { escapedLength } from './svgClean'
-import { type InlineCache, inlineSvg } from './svgFragment'
+import { escapedLength, shortKey } from './svgClean'
+import { type InlineCaches, cachedInline, inlineCaches, inlineSvg } from './svgFragment'
 import {
   type GlyphCosts, OutlinesTooLong, cleanText, layoutText, num as n, outlineEstimate, runSize, textPaths, textRuns
 } from './text'
@@ -55,8 +55,10 @@ interface Scope { prefix: string; overrides: Record<string, Override>[]; top: bo
 /** The layers a connector's ends are looked for in (the artboard's, or a component's root), indexed on first use. */
 interface Ends { layers: Layer[]; index?: Map<string, Layer> }
 interface Ctx {
-  design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string>
-  /** gradient signatures in the order they were added, so a layer left out can take its own back */
+  design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>
+  /** gradients written so far, by the shortKey of their signature (checked against the signature itself) */
+  paints: Map<string, { sig: string; id: string }>
+  /** keys of the gradients in the order they were added, so a layer left out can take its own back */
   paintLog: string[]
   /** svg layers inlined so far, which numbers each one's id prefix */
   svgs: number
@@ -65,8 +67,8 @@ interface Ctx {
   full: boolean
   /** instances expanded so far */
   instances: number
-  /** svg layers converted for inlining, by their markup (null: they couldn't be), so each is converted once per drawing */
-  svgCache: Map<string, InlineCache | null>
+  /** svg layers converted for inlining (null: they couldn't be), so each is converted once per drawing */
+  svgCache: InlineCaches
   /** downgrades already listed, by layer and reason */
   listed: Set<string>
   /** components by id, made on first use */
@@ -80,8 +82,12 @@ interface Ctx {
    * goes on, so the same layer under the same overrides (another instance of its component) is left out at once.
    */
   failed: Map<Layer, Set<string>>
-  /** escaped lengths of long strings (path data, stored glyphs), each measured once per drawing */
-  escLens: Map<string, number>
+  /**
+   * escaped lengths of path data and stored glyphs, by the layer that holds them, each measured once per drawing (never
+   * keyed by the string: V8 hashes a string over 16,383 characters by its length alone, so same-length ones would
+   * share one bucket)
+   */
+  escLens: { d: WeakMap<object, number>; glyphs: WeakMap<object, number> }
   /** what each glyph's outline has come to so far (see outlineEstimate) */
   glyphCosts: GlyphCosts
 }
@@ -176,7 +182,7 @@ const mark = (ctx: Ctx): Mark => ({ defs: ctx.defs.length, used: ctx.used, paint
 function rollBack(ctx: Ctx, m: Mark): void {
   ctx.defs.length = m.defs
   ctx.used = m.used
-  for (const sig of ctx.paintLog.splice(m.paints)) ctx.paints.delete(sig)
+  for (const k of ctx.paintLog.splice(m.paints)) ctx.paints.delete(k)
 }
 
 /** Text a downgrade can hold, from whatever a layer field holds (never converted with String()). */
@@ -202,13 +208,29 @@ const base64Size = (bytes: number): number => 4 * Math.ceil(bytes / 3)
  */
 const OUTLINE_PER_GLYPH = 500
 
-/** A string's length once escaped, measured once per drawing (instances of a component share it). */
-function escLen(ctx: Ctx, s: unknown): number {
+/**
+ * The object that holds `k` itself: the layer, or for a layer an instance draws with an override (made over it by
+ * withOverride, which never sets markup, path data or glyphs), the layer under it. Null when nothing does.
+ */
+function holderOf(l: object, k: string): object | null {
+  for (let o: object | null = l; o; o = Object.getPrototypeOf(o)) if (has(o, k)) return o
+  return null
+}
+
+/**
+ * The escaped length of a layer's path data or stored glyphs, measured once per drawing for the layer that holds them
+ * (instances of a component share it).
+ */
+function escLen(ctx: Ctx, l: Layer, k: 'd' | 'glyphs'): number {
+  const s = (l as unknown as Record<string, unknown>)[k]
   if (typeof s !== 'string') return 0
-  let len = ctx.escLens.get(s)
+  const holder = holderOf(l, k)
+  if (!holder) return escapedLength(s)
+  const memo = ctx.escLens[k]
+  let len = memo.get(holder)
   if (len === undefined) {
     len = escapedLength(s)
-    ctx.escLens.set(s, len)
+    memo.set(holder, len)
   }
   return len
 }
@@ -222,7 +244,7 @@ function storedGlyphs(fonts: FontSource, l: TextLayer, overrideText: string | un
 function textLeast(ctx: Ctx, l: TextLayer, overrideText: string | undefined, outlines: boolean, stored: boolean): number {
   const runs = textRuns(l, overrideText)
   const glyphs = stored ? storedGlyphs(ctx.opts.fonts, l, overrideText, runs) : null
-  if (glyphs !== null) return escLen(ctx, glyphs)
+  if (glyphs !== null) return escLen(ctx, l, 'glyphs')
   let chars = 0
   let drawn = 0
   for (const r of runs) {
@@ -243,16 +265,16 @@ function leastSize(ctx: Ctx, l: Layer, overrideText: string | undefined): number
   }
   if (l.type === 'svg') {
     const svg = typeof l.svg === 'string' ? l.svg : ''
-    return ctx.opts.mode === 'raster' ? base64Size(svg.length) : (ctx.svgCache.get(svg)?.size ?? 0)
+    return ctx.opts.mode === 'raster' ? base64Size(svg.length) : (cachedInline(ctx.svgCache, svg, holderOf(l, 'svg') ?? undefined)?.size ?? 0)
   }
-  if (l.type === 'path') return escLen(ctx, l.d)
+  if (l.type === 'path') return escLen(ctx, l, 'd')
   if (l.type === 'text') return textLeast(ctx, l, overrideText, ctx.opts.mode === 'raster' || !!ctx.opts.outlines || !!l.outlines, true)
   return 0
 }
 
 /** The least a clip mask writes as clip geometry: path data as escaped, text as outlines. */
 function clipLeast(ctx: Ctx, l: Layer, overrideText: string | undefined): number {
-  if (l.type === 'path') return escLen(ctx, l.d)
+  if (l.type === 'path') return escLen(ctx, l, 'd')
   if (l.type === 'text') return textLeast(ctx, l, overrideText, true, false)
   return 0
 }
@@ -336,9 +358,11 @@ function gradient(ctx: Ctx, p: Extract<Paint, { stops: unknown }>, key: string, 
       return `<stop offset="${n(at, 4)}" stop-color="${c.hex}"${c.alpha < 1 ? ` stop-opacity="${n(c.alpha, 3)}"` : ''}/>`
     })
     .join('')
+  // 256 stops can make a signature too long to be a Map key of its own (see shortKey)
   const sig = `${key}|${p.type}|${n(fin(p.angle, 0), 4)}|${stops}|${b.x},${b.y},${b.w},${b.h}`
-  const known = ctx.paints.get(sig)
-  if (known) return known
+  const k = shortKey(sig)
+  const known = ctx.paints.get(k)
+  if (known && known.sig === sig) return known.id
   const id = nextId(ctx, 'g', key)
   const cx = b.x + b.w / 2
   const cy = b.y + b.h / 2
@@ -357,8 +381,11 @@ function gradient(ctx: Ctx, p: Extract<Paint, { stops: unknown }>, key: string, 
     const r = Math.hypot(b.w, b.h) / 2
     addDef(ctx, `<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${n(cx)}" cy="${n(cy)}" r="${n(r)}">${stops}</radialGradient>`)
   }
-  ctx.paints.set(sig, id)
-  ctx.paintLog.push(sig)
+  // a different signature with the same key (rare) keeps the first: this one is written again each time
+  if (!known) {
+    ctx.paints.set(k, { sig, id })
+    ctx.paintLog.push(k)
+  }
   return id
 }
 
@@ -569,7 +596,7 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
  * one that can't be converted draws nothing and is listed.
  */
 function exportSvgLayer(ctx: Ctx, l: Layer & { type: 'svg' }): string {
-  const out = inlineSvg(typeof l.svg === 'string' ? l.svg : '', boxOf(l), `s${++ctx.svgs}-`, ctx.svgCache)
+  const out = inlineSvg(typeof l.svg === 'string' ? l.svg : '', boxOf(l), `s${++ctx.svgs}-`, ctx.svgCache, holderOf(l, 'svg') ?? undefined)
   return out || leftOut(ctx, l, SVG_NOT_CONVERTED)
 }
 
@@ -778,8 +805,8 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
   return {
     design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, used: 0, full: false, instances: 0,
-    svgCache: new Map(), listed: new Set(), compEnds: new Map(), room: MAX_RENDER_OUTPUT, failed: new Map(), escLens: new Map(),
-    glyphCosts: new WeakMap()
+    svgCache: inlineCaches(), listed: new Set(), compEnds: new Map(), room: MAX_RENDER_OUTPUT, failed: new Map(),
+    escLens: { d: new WeakMap(), glyphs: new WeakMap() }, glyphCosts: new WeakMap()
   }
 }
 
