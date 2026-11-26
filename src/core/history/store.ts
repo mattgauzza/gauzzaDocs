@@ -137,42 +137,70 @@ export async function writeAtomic(file: string, bytes: Uint8Array): Promise<{ si
 
 export const isHash = (h: unknown): h is string => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)
 
+/** Who created an object: its inode and exact mtime when it was linked into place. Any reuse changes the mtime. */
+export interface ObjectStamp {
+  ino: bigint
+  mtimeNs: bigint
+}
+
 /**
- * Stores bytes as an object and says what it left on disk: the object's mtime afterwards, and whether this call
- * created it. An object that is already stored is not written again, but its mtime is refreshed, so cleanup leaves it
- * alone and a fold that wants to delete an object it replaced can tell that someone else reused it since.
- * `created` is true only when the object was not there at all and this writer alone made it: it is linked into place,
- * which fails when another writer got there first. So until its mtime changes, nothing but the history that created
- * it can use it (any other history would have reused it through here).
+ * Refreshes a stored object's mtime to strictly later than it is now (never the same tick), so cleanup leaves it alone
+ * and its creator's stamp can never match it again. Every reuse of an object goes through here. Returns the new mtime.
  */
-export async function storeObject(bytes: Uint8Array, ext: string): Promise<{ hash: string; mtime: number; created: boolean }> {
+async function touchLater(file: string): Promise<number> {
+  const cur = (await fs.promises.stat(file)).mtimeMs
+  const t = Math.max(Date.now(), cur + 1) / 1000
+  await fs.promises.utimes(file, t, t)
+  return (await fs.promises.stat(file)).mtimeMs
+}
+
+/**
+ * Stores bytes as an object and says what it left on disk: the object's mtime afterwards and whether this call
+ * created it. An object that is already stored is never written again: it is reused, and its mtime moves strictly
+ * later (touchLater). A damaged one is rewritten.
+ * `created` is true only when the object was not there at all and this writer alone made it: its temp file is linked
+ * into place, which fails when another writer got there first, and that writer then reuses the object instead of
+ * replacing it. `stamp` is the created object's inode and mtime (from the temp file, before the link): while both
+ * still match, no other history can have started using it. No stamp where inodes are 0 (they cannot be trusted).
+ */
+export async function storeObject(bytes: Uint8Array, ext: string): Promise<{ hash: string; mtime: number; created: boolean; stamp?: ObjectStamp }> {
   const hash = sha256(bytes)
   const dest = objectPath(hash)
   if (await getObject(hash)) {
     try {
-      const now = new Date()
-      await fs.promises.utimes(dest, now, now) // already stored and good: keep it fresh
-      return { hash, mtime: (await fs.promises.stat(dest)).mtimeMs, created: false }
+      return { hash, mtime: await touchLater(dest), created: false } // already stored and good: reuse it
     } catch {
       /* fall through and store it again */
     }
-  } // missing or corrupt: (re)write it below
+  } // missing or damaged: (re)write it below
   await fs.promises.mkdir(path.dirname(dest), { recursive: true })
   const stored = STORED_AS_IS.has(ext.replace(/^\./, '').toLowerCase()) ? bytes : zlib.gzipSync(bytes)
   const tmp = tmpName(dest)
-  let created = false
   try {
     await fs.promises.writeFile(tmp, stored)
+    const st = await fs.promises.stat(tmp, { bigint: true })
+    const mtime = (await fs.promises.stat(tmp)).mtimeMs
     try {
-      await fs.promises.link(tmp, dest) // only if nothing is there
-      created = true
+      await fs.promises.link(tmp, dest) // only if nothing is there: dest is now this very inode
+      const stamp = st.ino ? { ino: st.ino, mtimeNs: st.mtimeNs } : undefined
+      return { hash, mtime, created: true, stamp }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+        await renameRetry(tmp, dest) // no hard links on this drive: replace it the old way (a new inode, so no stamp matches)
+        return { hash, mtime: (await fs.promises.stat(dest)).mtimeMs, created: false }
+      }
+    }
+    // Another writer got there first (or a damaged copy is there). Never replace a good one: reuse it.
+    if (!(await getObject(hash))) await renameRetry(tmp, dest) // damaged (or gone meanwhile): rewrite it
+    try {
+      return { hash, mtime: await touchLater(dest), created: false }
     } catch {
-      await renameRetry(tmp, dest) // there (corrupt, or another writer just made it), or no hard links on this drive
+      await renameRetry(tmp, dest).catch(() => {}) // moved away meanwhile (a fold dropped it): put this copy there
+      return { hash, mtime: (await fs.promises.stat(dest)).mtimeMs, created: false }
     }
   } finally {
     await fs.promises.rm(tmp, { force: true }).catch(() => {})
   }
-  return { hash, mtime: (await fs.promises.stat(dest)).mtimeMs, created }
 }
 
 export const putObject = async (bytes: Uint8Array, ext: string): Promise<string> => (await storeObject(bytes, ext)).hash
@@ -363,13 +391,22 @@ function fileOfKey(key: string): string {
 }
 
 /**
+ * After lock files kept failing with EPERM or EBUSY for over a second (a history folder that can't be written), every
+ * lock fails at once with that error for the next 30 s, in this process. Saves then go ahead without history at once
+ * instead of each waiting a second first. The first lock taken after that clears it.
+ */
+const LOCK_DENIED_MS = 30_000
+let lockDenied: { until: number; error: unknown } | null = null
+
+/**
  * One writer at a time per file history, across processes. `file` is only for the message when the wait runs out
  * (it becomes the "Version history paused" reason, so it names the file, never the key).
  * On Windows an antivirus or indexer can hold the lock file for a moment, and creating it then fails with EPERM or
  * EBUSY: that counts as busy, like EEXIST. Only when nothing but EPERM or EBUSY comes back for over a second is it
- * taken for a real permission problem and thrown.
+ * taken for a real permission problem and thrown (and remembered for 30 s, see lockDenied).
  */
 export async function withLock<T>(key: string, fn: () => Promise<T>, file?: string): Promise<T> {
+  if (lockDenied && Date.now() < lockDenied.until) throw lockDenied.error // fail fast: a save must not wait a second each time
   const lock = lockPath(key)
   fs.mkdirSync(FILES_DIR, { recursive: true })
   const until = Date.now() + LOCK_WAIT_MS
@@ -380,10 +417,14 @@ export async function withLock<T>(key: string, fn: () => Promise<T>, file?: stri
     try {
       mine = tryAcquire(lock)
       busySince = 0
+      if (mine) lockDenied = null
     } catch (e) {
       if (!isBusy(e)) throw e
       busySince ||= Date.now()
-      if (Date.now() - busySince > RENAME_RETRY_MS) throw e
+      if (Date.now() - busySince > RENAME_RETRY_MS) {
+        lockDenied = { until: Date.now() + LOCK_DENIED_MS, error: e }
+        throw e
+      }
     }
     if (mine) break
     if (Date.now() >= until) throw new Error(`Timed out waiting for the history lock of ${file ?? fileOfKey(key)}`)

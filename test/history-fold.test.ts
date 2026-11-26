@@ -53,6 +53,39 @@ test('20 folded saves of a 1 MB file leave 1 or 2 objects, not 20', async () => 
   for (const x of bak.versions) assert.ok(fs.existsSync(objectPath(x.hash)), 'every object the .bak names is there')
 })
 
+/** Every version in every index (and .bak) whose object is missing. */
+const missingObjects = (): string[] => {
+  const gone: string[] = []
+  for (const e of h.listHistoryEntries()) {
+    for (const p of [h.indexPath(e.key), h.bakPath(e.key)]) {
+      if (!fs.existsSync(p)) continue
+      for (const v of (JSON.parse(fs.readFileSync(p, 'utf8')) as { versions: { n: number; hash: string }[] }).versions)
+        if (!fs.existsSync(objectPath(v.hash))) gone.push(`${e.path} v${v.n}`)
+    }
+  }
+  return gone
+}
+
+test('identical new content saved to two files at once, then a fold of the first, never loses an object (50 runs)', async () => {
+  const t0 = Date.now()
+  const write = (f: string, bytes: Uint8Array) => async () => (await writeAtomic(f, bytes), bytes)
+  let lost = 0
+  for (let i = 0; i < 50; i++) {
+    const a = fresh('race-a.docx')
+    const b = fresh('race-b.docx')
+    const shared = crypto.randomBytes(1000) // brand new: neither file can reuse an object that was there before
+    await Promise.all([guardedWrite(a, matt, write(a, shared)), guardedWrite(b, matt, write(b, shared))])
+    await flushHistory()
+    await save(a, crypto.randomBytes(1000), matt) // folds into a's v1, replacing the shared object
+    assert.equal(listVersions(a).length, 1)
+    assert.equal(listVersions(b)[0].hash, sha(shared))
+    if (!fs.existsSync(objectPath(sha(shared)))) lost++
+  }
+  assert.equal(lost, 0, `${lost} of 50 runs lost b's object`)
+  assert.deepEqual(missingObjects(), [], 'every version in every index has its object')
+  assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`)
+})
+
 test("an object shared with another file's index is never deleted by a fold", async () => {
   const shared = crypto.randomBytes(1000)
   const b = fresh('b.docx')

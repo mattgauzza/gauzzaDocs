@@ -26,6 +26,7 @@ import {
   type Author,
   type HistoryIndex,
   type HistoryVersion,
+  type ObjectStamp,
 } from './store'
 
 export interface WriteContext {
@@ -130,33 +131,52 @@ function defaultSummary(authors: Author[], extra?: { baseline?: boolean }) {
 }
 
 /**
- * The object each file's latest record in this process stored: whether that record created it, and the mtime it
- * left it with. A record made by another process is not known here: its object is left for cleanup.
+ * The object each file's latest record in this process stored, and when that record created it, its stamp (inode
+ * and mtime). A record made by another process is not known here: its object is left for cleanup.
  */
-const lastStored = new Map<string, { hash: string; mtime: number; created: boolean }>()
+const lastStored = new Map<string, { hash: string; created: boolean; stamp?: ObjectStamp }>()
 
 /**
  * After a fold replaced the latest version's object, deletes that object right away when only this file used it and
  * nothing touched it since this file wrote it. Every autosave would otherwise leave a whole copy of the file on disk
  * for a day, outside the size cap. Caller holds the file's lock and has written the new index.
- * No other history can use the object: this file's record created it (storeObject's `created`), and any other
- * history would have had to reuse it through storeObject since, which refreshes its mtime. That is checked here
- * rather than by reading every index in the store, which takes a second with a thousand histories (on every
- * autosave). Best effort: anything uncertain keeps the object, and cleanup's 24 hour rule still covers it.
+ * No other history can use the object while its inode and mtime both still equal the stamp this file's record took
+ * when it created it: another history can only start using an object through storeObject, which never replaces an
+ * existing object and moves its mtime strictly later (and any rewrite is a new inode). That is checked here rather
+ * than by reading every index in the store, which takes a second with a thousand histories (on every autosave).
+ * The object is moved aside before it is judged, so nobody can start reusing it in between: a reuse that finds it
+ * gone stores its own copy. Best effort: anything uncertain keeps the object, and cleanup's 24 hour rule covers it.
  */
-async function dropReplaced(key: string, idx: HistoryIndex, replaced: string, seen: { hash: string; mtime: number; created: boolean } | undefined) {
+async function dropReplaced(key: string, idx: HistoryIndex, replaced: string, seen: { hash: string; created: boolean; stamp?: ObjectStamp } | undefined) {
   try {
-    if (!isHash(replaced) || seen?.hash !== replaced || !seen.created) return
+    if (!isHash(replaced) || seen?.hash !== replaced || !seen.created || !seen.stamp) return // no stamp: inodes cannot be trusted here
     if (idx.versions.some(v => v.hash === replaced)) return // an earlier version of this file has the same content
     await writeAtomic(bakPath(key), fs.readFileSync(indexPath(key))) // the .bak must not point at it either
     const obj = objectPath(replaced)
-    if (fs.statSync(obj).mtimeMs !== seen.mtime) return // reused by another history since: theirs now
-    fs.rmSync(obj, { force: true })
+    const aside = path.join(path.dirname(obj), `.${replaced}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.drop.tmp`)
+    fs.renameSync(obj, aside) // gone or held: leave it
+    let st: fs.BigIntStats | null = null
     try {
-      fs.rmdirSync(path.dirname(obj)) // only when empty
+      st = fs.statSync(aside, { bigint: true })
     } catch {
-      /* not empty */
+      /* cannot tell: put it back */
     }
+    if (st && st.ino === seen.stamp.ino && st.mtimeNs === seen.stamp.mtimeNs) {
+      fs.rmSync(aside, { force: true })
+      try {
+        fs.rmdirSync(path.dirname(obj)) // only when empty
+      } catch {
+        /* not empty */
+      }
+      return
+    }
+    // Reused by another history since: theirs now. Back where it was, unless a fresh copy is already there.
+    try {
+      fs.linkSync(aside, obj)
+    } catch {
+      if (!fs.existsSync(obj)) renameRetrySync(aside, obj)
+    }
+    fs.rmSync(aside, { force: true })
   } catch {
     /* left for cleanup */
   }

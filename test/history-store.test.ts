@@ -140,9 +140,24 @@ test('locks: EPERM or EBUSY creating the lock file counts as busy, like EEXIST (
     await assert.rejects(withLock('av', async () => 'never'), (e: NodeJS.ErrnoException) => e.code === 'EPERM')
     const waited = Date.now() - t0
     assert.ok(waited >= 1000 && waited < 5000, `gave up after ${waited} ms`)
+    // Remembered for 30 s: the next locks (any file) fail at once, so saves are not held a second each.
+    const t1 = Date.now()
+    const before = calls
+    await assert.rejects(withLock('other', async () => 'never'), (e: NodeJS.ErrnoException) => e.code === 'EPERM')
+    assert.ok(Date.now() - t1 < 200, `failed fast in ${Date.now() - t1} ms`)
+    assert.equal(calls, before, 'did not even try')
   } finally {
     fs.openSync = real
   }
+  // 30 s later it tries again; a lock taken clears it.
+  const realNow = Date.now
+  Date.now = () => realNow() + 31_000
+  try {
+    assert.equal(await withLock('av', async () => 'ok again'), 'ok again')
+  } finally {
+    Date.now = realNow
+  }
+  assert.equal(await withLock('av', async () => 'ok now'), 'ok now')
 })
 
 test('locks: a stale lock (dead pid or older than 30 s) is taken over', async () => {
