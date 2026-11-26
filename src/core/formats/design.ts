@@ -9,7 +9,8 @@ const newZip = async (): Promise<JSZipT> => new (await import('jszip')).default(
 export const MAX_ENTRIES = 10_000
 export const MAX_UNCOMPRESSED = 1024 * 1024 * 1024
 const ASSET_RE = /^assets\/[0-9a-f]{64}\.[a-z0-9]+$/
-const DESIGN = 'design.json'
+const MAX_ARTBOARD_SIDE = 8192
+const DESIGN ='design.json'
 const THUMB = 'thumbnail.png'
 
 /** `assets/<sha256>.<ext>`, the name an asset is stored under. */
@@ -26,12 +27,71 @@ async function openChecked(bytes: Uint8Array): Promise<JSZipT> {
   if (entries.length > MAX_ENTRIES) throw new Error(`This design has too many entries (more than ${MAX_ENTRIES})`)
   let total = 0
   for (const e of entries) {
-    const size = (e as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize
+    if (e.dir) continue
+    const size = (e as unknown as { _data?: { uncompressedSize?: unknown } })._data?.uncompressedSize
+    if (typeof size !== 'number' || Number.isNaN(size)) throw new Error("This design file can't be read.")
     // JSZip reads the 32-bit field as a signed number, so a huge declared size shows up negative.
-    total += typeof size === 'number' ? (size < 0 ? size + 2 ** 32 : size) : 0
+    total += size < 0 ? size + 2 ** 32 : size
     if (total > MAX_UNCOMPRESSED) throw new Error('This design is too large to open (over 1 GB uncompressed)')
   }
   return zip
+}
+
+const MAX_DESIGN_JSON = 64 * 1024 * 1024
+const MAX_THUMBNAIL = 16 * 1024 * 1024
+
+/** Bytes still allowed across everything inflated in one read or write. */
+interface Budget { left: number }
+
+/**
+ * Inflates one entry as a stream and counts the real bytes, so a deflate bomb that declares small sizes is
+ * stopped as soon as it passes `limit` or the shared budget, instead of filling memory first.
+ */
+interface Stream {
+  on(ev: 'data', fn: (c: Uint8Array) => void): Stream
+  on(ev: 'error', fn: (e: Error) => void): Stream
+  on(ev: 'end', fn: () => void): Stream
+  pause(): Stream
+  resume(): Stream
+}
+type Entry = JSZipT['files'][string]
+
+function readEntry(entry: Entry, label: string, limit: number, budget: Budget): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = []
+    let size = 0
+    let done = false
+    const stream = (entry as unknown as { internalStream(t: 'uint8array'): Stream }).internalStream('uint8array')
+    const fail = (err: Error): void => {
+      if (done) return
+      done = true
+      stream.pause()
+      chunks.length = 0
+      reject(err)
+    }
+    stream
+      .on('data', (chunk: Uint8Array) => {
+        if (done) return
+        size += chunk.length
+        budget.left -= chunk.length
+        if (budget.left < 0) return fail(new Error('This design is too large to open (over 1 GB uncompressed)'))
+        if (size > limit) return fail(new Error(`This design is too large to open (${label} is over ${Math.round(limit / 1048576)} MB)`))
+        chunks.push(chunk)
+      })
+      .on('error', (e: Error) => fail(e))
+      .on('end', () => {
+        if (done) return
+        done = true
+        const out = new Uint8Array(size)
+        let at = 0
+        for (const c of chunks) {
+          out.set(c, at)
+          at += c.length
+        }
+        resolve(out)
+      })
+      .resume()
+  })
 }
 
 /** Every asset path a layer refers to, paired with the layer's id. */
@@ -78,9 +138,11 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile> {
   const zip = await openChecked(bytes)
   const entry = zip.files[DESIGN]
   if (!entry || entry.dir) throw new Error('This is not a design file: design.json is missing')
+  const budget: Budget = { left: MAX_UNCOMPRESSED }
+  const json = await readEntry(entry, 'design.json', MAX_DESIGN_JSON, budget)
   let design: Design
   try {
-    design = JSON.parse(await entry.async('string')) as Design
+    design = JSON.parse(Buffer.from(json).toString('utf8')) as Design
   } catch {
     throw new Error('This design file is damaged: design.json is not valid JSON')
   }
@@ -89,14 +151,19 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile> {
   }
   design.components ??= []
   design.styles ??= { colors: [], text: [] }
+  for (const a of design.artboards) {
+    if (!(a.width <= MAX_ARTBOARD_SIDE) || !(a.height <= MAX_ARTBOARD_SIDE)) {
+      throw new Error(`Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`)
+    }
+  }
   checkAssetRefs(design)
   const assets: Record<string, Uint8Array> = {}
   for (const name of Object.keys(zip.files)) {
     if (!ASSET_RE.test(name) || zip.files[name].dir) continue
-    assets[name] = await zip.files[name].async('uint8array')
+    assets[name] = await readEntry(zip.files[name], name, MAX_UNCOMPRESSED, budget)
   }
   const t = zip.files[THUMB]
-  const thumbnail = t && !t.dir ? await t.async('uint8array') : undefined
+  const thumbnail = t && !t.dir ? await readEntry(t, THUMB, MAX_THUMBNAIL, budget) : undefined
   return thumbnail ? { design, assets, thumbnail } : { design, assets }
 }
 
@@ -105,23 +172,25 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile> {
  * and assets nothing refers to are dropped, so autosave only has to send design.json and new assets.
  */
 export async function designZipBytes(f: DesignFile, base?: Uint8Array): Promise<Uint8Array> {
+  checkAssetRefs(f.design)
   const zip = await newZip()
   zip.file(DESIGN, JSON.stringify(f.design), { compression: 'DEFLATE' })
   const refs = referencedAssets(f.design)
   const baseZip = base ? await openChecked(base) : null
+  const budget: Budget = { left: MAX_UNCOMPRESSED }
   for (const name of refs) {
-    if (!ASSET_RE.test(name)) continue
     let data: Uint8Array | undefined = f.assets[name]
     if (!data) {
       const e = baseZip?.files[name]
-      if (e && !e.dir) data = await e.async('uint8array')
+      if (e && !e.dir) data = await readEntry(e, name, MAX_UNCOMPRESSED, budget)
     }
-    if (data) zip.file(name, data, { compression: 'STORE' })
+    if (!data) throw new Error(`Asset ${name} is missing.`)
+    zip.file(name, data, { compression: 'STORE' })
   }
   let thumb = f.thumbnail
   if (!thumb && baseZip) {
     const t = baseZip.files[THUMB]
-    if (t && !t.dir) thumb = await t.async('uint8array')
+    if (t && !t.dir) thumb = await readEntry(t, THUMB, MAX_THUMBNAIL, budget)
   }
   if (thumb) zip.file(THUMB, thumb, { compression: 'DEFLATE' })
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })

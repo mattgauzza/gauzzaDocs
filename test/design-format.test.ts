@@ -100,6 +100,33 @@ test('hostile zips: a declared size over 1 GB is refused before inflating', asyn
   await assert.rejects(readDesignZip(buf), /too large/)
 })
 
+test('hostile zips: a deflate bomb that declares a small size is stopped while inflating', async () => {
+  const z = new JSZip()
+  z.file('design.json', ' '.repeat(70 * 1024 * 1024), { compression: 'DEFLATE' })
+  const buf = Buffer.from(await z.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))
+  assert.ok(buf.length < 1024 * 1024)
+  for (let i = 0; i + 46 <= buf.length; i++) if (buf.readUInt32LE(i) === 0x02014b50) buf.writeUInt32LE(100, i + 24)
+  const before = process.memoryUsage().arrayBuffers
+  await assert.rejects(readDesignZip(buf), /too large.*design\.json is over 64 MB/)
+  // Aborted at the cap: far less than the 70 MB the entry really holds is left behind.
+  assert.ok(process.memoryUsage().arrayBuffers - before < 70 * 1024 * 1024)
+})
+
+test('reading refuses artboards over 8192 px', async () => {
+  const d = newDesign('x')
+  d.artboards[0].width = 9000
+  await assert.rejects(readDesignZip(await zipOf({ 'design.json': JSON.stringify(d) })), /Artboards can be at most 8192 px per side\./)
+})
+
+test('saving refuses a missing asset and a malformed pointer', async () => {
+  const d = newDesign('x')
+  const ghost = `assets/${'a'.repeat(64)}.png`
+  d.artboards[0].layers = [{ ...base, id: 'p1', name: 'Pic', type: 'image', asset: ghost }]
+  await assert.rejects(designZipBytes({ design: d, assets: {} }), new RegExp(`Asset ${ghost} is missing\\.`))
+  d.artboards[0].layers = [{ ...base, id: 'p2', name: 'Pic', type: 'image', asset: '../secret.png' }]
+  await assert.rejects(designZipBytes({ design: d, assets: {} }), /Layer p2 points outside assets\//)
+})
+
 test('hostile zips: entries outside the format are ignored', async () => {
   const bytes = await zipOf({
     'design.json': JSON.stringify(newDesign('x')),
