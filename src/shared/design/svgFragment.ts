@@ -138,9 +138,10 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
     }
     return f
   }
-  // Every candidate costs a check plus, if it matches, a pass over each of its declarations: count it all first, so a
-  // sheet that asks too much is refused before any work. (A declaration applies as at most four attributes: a font
-  // shorthand as its longhands.)
+  // Every candidate costs a check plus, if it matches, a pass over each of its declarations, and writing their values
+  // (a step per 16 characters, so the budget also bounds the markup a sheet writes to about 8 MB): count it all first,
+  // so a sheet that asks too much is refused before any work. (A declaration applies as at most four attributes: a
+  // font shorthand as its longhands.)
   if (indexed) {
     const costs = new Map<Rule[], number>()
     const cost = (list: Rule[] | undefined): number => {
@@ -148,7 +149,11 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
       let c = costs.get(list)
       if (c === undefined) {
         c = 0
-        for (const r of list) c += 1 + r.decls.length
+        for (const r of list) {
+          let chars = 0
+          for (const d of r.decls) chars += d.prop.length + d.value.length
+          c += 1 + r.decls.length + Math.floor(chars / 16)
+        }
         costs.set(list, c)
       }
       return c
@@ -244,17 +249,21 @@ function prefixIds(root: Element, prefix: string): void {
  * attributes, every id prefixed with `prefix`, as a nested <svg> filling `box` and stretched to it the way the layer's
  * image is drawn. An image paints only inside its box, so the root's own overflow, filter and transform are dropped,
  * from attributes, its style attribute and style rules alike (a nested svg clips its content by default, but a filter
- * or transform on it could paint outside). Empty when the fragment can't be read, or its style rules are too complex
- * to apply.
+ * or transform on it could paint outside). Empty when the fragment can't be read, asks too much (elements, painting
+ * or style rules), or can't be written out (a RangeError for a string too long, say): it never throws, so an export
+ * with such a layer still comes out, without it.
  */
 export function inlineSvg(svg: string, box: Box, prefix: string): string {
-  let root: Element
   try {
-    root = cleanSvgRoot(svg).root
-    applyStyles(root, () => undefined)
+    return inlined(svg, box, prefix)
   } catch {
     return ''
   }
+}
+
+function inlined(svg: string, box: Box, prefix: string): string {
+  const root = cleanSvgRoot(svg).root
+  applyStyles(root, () => undefined)
   let viewBox = root.getAttribute('viewBox')
   if (!viewBox) {
     // as an image, a fragment without a viewBox is stretched from its own size

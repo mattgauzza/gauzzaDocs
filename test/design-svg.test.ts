@@ -677,9 +677,10 @@ test('a gradient never gives a paint more than 256 stops', () => {
 test('svg layers that would copy too much are refused with a plain message', () => {
   const mask = `<mask id="m">${'<rect width="1" height="1" fill="#fff"/>'.repeat(2000)}</mask>`
   const shapes = Array.from({ length: 1000 }, (_, i) => `<rect x="${i}" width="1" height="1" mask="url(#m)"/>`).join('')
-  // a mask's content is painted for every shape it masks, so the cleaner itself refuses this before any layer is made
+  // a mask's content is painted for every shape it masks (2,000,000 here), so the cleaner itself refuses this before any
+  // layer is made
   assert.throws(() => importSvg(svgOf(`<defs>${mask}</defs>${shapes}`, 'width="5000" height="10"'), 'M'), {
-    message: 'This SVG has too many elements (over 50,000).'
+    message: 'This SVG would take too long to draw (over 1,000,000 painted elements).'
   })
   // a filter is drawn once per shape, not painted as content, but each svg layer copies it: the import's budget refuses
   const filter = `<filter id="f">${'<feOffset dx="1"/>'.repeat(60)}</filter>`
@@ -819,7 +820,7 @@ test("a <use> inside definitions an svg layer copies counts toward the import's 
   assert.equal(kids(importSvg(masked(1), 'M').group)[0].type, 'svg')
   // the mask's content is painted for each masked shape, so the cleaner refuses 900 of them before the import starts
   underASecond('refusing 900 masked shapes', () =>
-    assert.throws(() => importSvg(masked(900), 'M'), { message: 'This SVG has too many elements (over 50,000).' })
+    assert.throws(() => importSvg(masked(900), 'M'), { message: 'This SVG would take too long to draw (over 1,000,000 painted elements).' })
   )
   // filtered groups each using the fan-out: the source draws it once per group, but each svg layer also copies it
   // into its own definitions, uses and all, and those copies are what the import's budget refuses
@@ -1062,7 +1063,7 @@ test('url( with a gap, a comment, braces or no closing bracket is dropped with a
 // Fix round 4: declarations charged per match, even-odd conversion cached, repeated painting counted, valid overrides
 
 const TOO_COMPLEX = "This SVG's style rules are too complex to apply."
-const TOO_MANY = 'This SVG has too many elements (over 50,000).'
+const TOO_SLOW = 'This SVG would take too long to draw (over 1,000,000 painted elements).'
 
 test('a style rule is charged its declarations on every element it matches, so the reviewer inputs are refused fast', () => {
   // 64 properties that keep a rect a native path on import (as the reviewer's pAD chose them)
@@ -1083,22 +1084,28 @@ test('a style rule is charged its declarations on every element it matches, so t
     underASecond(`${label}, import`, () => assert.throws(() => importSvg(svg, 'X'), { message: TOO_COMPLEX }))
     underASecond(`${label}, export`, () => assert.equal(inlineSvg(svg, BOX, 's1-'), ''))
   }
-  // what fits the budget applies every declaration to every rect, in under a second each way
-  const fits = svgOf(`<style>rect{${body}}</style>${'<rect width="1" height="1"/>'.repeat(7000)}`, size)
+  // what fits the budget applies every declaration to every rect, in under a second each way (since round 5 a rule is
+  // also charged a step per 16 characters it writes, so 4,000 rects fit where 7,000 did)
+  const fits = svgOf(`<style>rect{${body}}</style>${'<rect width="1" height="1"/>'.repeat(4000)}`, size)
   let out = ''
-  underASecond('one rule over 7,000 rects, import', () => assert.equal(kids(importSvg(fits, 'X').group).length, 7000))
-  underASecond('one rule over 7,000 rects, export', () => (out = inlineSvg(fits, BOX, 's1-')))
-  assert.equal(out.match(/<rect /g)?.length, 7000)
-  for (const p of props.filter(p => PRESENTATION.has(p))) assert.equal(out.split(` ${p}="1"`).length - 1, 7000, p)
+  underASecond('one rule over 4,000 rects, import', () => assert.equal(kids(importSvg(fits, 'X').group).length, 4000))
+  underASecond('one rule over 4,000 rects, export', () => (out = inlineSvg(fits, BOX, 's1-')))
+  assert.equal(out.match(/<rect /g)?.length, 4000)
+  for (const p of props.filter(p => PRESENTATION.has(p))) assert.equal(out.split(` ${p}="1"`).length - 1, 4000, p)
 })
 
 test('a font shorthand applies as at most four longhands, however many words lead it', () => {
-  // before, each leading word became a declaration of its own, applied to every rect the rule matched
-  const svg = svgOf(`<style>rect{font:${'bold '.repeat(100_000)}italic 12px Liberation Sans}</style>${'<rect width="1" height="1"/>'.repeat(10_000)}`, 'width="10" height="10"')
+  // before, each leading word became a declaration of its own, applied to every rect the rule matched. (Since round 5
+  // a value is at most 2,000 characters, about 400 words, and the rule pays for its length; the four still hold.)
+  const svg = svgOf(`<style>rect{font:${'bold '.repeat(390)}italic 12px Liberation Sans}</style>${'<rect width="1" height="1"/>'.repeat(3000)}`, 'width="10" height="10"')
   let out = ''
-  quickEither('a font shorthand of 100,000 words over 10,000 rects', svg)
+  quickEither('a font shorthand of 391 words over 3,000 rects', svg)
   underASecond('the same, exported', () => (out = inlineSvg(svg, BOX, 's1-')))
-  assert.equal(out.split(' height="1" font-size="12px" font-family="Liberation Sans" font-style="italic" font-weight="bold"/>').length - 1, 10_000)
+  assert.equal(out.split(' height="1" font-size="12px" font-family="Liberation Sans" font-style="italic" font-weight="bold"/>').length - 1, 3000)
+  // a 100,000-word shorthand is now longer than any value may be, so it isn't applied at all
+  const long = svgOf(`<style>rect{font:${'bold '.repeat(100_000)}italic 12px Liberation Sans}</style>${'<rect width="1" height="1"/>'.repeat(10_000)}`, 'width="10" height="10"')
+  quickEither('a font shorthand of 100,000 words over 10,000 rects', long)
+  assert.doesNotMatch(inlineSvg(long, BOX, 's1-'), /font/)
 })
 
 test('an even-odd outline is turned once per shape and baked once per place, however many uses or clips share it', () => {
@@ -1132,44 +1139,47 @@ test('an even-odd outline is turned once per shape and baked once per place, how
 })
 
 test('markers, patterns, masks and clip paths count each time they are painted', () => {
-  const drawn = (body: string, attrs = 'width="10" height="10"') => cleanSvg(svgOf(body, attrs)).drawn
+  // every painting counts its content (Ruling 14: a budget of its own; `drawn` counts each element once)
+  const painted = (body: string, attrs = 'width="10" height="10"') => cleanSvg(svgOf(body, attrs)).painted
   const rect = '<rect width="1" height="1"/>'
   const marker = `<marker id="m">${rect.repeat(2)}</marker>`
-  // a marker at every vertex that carries it; the copy where it stands is its first painting
-  assert.equal(drawn(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" marker-mid="url(#m)"/>`), 6 + 2 * 2)
-  assert.equal(drawn(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" marker="url(#m)"/>`), 6 + 4 * 2)
-  assert.equal(drawn(`<defs>${marker}</defs><polyline points="0 0 1 1 2 2 3 3" style="marker-start:url(#m);marker-end:url(#m)"/>`), 6 + 1 * 2)
+  // a marker at every vertex that carries it
+  assert.equal(painted(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" marker-mid="url(#m)"/>`), 3 * 2)
+  assert.equal(painted(`<defs>${marker}</defs><path d="M0 0L1 1L2 2" marker="url(#m)"/>`), 5 * 2)
+  assert.equal(painted(`<defs>${marker}</defs><polyline points="0 0 1 1 2 2 3 3" style="marker-start:url(#m);marker-end:url(#m)"/>`), 2 * 2)
   // a pattern for every element painted with it: set on each, inherited from a group, from a style rule (which also
   // matches the pattern's own rects, a loop that paints nothing), or taken back by a rule's inherit over an attribute
   const pattern = `<defs><pattern id="p" width="1" height="1">${rect.repeat(3)}</pattern></defs>`
   const filled = '<rect width="1" height="1" fill="url(#p)"/>'.repeat(100)
-  assert.equal(drawn(pattern + filled), 106 + 99 * 3)
-  assert.equal(drawn(`${pattern}<g fill="url(#p)">${rect.repeat(100)}</g>`), 107 + 99 * 3)
-  assert.equal(drawn(`<style>rect{fill:url(#p)}</style>${pattern}${rect.repeat(100)}`), 107 + 99 * 3)
-  assert.equal(drawn(`${pattern}<g fill="url(#p)"><style>.x{fill:inherit}</style>${'<rect class="x" width="1" height="1" fill="red"/>'.repeat(100)}</g>`), 108 + 99 * 3)
+  assert.equal(painted(pattern + filled), 100 * 3)
+  assert.equal(painted(`${pattern}<g fill="url(#p)">${rect.repeat(100)}</g>`), 100 * 3)
+  assert.equal(painted(`<style>rect{fill:url(#p)}</style>${pattern}${rect.repeat(100)}`), 100 * 3)
+  assert.equal(painted(`${pattern}<g fill="url(#p)"><style>.x{fill:inherit}</style>${'<rect class="x" width="1" height="1" fill="red"/>'.repeat(100)}</g>`), 100 * 3)
   // a marker inherited through a use, and one inside a pattern: painted at each vertex of each painting
-  assert.equal(drawn(`<defs>${marker}<path id="q" d="M0 0L1 1L2 2"/></defs>${'<use href="#q" marker-mid="url(#m)"/>'.repeat(10)}`), 6 + 2 * 10 + (30 - 1) * 2)
+  assert.equal(painted(`<defs>${marker}<path id="q" d="M0 0L1 1L2 2"/></defs>${'<use href="#q" marker-mid="url(#m)"/>'.repeat(10)}`), 10 * 3 * 2)
   const nested = `<defs><marker id="m">${rect.repeat(5)}</marker><pattern id="p"><path d="M0 0L1 1L2 2L3 3" marker-mid="url(#m)"/></pattern></defs>`
-  assert.equal(drawn(nested + filled), 110 + 99 * 1 + (400 - 1) * 5)
+  assert.equal(painted(nested + filled), 100 * (1 + 4 * 5))
   // a pattern borrowing its template's content paints that content: two borrowers count it twice
   const template = `<defs><pattern id="t">${rect.repeat(30)}</pattern><pattern id="u" href="#t"/><pattern id="v" href="#t"/></defs>`
-  assert.equal(drawn(`${template}<rect width="1" height="1" fill="url(#u)"/><rect width="1" height="1" fill="url(#v)"/>`), 37 + 30)
-  // a mask used once draws its content once, and nothing repainted leaves the count as it was
-  assert.equal(drawn(`<defs><mask id="k">${rect.repeat(30_000)}</mask></defs><rect width="1" height="1" mask="url(#k)"/>`), 30_004)
-  assert.equal(drawn(`<defs><linearGradient id="g"/></defs>${'<rect width="1" height="1" fill="url(#g)"/>'.repeat(100)}`), 103)
-  // past 50,000 the SVG is refused, fast, and so is its import
-  const clip = `<defs><clipPath id="c">${rect.repeat(60)}</clipPath></defs>`
-  assert.ok(drawn(clip + '<rect width="1" height="1" clip-path="url(#c)"/>'.repeat(800)) < 50_000)
+  assert.equal(painted(`${template}<rect width="1" height="1" fill="url(#u)"/><rect width="1" height="1" fill="url(#v)"/>`), 2 * 30)
+  // a mask used once paints its content once, and the elements are still counted once each
+  const once = cleanSvg(svgOf(`<defs><mask id="k">${rect.repeat(30_000)}</mask></defs><rect width="1" height="1" mask="url(#k)"/>`))
+  assert.deepEqual([once.drawn, once.painted], [30_004, 30_000])
+  assert.equal(painted(`<defs><linearGradient id="g"/></defs>${'<rect width="1" height="1" fill="url(#g)"/>'.repeat(100)}`), 0)
+  // past 1,000,000 painted elements the SVG is refused, fast, and so is its import
+  const clip = (n: number) => `<defs><clipPath id="c">${rect.repeat(n)}</clipPath></defs>`
+  assert.equal(painted(clip(60) + '<rect width="1" height="1" clip-path="url(#c)"/>'.repeat(16_000)), 960_000)
+  const big = `<defs><pattern id="t">${rect.repeat(100)}</pattern><pattern id="u" href="#t"/></defs>`
   const cases: [string, string][] = [
-    ['1,000 rects sharing a clip of 60', clip + '<rect width="1" height="1" clip-path="url(#c)"/>'.repeat(1000)],
-    ['2,000 rects painted with a borrowed pattern of 30', `${template}${'<rect width="1" height="1" fill="url(#u)"/>'.repeat(2000)}`],
+    ['20,000 rects sharing a clip of 60', clip(60) + '<rect width="1" height="1" clip-path="url(#c)"/>'.repeat(20_000)],
+    ['20,000 rects painted with a borrowed pattern of 100', `${big}${'<rect width="1" height="1" fill="url(#u)"/>'.repeat(20_000)}`],
     // pAH: a 2.2 MB path of a million vertices carrying a marker of 10,000 rects
     ['a marker of 10,000 on a million vertices', `<defs><marker id="m">${rect.repeat(10_000)}</marker></defs><path d="M0 0${'h0'.repeat(1_000_000)}" stroke="black" marker-mid="url(#m)"/>`]
   ]
   for (const [label, body] of cases) {
     const svg = svgOf(body, 'width="10" height="10"')
-    underASecond(`${label}, cleaned`, () => assert.throws(() => cleanSvg(svg), { message: TOO_MANY }))
-    underASecond(`${label}, imported`, () => assert.throws(() => importSvg(svg, 'X'), { message: TOO_MANY }))
+    underASecond(`${label}, cleaned`, () => assert.throws(() => cleanSvg(svg), { message: TOO_SLOW }))
+    underASecond(`${label}, imported`, () => assert.throws(() => importSvg(svg, 'X'), { message: TOO_SLOW }))
   }
 })
 
@@ -1195,4 +1205,135 @@ test('a later declaration replaces an earlier one only when it is valid', () => 
     const once = cleanSvg(svg).svg
     assert.equal(cleanSvg(once).svg, once, 'cleaning twice changes nothing')
   }
+})
+
+// Fix round 5 (Ruling 14): a paint budget of its own, short reference lists, template chains once, a symbol's own
+// mask and clip, long values, and each element's style read once
+
+const R = (n: number, s: string): string => s.repeat(n)
+const RECT = '<rect width="1" height="1"/>'
+
+test('repeated painting has a budget of its own: real files with markers, clips and patterns pass, bombs do not', () => {
+  // the three real-world shapes the element limit used to refuse: each element counts once, each painting apart
+  const legit: [string, string, number, number][] = [
+    ['26,000 paths each clipped to one page', svgOf(`<defs><clipPath id="page"><path d="M0 0h100v100H0z"/></clipPath></defs>${R(26_000, '<path clip-path="url(#page)" d="M1 1h2"/>')}`, 'width="100" height="100"'), 26_004, 26_000],
+    ['10 chart series of 2,000 vertices with a 3-element marker', svgOf(`<defs><marker id="dot"><circle r="2"/><circle r="1" fill="white"/><path d="M0 0h1"/></marker></defs>${R(10, `<polyline fill="none" stroke="black" marker-mid="url(#dot)" points="${Array.from({ length: 2000 }, (_, i) => `${i} ${i % 7}`).join(' ')}"/>`)}`, 'width="2000" height="10"'), 16, 60_000],
+    ['5,000 map parcels with a 10-line hatch', svgOf(`<defs><pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse">${R(10, '<path d="M0 0l8 8" stroke="#ccc"/>')}</pattern></defs>${R(5000, '<path fill="url(#hatch)" d="M0 0h5v5z"/>')}`, 'width="100" height="100"'), 5013, 50_000]
+  ]
+  for (const [label, svg, drawn, painted] of legit) {
+    underASecond(`${label}, cleaned`, () => {
+      const c = cleanSvg(svg)
+      assert.deepEqual([c.drawn, c.painted], [drawn, painted], label)
+    })
+    underASecond(`${label}, exported`, () => assert.ok(inlineSvg(svg, BOX, 's1-').length > 1000))
+  }
+  assert.deepEqual(kids(importSvg(legit[1][1], 'C').group).map(l => l.type), Array(10).fill('svg'))
+  // bombs: pAH (in the test before), the reviewer's nested ones (qC), and a mask or clip on a used symbol (qD)
+  const markers = (n: number) => `<defs><marker id="k${n}">${R(100, RECT)}</marker>${Array.from({ length: n }, (_, i) => `<marker id="k${i}"><path d="M0 0${R(99, 'h1')}" marker-mid="url(#k${i + 1})"/></marker>`).join('')}</defs><path d="M0 0${R(99, 'h1')}" marker-mid="url(#k0)"/>`
+  const symbol = (kind: string) =>
+    `<defs><${kind} id="m">${R(20_000, '<rect width="200" height="200" fill="white"/>')}</${kind}><symbol id="s" ${kind === 'mask' ? 'mask' : 'clip-path'}="url(#m)">${RECT}</symbol>` +
+    `<filter id="f"><feGaussianBlur stdDeviation="0"/></filter></defs><g filter="url(#f)">${R(9000, '<use href="#s"/>')}</g>`
+  const bombs: [string, string][] = [
+    ['a marker in a marker, 100 x 100 x 100', markers(1)],
+    ['a pattern in a pattern, 100 x 100 x 100', `<defs><pattern id="P2">${R(100, RECT)}</pattern><pattern id="P1">${R(100, '<rect width="1" height="1" fill="url(#P2)"/>')}</pattern></defs>${R(100, '<rect width="1" height="1" fill="url(#P1)"/>')}`],
+    ['40 levels of masks each masked by both of the next', `<defs>${Array.from({ length: 40 }, (_, i) => `<mask id="a${i}" mask="url(#a${i + 1}) , url(#b${i + 1})"><rect/></mask><mask id="b${i}" mask="url(#a${i + 1}), url(#b${i + 1})"><rect/></mask>`).join('')}<mask id="a40"/><mask id="b40"/></defs><rect mask="url(#a0)"/>`],
+    ['6 nested markers of 1,000 vertices', `<defs><marker id="k6"><rect/></marker>${Array.from({ length: 6 }, (_, i) => `<marker id="k${i}"><path d="M0 0${R(999, 'h1')}" marker-mid="url(#k${i + 1})"/></marker>`).join('')}</defs><path d="M0 0${R(999, 'h1')}" marker-mid="url(#k0)"/>`],
+    ['qD: a mask of 20,000 on a symbol used 9,000 times', symbol('mask')],
+    ['qD: the same with a clip path', symbol('clipPath')]
+  ]
+  for (const [label, body] of bombs) {
+    const svg = svgOf(body, 'width="200" height="200"')
+    underASecond(`${label}, cleaned`, () => assert.throws(() => cleanSvg(svg), { message: TOO_SLOW }))
+    underASecond(`${label}, imported`, () => assert.throws(() => importSvg(svg, 'B'), { message: TOO_SLOW }))
+  }
+  // a loop of masks paints each once per chain and stops where it comes back
+  const loop = cleanSvg(svgOf(`<defs><mask id="M1" mask="url(#M2)">${R(10, RECT)}</mask><mask id="M2" mask="url(#M1)">${R(10, RECT)}</mask></defs>${R(1000, '<rect width="1" height="1" mask="url(#M1)"/>')}`))
+  assert.deepEqual([loop.drawn, loop.painted], [1024, 1000 * 20])
+})
+
+test('a value keeps at most 4 references, so reading them costs the same for every element', () => {
+  const fill = (v: string) => cleanSvg(svgOf(`<defs>${['a', 'b', 'c', 'd', 'e', 'f'].map(i => `<pattern id="${i}"/>`).join('')}</defs><rect width="1" height="1" fill="${v}"/><rect width="1" height="1" style="mask:${v.replace(/ red$/, '')}"/>`))
+  const five = fill('url(#a) url(#b) url(#c) url(#d) url(#e) red')
+  assert.match(five.svg, /fill="url\(#a\) url\(#b\) url\(#c\) url\(#d\) red"/)
+  assert.ok(five.removed.includes('a value with more than 4 references (the rest were dropped) (2 times)'), JSON.stringify(five.removed))
+  assert.match(fill('url(#a),url(#b),url(#c),url(#d),url(#e),url(#f)').svg, /fill="url\(#a\),url\(#b\),url\(#c\),url\(#d\)"/)
+  // what stood on either side of a dropped reference never joins into one name
+  assert.match(fill('url(#a) url(#b) url(#c) url(#d) x url(#e)y').svg, /fill="url\(#a\) url\(#b\) url\(#c\) url\(#d\) x y"/)
+  for (const svg of [five.svg, fill('url(#a) url(#b) url(#c) url(#d) x url(#e)y').svg]) assert.equal(cleanSvg(svg).svg, svg)
+  // qA as the reviewer wrote it (10,000 references, now past 2,000 characters too) and at a length that fits
+  const pats = (n: number) => Array.from({ length: n }, (_, i) => `<pattern id="p${i}"/>`).join('')
+  const refs = (n: number) => Array.from({ length: n }, (_, i) => `url(#p${i})`).join(' ')
+  const size = 'width="10" height="10"'
+  for (const [label, svg] of [
+    ['qA: one rule naming a pattern 10,000 times, 45,000 rects', svgOf(`<defs><pattern id="p"/></defs><style>rect{fill:${R(10_000, 'url(#p) ').trim()}}</style>${R(45_000, '<rect/>')}`, size)],
+    ['qA: a group naming 10,000 patterns around 25,000 rects', svgOf(`<defs>${pats(10_000)}</defs><g fill="${refs(10_000)}">${R(25_000, '<rect/>')}</g>`, size)],
+    ['qA: the same, each rect inheriting', svgOf(`<defs>${pats(10_000)}</defs><g fill="${refs(10_000)}">${R(25_000, '<rect fill="inherit"/>')}</g>`, size)]
+  ]) {
+    underASecond(`${label}, cleaned`, () => cleanSvg(svg))
+    quickEither(label, svg)
+  }
+  const fits = svgOf(`<defs><pattern id="p"/></defs><style>rect{fill:${R(240, 'url(#p) ').trim()}}</style>${R(45_000, '<rect/>')}`, size)
+  underASecond('a rule naming a pattern 240 times, 45,000 rects, cleaned', () => assert.match(cleanSvg(fits).svg, /rect\{fill:url\(#p\) url\(#p\) url\(#p\) url\(#p\)\}/))
+  underASecond('the same, exported', () => inlineSvg(fits, BOX, 's1-'))
+})
+
+test("a pattern's chain of templates is followed once, however many patterns start on it", () => {
+  // qI: 12,000 patterns each borrowing the next's content, and 12,000 rects each painted with a different link
+  const N = 12_000
+  const pats = Array.from({ length: N }, (_, i) => `<pattern id="P${i}" href="#P${i + 1}"/>`).join('') + `<pattern id="P${N}" width="1" height="1">${RECT}</pattern>`
+  const svg = svgOf(`<defs>${pats}</defs>${Array.from({ length: N }, (_, i) => `<rect width="1" height="1" fill="url(#P${i})"/>`).join('')}`, 'width="10" height="10"')
+  underASecond('qI', () => assert.equal(cleanSvg(svg).painted, N))
+})
+
+test("a symbol's own mask and clip path are painted for each use of it", () => {
+  for (const kind of ['mask', 'clipPath']) {
+    const attr = kind === 'mask' ? 'mask' : 'clip-path'
+    const c = cleanSvg(svgOf(`<defs><${kind} id="m">${R(1000, RECT)}</${kind}><symbol id="s" ${attr}="url(#m)">${RECT}</symbol></defs>${R(100, '<use href="#s"/>')}`))
+    assert.equal(c.painted, 100 * 1000, kind)
+  }
+})
+
+test('values past 2,000 characters are dropped, and an export never fails on a layer it cannot inline', async () => {
+  const one = (attrs: string) => cleanSvg(svgOf(`<rect width="1" height="1" ${attrs}/>`))
+  const dashes = (n: number) => R(Math.ceil(n / 2), '1 ').slice(0, n)
+  assert.match(one(`stroke-dasharray="${dashes(2000)}"`).svg, /stroke-dasharray="/)
+  const long = one(`stroke-dasharray="${dashes(2001)}" style="stroke-dashoffset:${R(2001, '1')};stroke-width:2"`)
+  assert.doesNotMatch(long.svg, /stroke-dash/)
+  assert.match(long.svg, /style="stroke-width:2"/)
+  assert.deepEqual(long.removed, ['a style value longer than 2,000 characters (stroke-dashoffset)', 'a value longer than 2,000 characters (stroke-dasharray)'])
+  assert.equal(cleanSvg(long.svg).svg, long.svg)
+  // path data and points are not capped
+  const d = `M0 0${R(2000, 'h1')}`
+  assert.ok(cleanSvg(svgOf(`<path d="${d}"/><polyline points="${R(1000, '1 1 ')}"/>`)).svg.includes(d))
+  // qG: a long dash array a rule would copy onto every rect, and one just under the cap that the style budget refuses
+  const sheet = (n: number, rects: number) => svgOf(`<style>rect{stroke-dasharray:${dashes(n)}}</style>${R(rects, '<rect/>')}`, 'width="10" height="10"')
+  for (const rects of [5000, 30_000]) {
+    let out = ''
+    quickEither(`a 20,000-character dash array over ${rects} rects`, sheet(20_000, rects))
+    underASecond(`a 20,000-character dash array over ${rects} rects, exported`, () => (out = inlineSvg(sheet(20_000, rects), BOX, 's1-')))
+    assert.ok(out.length < 400_000, `${out.length} characters`)
+  }
+  underASecond('a 2,000-character dash array over 30,000 rects', () => assert.throws(() => importSvg(sheet(2000, 30_000), 'G'), { message: TOO_COMPLEX }))
+  // an export with layers that can't be inlined (too much to paint, style rules too complex) still comes out, without them
+  const d2 = newDesign('instagram')
+  const layer = (id: string, svg: string): Layer => ({ ...base, id, name: id, type: 'svg', x: 0, y: 0, width: 10, height: 10, svg })
+  const bomb = svgOf(`<defs><pattern id="P2">${R(100, RECT)}</pattern><pattern id="P1">${R(100, '<rect width="1" height="1" fill="url(#P2)"/>')}</pattern></defs>${R(100, '<rect width="1" height="1" fill="url(#P1)"/>')}`, 'viewBox="0 0 10 10"')
+  d2.artboards[0].layers.push(layer('a1', bomb), layer('a2', sheet(2000, 30_000)), layer('a3', svgOf('<rect id="ok" width="5" height="5" fill="#123456"/>', 'viewBox="0 0 10 10"')))
+  const out = designToSvg(d2, d2.artboards[0].id, { fonts: await fontsOf(d2), assets: {}, mode: 'export' })
+  assert.match(out, /<rect id="s3-ok" width="5" height="5" fill="#123456"\/>/)
+  assert.doesNotMatch(out, /s1-|s2-/)
+})
+
+test("a shape's own style is read once, however many uses draw it", () => {
+  // qE, with values under the cap: a rect whose style attribute holds 20 long declarations (about 40 KB), drawn by
+  // 4,000 uses; read per use, that was 160 MB of style
+  const props = [...STYLE_ONLY].filter(p => p !== 'font' && p !== 'transform').slice(0, 20)
+  assert.equal(props.length, 20)
+  const style = props.map(p => `${p}:${R(1990, '1')}`).join(';')
+  const svg = svgOf(`<defs><rect id="r" width="1" height="1" style="${style}"/></defs>${R(4000, '<use href="#r"/>')}`, 'width="10" height="10"')
+  assert.ok(cleanSvg(svg).svg.includes(`${props[19]}:${R(1990, '1')}`), 'the declarations are kept')
+  underASecond('4,000 uses of a rect with 40 KB of style', () => assert.equal(kids(importSvg(svg, 'E').group).length, 4000))
+  // qE as the reviewer wrote it: one 400,000-character value, now dropped
+  const qE = svgOf(`<defs><rect id="r" width="1" height="1" style="line-height:${R(400_000, '1')}"/></defs>${R(4000, '<use href="#r"/>')}`, 'width="10" height="10"')
+  underASecond('qE', () => assert.equal(kids(importSvg(qE, 'E').group).length, 4000))
 })

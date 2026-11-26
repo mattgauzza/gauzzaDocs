@@ -8,8 +8,8 @@ import {
 import { type RenderOptions, layerToSvg } from './render'
 import { sharedAssetName } from './sha256'
 import {
-  INKSCAPE_NS, MAX_SVG_BYTES, MAX_SVG_ELEMENTS, MAX_USE_DEPTH, PRESENTATION, SVG_NS, XLINK_NS, allElements, cleanSvg, cleanSvgRoot, dataUriBytes, expandedSizes,
-  elementChildren, hrefId, idMap, imageInfo, serializeSvg, urlRefs
+  INKSCAPE_NS, MAX_PAINTS, MAX_SVG_BYTES, MAX_SVG_ELEMENTS, MAX_USE_DEPTH, PRESENTATION, SVG_NS, TOO_SLOW, XLINK_NS, allElements, cleanSvg,
+  cleanSvgRoot, dataUriBytes, expandedSizes, elementChildren, hrefId, idMap, imageInfo, serializeSvg, urlRefs
 } from './svgClean'
 import { type PaintSpace, type Style, type Viewport, alphaOf, diagonal, len, paintOf, urlId } from './svgPaint'
 import { applyStyles } from './svgFragment'
@@ -37,8 +37,8 @@ export interface ImportResult {
 }
 
 interface Ctx extends Viewport {
-  /** Layers made and elements copied into svg layers, and those layers' markup, against the import limits. */
-  budget: { elements: number; bytes: number; json: number }
+  /** Layers made and elements copied into svg layers, those layers' markup and what they paint, against the import limits. */
+  budget: { elements: number; bytes: number; json: number; paints: number }
   /** How many elements each element draws with its <use> expanded, for what svg layers copy. */
   sizes: Map<Element, number>
   ids: Map<string, Element>
@@ -73,7 +73,13 @@ const BLENDS = new Set([
 const r6 = (v: number): number => Math.round(v * 1e6) / 1e6
 const roundBox = (b: Box, f = r6): Box => ({ x: f(b.x), y: f(b.y), w: f(b.w), h: f(b.h) })
 const r3 = (v: number): number => Math.round(v * 1e3) / 1e3
-const transformOf = (el: Element): Matrix => parseTransform(el.getAttribute('transform')) ?? IDENTITY
+/** Each element's transform, read once: a <use> draws its target again, and the target's attributes don't change. */
+const TRANSFORMS = new WeakMap<Element, Matrix>()
+const transformOf = (el: Element): Matrix => {
+  let m = TRANSFORMS.get(el)
+  if (!m) TRANSFORMS.set(el, (m = parseTransform(el.getAttribute('transform')) ?? IDENTITY))
+  return m
+}
 
 function boxUnder(b: Box, m: Matrix): Box {
   const pts = [apply(m, b.x, b.y), apply(m, b.x + b.w, b.y), apply(m, b.x, b.y + b.h), apply(m, b.x + b.w, b.y + b.h)]
@@ -96,19 +102,36 @@ function conformal(m: Matrix): boolean {
   return Math.abs(m[0] * m[0] + m[1] * m[1] - (m[2] * m[2] + m[3] * m[3])) <= 1e-9 * k && Math.abs(m[0] * m[2] + m[1] * m[3]) <= 1e-9 * k
 }
 
+/**
+ * An element's own style, in the order it applies: its presentation attributes (null for `inherit`, which takes the
+ * parent's value), then its style attribute's declarations. Read once per element: a <use> draws its target again,
+ * and a long style attribute read per use would cost its length every time.
+ */
+const OWN_STYLES = new WeakMap<Element, [string, string | null][]>()
+function ownStyle(el: Element): [string, string | null][] {
+  let own = OWN_STYLES.get(el)
+  if (!own) {
+    own = []
+    for (const a of Array.from(el.attributes)) {
+      const k = a.localName ?? a.name
+      if (a.namespaceURI || !PRESENTATION.has(k)) continue
+      const v = a.value.trim()
+      own.push([k, v === 'inherit' ? null : v])
+    }
+    for (const d of splitDeclarations(el.getAttribute('style') ?? '')) own.push([d.prop, d.value])
+    OWN_STYLES.set(el, own)
+  }
+  return own
+}
+
 /** The element's computed style: what it inherits plus its own presentation attributes and leftover style. */
 function styleOf(el: Element, parent: Style): Style {
   const s: Style = {}
   for (const k in parent) if (INHERITED.has(k)) s[k] = parent[k]
-  for (const a of Array.from(el.attributes)) {
-    const k = a.localName ?? a.name
-    if (a.namespaceURI || !PRESENTATION.has(k)) continue
-    const v = a.value.trim()
-    if (v === 'inherit') {
-      if (k in parent) s[k] = parent[k]
-    } else s[k] = v
+  for (const [k, v] of ownStyle(el)) {
+    if (v !== null) s[k] = v
+    else if (k in parent) s[k] = parent[k]
   }
-  for (const d of splitDeclarations(el.getAttribute('style') ?? '')) s[d.prop] = d.value
   // relative font sizes resolve against the parent's
   const fs = /^\s*([\d.]+)\s*(em|%)\s*$/.exec(s['font-size'] ?? '')
   if (fs) s['font-size'] = `${parseFloat(fs[1]) * (fs[2] === '%' ? 0.01 : 1) * (len(parent['font-size'] ?? '16', 16) ?? 16)}px`
@@ -157,8 +180,12 @@ const ellipse = (cx: number, cy: number, rx: number, ry: number): Seg[] => [
   M(cx + rx, cy), Arc(rx, ry, cx, cy + ry), Arc(rx, ry, cx - rx, cy), Arc(rx, ry, cx, cy - ry), Arc(rx, ry, cx + rx, cy), Z
 ]
 
-/** Parsed path data per <path> element, so a path drawn by many <use> elements is parsed once. Never changed. */
-const PATHS = new WeakMap<Element, Seg[] | null>()
+/**
+ * Each shape's outline (path data parsed, or a basic shape's), so a shape drawn by many <use> elements is read once.
+ * The viewport a percentage resolves against is fixed for one import, and each import has elements of its own. Never
+ * changed.
+ */
+const OUTLINES = new WeakMap<Element, Seg[] | null>()
 /**
  * A shape's even-odd outline turned for the nonzero rule, per element, so a shape drawn by many <use> elements or
  * clipping many shapes is converted once (the check for crossings is quadratic in its edges). The conversion runs in
@@ -175,16 +202,20 @@ function nonZeroOf(el: Element, segs: Seg[]): ReturnType<typeof evenOddToNonZero
   return out
 }
 
-/** A basic shape's outline in its own user space, or null when it draws nothing. */
+/** A shape's outline in its own user space, or null when it draws nothing. */
 function shapeSegs(el: Element, vp: Viewport): Seg[] | null {
+  if (OUTLINES.has(el)) return OUTLINES.get(el)!
+  const segs = outlineOf(el, vp)
+  OUTLINES.set(el, segs)
+  return segs
+}
+
+function outlineOf(el: Element, vp: Viewport): Seg[] | null {
   const L = (n: string, ref: number) => len(el.getAttribute(n), ref)
   switch (el.localName) {
     case 'path': {
-      if (PATHS.has(el)) return PATHS.get(el)!
       const parsed = parsePath(el.getAttribute('d'))
-      const segs = parsed.length ? parsed : null
-      PATHS.set(el, segs)
-      return segs
+      return parsed.length ? parsed : null
     }
     case 'rect': {
       const x = L('x', vp.vw) ?? 0
@@ -443,9 +474,12 @@ function svgLayer(el: Element, ctm: Matrix, inh: Style, s: Style, why: string, c
     `<g transform="matrix(${ctm.map(v => num(v, 6)).join(' ')})"${inherited}>${serializeSvg(el, false)}</g></svg>`
   spend(ctx, 0, markup.length)
   // What is stored is always cleanSvg's own output: composed markup is cleaned again, never trusted as it is. The
-  // layer ends up charged at least what that cleaning says it draws, which is what a browser will draw from it.
-  const { svg, drawn } = cleanSvg(markup)
+  // layer ends up charged at least what that cleaning says it draws, which is what a browser will draw from it, and
+  // what it paints goes against the import's paint budget.
+  const { svg, drawn, painted } = cleanSvg(markup)
   if (drawn > estimate) spend(ctx, drawn - estimate)
+  ctx.budget.paints += painted
+  if (ctx.budget.paints > MAX_PAINTS) throw new Error(TOO_SLOW)
   const label = name ?? nameOf(el, 'SVG', ctx)
   ctx.kept.push(`${label}: kept as an SVG layer because ${why}`)
   return charge(ctx, { ...base(ctx, label, box, { ...s, opacity: '1' }), type: 'svg', svg })
@@ -815,7 +849,7 @@ export function importSvg(svg: string, name: string, opts: ImportOptions = {}): 
   const kept: string[] = []
   applyStyles(root, n => kept.push(n))
   const { m, vp, frame } = rootFrame(root)
-  const ctx: Ctx = { ...vp, budget: { elements: 0, bytes: 0, json: 0 }, sizes: new Map(), ids: idMap(root), taken: opts.taken ?? new Set(), counts: {}, kept, assets: {}, frame, fonts: opts.fonts }
+  const ctx: Ctx = { ...vp, budget: { elements: 0, bytes: 0, json: 0, paints: 0 }, sizes: new Map(), ids: idMap(root), taken: opts.taken ?? new Set(), counts: {}, kept, assets: {}, frame, fonts: opts.fonts }
   ctx.sizes = expandedSizes(root, ctx.ids)
   const s = styleOf(root, {})
   const children: Layer[] = []
