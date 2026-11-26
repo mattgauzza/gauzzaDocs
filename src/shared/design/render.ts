@@ -268,8 +268,10 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
 /** A rect, ellipse, line or path element; painted, or bare geometry for a clip path. */
 function shapeEl(ctx: Ctx, l: Layer, key: string, paint: boolean, tf = ''): string {
   const b = boxOf(l)
-  const fill = paint ? paintAttr(ctx, l.fill, 'fill', key, b) : ''
-  const stroke = paint ? strokeAttr(ctx, l, key, b, l.stroke) : ''
+  // a path is drawn translated to its box, and a user-space gradient lives in the path's own space: offset it back
+  const pb = l.type === 'path' ? { ...b, x: b.x - fin(l.x, 0), y: b.y - fin(l.y, 0) } : b
+  const fill = paint ? paintAttr(ctx, l.fill, 'fill', key, pb) : ''
+  const stroke = paint ? strokeAttr(ctx, l, key, pb, l.stroke) : ''
   const t = (inner = ''): string => {
     const all = [tf, inner].filter(Boolean).join(' ')
     return all ? ` transform="${all}"` : ''
