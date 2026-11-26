@@ -395,3 +395,33 @@ html.look .ProseMirror { caret-color: transparent; }
 .file-head { -webkit-app-region: drag; }
 .file-head :is(button, input, select, textarea, a, label, [contenteditable]) { -webkit-app-region: no-drag; }
 .menu, .menu-fly, .scrim, .ctx-scrim, .toast, .conn, .sel-bubble, .color-pop, .sg-menu, .sl-pop, .sl-present, [role='dialog'] { -webkit-app-region: no-drag; }
+
+/* Loading outlines: each editor kind shows its own shape while it loads, and lists show placeholder rows */
+@keyframes sk-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.sk { --sk: color-mix(in srgb, var(--text) 9%, transparent); position: relative; display: block; overflow: hidden; border-radius: 6px; background: var(--sk); flex: none; }
+.sk::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 7%, transparent), transparent); animation: sk-shimmer 1.4s ease-in-out infinite; }
+.sk.sk-on-page { --sk: #eceff1; } /* pages and slides stay white in both themes */
+.sk.sk-on-page::after { background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .7), transparent); }
+.sk-gap { display: block; height: 10px; }
+.sk-editor { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.sk-toolbar { flex: none; display: flex; align-items: center; height: 48px; margin: 6px 12px; padding: 0 12px; border-radius: 24px; background: var(--toolbar, var(--hover)); }
+.sk-canvas { flex: 1; overflow: hidden; display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 20px 0; background: var(--canvas); }
+.sk-page { width: min(816px, 92%); flex: none; display: flex; flex-direction: column; gap: 12px; padding: 72px 88px; min-height: 900px; background: #fff; box-shadow: 0 1px 3px rgba(60, 64, 67, .15); }
+.sk-sheet { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.sk-formula { flex: none; display: flex; align-items: center; height: 32px; padding: 0 16px; border-bottom: 1px solid var(--line-soft); }
+.sk-grid { flex: 1; background-image: linear-gradient(var(--line-soft) 1px, transparent 1px), linear-gradient(90deg, var(--line-soft) 1px, transparent 1px); background-size: 100px 22px; background-position: 46px 0; }
+.sk-grid-row { display: grid; grid-template-columns: repeat(5, 100px); align-items: center; height: 22px; padding-left: 54px; }
+.sk-grid-row .sk { max-width: 82px; }
+.sk-slides { flex: 1; display: flex; overflow: hidden; }
+.sk-strip { width: 180px; flex: none; display: flex; flex-direction: column; gap: 12px; padding: 12px 16px; border-right: 1px solid var(--line-soft); }
+.sk-thumb { display: block; aspect-ratio: 16 / 9; border-radius: 6px; background: color-mix(in srgb, var(--text) 9%, transparent); }
+.sk-stage { flex: 1; display: grid; place-items: center; padding: 24px; background: var(--canvas); }
+.sk-slide { width: min(960px, 92%); aspect-ratio: 16 / 9; display: flex; flex-direction: column; gap: 16px; padding: 6% 7%; background: #fff; border-radius: 4px; box-shadow: 0 1px 3px rgba(60, 64, 67, .15); }
+.sk-code { flex: 1; overflow: hidden; padding-top: 8px; }
+.sk-code-line { position: relative; display: flex; align-items: center; height: 22px; }
+.sk-ln { position: absolute; left: 0; width: 40px; text-align: right; font: 12px var(--mono, Consolas, monospace); color: color-mix(in srgb, var(--muted) 60%, transparent); }
+.sk-row { display: flex; align-items: center; gap: 12px; height: 36px; padding: 0 14px; }
+.sk-file-row { display: flex; align-items: center; gap: 16px; height: 48px; padding: 0 12px; }
+.sk-icon { width: 18px; height: 18px; border-radius: 4px; }
+.sk-file-row .sk-icon { width: 24px; height: 24px; }
+@media (prefers-reduced-motion: reduce) { .sk::after { animation: none; } }

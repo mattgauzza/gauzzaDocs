@@ -10,6 +10,7 @@ import { EDITORS } from './editors'
 import { StatusBar } from './shell/StatusBar'
 import { Connections } from './shell/Connections'
 import { needsYouIn, trackFiles, useNeedsYou, useNeedsYouVersion } from './shell/needsYou'
+import { EditorSkeleton } from './shell/Skeleton'
 import { agentColor } from '../../shared/agentColors'
 import { ToolbarOverflow } from './shell/ToolbarOverflow'
 import { usePanelSize } from './shell/resize'
@@ -967,12 +968,13 @@ export default function App() {
         {explorer && active !== HOME && <Explorer activePath={cur?.path || null} onOpen={open} onClose={() => setExplorer(false)} say={say} />}
         <div className="editors">
           {tabs.map(t => {
-            if (!t.payload) return t.id === active ? <div key={`${t.id}:sleep`} className="editor-placeholder">{t.error || 'Loading…'}</div> : null
+            if (!t.payload)
+              return t.id === active ? (t.error ? <div key={`${t.id}:sleep`} className="editor-placeholder">{t.error}</div> : <EditorSkeleton key={`${t.id}:sleep`} kind={t.large ? 'large' : t.kind} />) : null
             const E = t.large ? LargeViewer : EDITORS[t.kind]
             return (
               <div key={`${t.id}:${t.version}`} className="editor-host" data-tab={t.id} style={{ display: t.id === active ? undefined : 'none' }}>
                 <TabBoundary onError={e => patch(t.id, { error: e.message })} onReload={() => reloadFromDisk(t.id)}>
-                  <Suspense fallback={<div className="editor-placeholder">Loading…</div>}>
+                  <Suspense fallback={<EditorSkeleton kind={t.large ? 'large' : t.kind} />}>
                     <E path={t.path} payload={t.payload} settings={settings} active={t.id === active} onChange={changeFor(t.id)} setHandle={handleSetter(t)} />
                   </Suspense>
                 </TabBoundary>

@@ -5,6 +5,7 @@ import { type Entry, type Project, api, dirOf } from '../lib'
 import { Icon, KindIcon } from './icons'
 import { ContextMenu, openEntry, opensInApp } from './Projects'
 import { samePath, useFolderChanges, useWatchFolder } from './folderWatch'
+import { RowSkeleton } from './Skeleton'
 
 /**
  * The explorer beside the editor (View > Explorer, Ctrl+Shift+E), like VS Code's: the tree of the project that holds
@@ -100,7 +101,7 @@ export function Explorer(props: { activePath: string | null; onOpen(p: string): 
 
   const render = (dir: string, depth: number): React.ReactNode => {
     const list = children[dir]
-    if (!list) return <div className="ex-row muted" style={{ paddingLeft: 12 + depth * 14 }}>Loading...</div>
+    if (!list) return <div style={{ paddingLeft: depth * 14 }}><RowSkeleton rows={depth ? 2 : 5} /></div>
     if (!list.length && depth > 0) return <div className="ex-row muted" style={{ paddingLeft: 12 + depth * 14 }}>Empty</div>
     return list.map(e => {
       const isOpen = e.dir && open.has(e.path)

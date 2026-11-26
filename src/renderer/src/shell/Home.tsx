@@ -18,7 +18,7 @@ export function Home(props: {
   refreshKey: number
   say(msg: string): void
 }) {
-  const [projects, setProjects] = useState<Project[]>([])
+  const [projects, setProjects] = useState<Project[] | null>(null) // null until the first load finishes
   const [sel, setSelState] = useState<string>(() => {
     try {
       return localStorage.getItem('homeView') || 'recent'
@@ -32,7 +32,7 @@ export function Home(props: {
   }
   const loadProjects = useCallback(() => api.projectsList().then(setProjects, () => setProjects([])), [])
   useEffect(() => void loadProjects(), [props.refreshKey])
-  const project = projects.find(p => p.path === sel)
+  const project = projects?.find(p => p.path === sel)
   const [view, setView] = useState<'list' | 'grid'>('list')
 
   // Dropping a folder adds it as a project; dropping files opens them.
@@ -51,7 +51,7 @@ export function Home(props: {
 
   return (
     <div className="home-shell" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
-      <ProjectRail projects={projects} selected={project ? sel : 'recent'} onSelect={select} onChanged={loadProjects} say={props.say} />
+      <ProjectRail projects={projects ?? []} loading={projects === null} selected={project ? sel : 'recent'} onSelect={select} onChanged={loadProjects} say={props.say} />
       <div className="home-main">
         {project ? (
           <div className="home-inner home-files">

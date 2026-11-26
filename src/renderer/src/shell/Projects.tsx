@@ -7,6 +7,7 @@ import { Icon, KindIcon } from './icons'
 import { MenuList } from './Menus'
 import { useFolderChanges, useWatchFolder } from './folderWatch'
 import { fileSize } from './StatusBar'
+import { RowSkeleton } from './Skeleton'
 
 /** Files gauzzaDocs doesn't edit open in their usual app instead (pictures, archives, media, programs, old Office). */
 const SYSTEM = new Set(('png jpg jpeg gif bmp webp ico tif tiff heic svgz mp3 wav flac ogg m4a mp4 mov avi mkv webm zip 7z rar gz tgz tar ' +
@@ -73,6 +74,7 @@ export function NameDialog(props: { title: string; value: string; selectStem?: b
 
 export function ProjectRail(props: {
   projects: Project[]
+  loading?: boolean // the list hasn't loaded yet: show placeholder rows, not "Add a folder"
   selected: string // 'recent' or a project path
   onSelect(sel: string): void
   onChanged(): void
@@ -126,7 +128,8 @@ export function ProjectRail(props: {
           </button>
         </div>
       ))}
-      {!props.projects.length && (
+      {props.loading && <RowSkeleton rows={3} />}
+      {!props.loading && !props.projects.length && (
         <button className="rail-add" onClick={add}><Icon name="plus" size={16} /> Add a folder</button>
       )}
       {menu && <ContextMenu at={menu.at} items={items(menu.p)} onClose={() => setMenu(null)} />}
@@ -270,7 +273,7 @@ export function FolderBrowser(props: {
 
       {props.project.missing && <p className="error">This folder can't be found. It may be on a drive that isn't connected.</p>}
       {err && !props.project.missing && <p className="error">{err}</p>}
-      {entries === null && !found && <p className="muted">Loading...</p>}
+      {entries === null && !found && !err && <RowSkeleton rows={6} className="sk-file-row" />}
       {found && <p className="muted small">{found.results.length ? `${found.results.length}${found.truncated ? '+' : ''} ${found.results.length === 1 && !found.truncated ? 'match' : 'matches'} in ${props.project.name}` : 'No matches.'}</p>}
       {entries && !found && !shown.length && !err && <div className="empty"><p>This folder is empty.</p></div>}
 
