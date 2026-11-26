@@ -119,3 +119,109 @@ test('a fold keeps an object touched since this file wrote it, or used by an ear
   assert.deepEqual(listVersions(c).map(v => v.n), [1, 2])
   assert.deepEqual(Buffer.from(await showVersion(c, 1)), x)
 })
+
+test("a fold's put-back that finds a fresh copy breaks that copy's stamp, so its creator never deletes it (three recorders)", async () => {
+  const a = fresh('three-a.docx')
+  const b = fresh('three-b.docx')
+  const c = fresh('three-c.docx')
+  const X = crypto.randomBytes(1000)
+  await save(a, X, matt) // a creates X (its stamp)
+  await save(c, X, matt) // c reuses X: its mtime moves, a's stamp no longer matches
+  // While a's fold has X aside, b stores X: it finds it missing and creates a fresh copy, with b's own stamp.
+  const realLink = fs.promises.link
+  let fired = false
+  fs.promises.link = (async (from: fs.PathLike, to: fs.PathLike) => {
+    if (!fired && String(from).endsWith('.drop.tmp')) {
+      fired = true
+      await guardedWrite(b, matt, async () => (await writeAtomic(b, X), X))
+      await h.checkOutside(b) // queued after b's record, so b's record is done
+      assert.ok(fs.existsSync(objectPath(sha(X))), 'b made a fresh copy while X was aside')
+    }
+    return realLink(from, to)
+  }) as typeof fs.promises.link
+  try {
+    await save(a, crypto.randomBytes(1000), matt) // a folds away from X: c reused it, so it goes back (EEXIST: b's copy is there)
+  } finally {
+    fs.promises.link = realLink
+  }
+  assert.ok(fired, "the put-back ran into b's fresh copy")
+  assert.deepEqual(fs.readdirSync(path.dirname(objectPath(sha(X)))).filter(n => h.isDropped(n)), [], 'nothing left aside')
+  await save(b, crypto.randomBytes(1000), matt) // b folds away from X: its stamp must no longer match
+  assert.deepEqual(Buffer.from(await showVersion(c, 1)), X, "c's v1 still has its object")
+  assert.deepEqual(missingObjects(), [])
+})
+
+test('a put-back Windows refuses leaves the only copy aside, never deleted; recovery puts it back', async () => {
+  const a = fresh('av-a.docx')
+  const c = fresh('av-c.docx')
+  const X = crypto.randomBytes(1000)
+  await save(a, X, matt) // a creates X
+  await save(c, X, matt) // c reuses X
+  const obj = objectPath(sha(X))
+  const shard = path.dirname(obj)
+  const aside = () => fs.readdirSync(shard).filter(n => h.isDropped(n))
+  const { link, rename } = fs.promises
+  const refuse = () => {
+    const eperm = () => Object.assign(new Error('EPERM: operation not permitted (held by an antivirus)'), { code: 'EPERM' })
+    fs.promises.link = (async (p: fs.PathLike, q: fs.PathLike) => (String(p).endsWith('.drop.tmp') ? Promise.reject(eperm()) : link(p, q))) as typeof link
+    fs.promises.rename = (async (p: fs.PathLike, q: fs.PathLike) => (String(p).endsWith('.drop.tmp') ? Promise.reject(eperm()) : rename(p, q))) as typeof rename
+  }
+  const allow = () => Object.assign(fs.promises, { link, rename })
+
+  refuse()
+  const t0 = Date.now()
+  try {
+    await save(a, crypto.randomBytes(1000), matt) // a folds: c touched X, so it must go back, and Windows refuses
+  } finally {
+    allow()
+  }
+  assert.ok(Date.now() - t0 < 5000, 'gave up after its second of retries')
+  assert.equal(fs.existsSync(obj), false)
+  assert.equal(aside().length, 1, 'the only copy is kept aside')
+  await assert.rejects(showVersion(c, 1), /missing or damaged/)
+
+  // Cleanup a day later, while Windows still refuses: the aside copy is never swept.
+  const realNow = Date.now
+  refuse()
+  Date.now = () => realNow() + 25 * 60 * 60 * 1000
+  try {
+    await h.cleanupHistory(Date.now(), 1024 * 1024 * 1024)
+  } finally {
+    Date.now = realNow
+    allow()
+  }
+  assert.equal(aside().length, 1, 'still kept aside')
+
+  // The worker starting (or the next cleanup) puts it back.
+  assert.equal(await h.recoverDroppedObjects(), 1)
+  assert.deepEqual(aside(), [])
+  assert.deepEqual(Buffer.from(await showVersion(c, 1)), X)
+  assert.deepEqual(missingObjects(), [])
+})
+
+test('recovery with a fresh copy already in place keeps that copy, breaks its stamp and only then drops the aside one', async () => {
+  const a = fresh('rec-a.docx')
+  const c = fresh('rec-c.docx')
+  const d = fresh('rec-d.docx')
+  const X = crypto.randomBytes(1000)
+  await save(a, X, matt)
+  await save(c, X, matt)
+  const obj = objectPath(sha(X))
+  const { link, rename } = fs.promises
+  const eperm = () => Object.assign(new Error('EPERM: held'), { code: 'EPERM' })
+  fs.promises.link = (async (p: fs.PathLike, q: fs.PathLike) => (String(p).endsWith('.drop.tmp') ? Promise.reject(eperm()) : link(p, q))) as typeof link
+  fs.promises.rename = (async (p: fs.PathLike, q: fs.PathLike) => (String(p).endsWith('.drop.tmp') ? Promise.reject(eperm()) : rename(p, q))) as typeof rename
+  try {
+    await save(a, crypto.randomBytes(1000), matt) // X stranded aside
+  } finally {
+    Object.assign(fs.promises, { link, rename })
+  }
+  assert.equal(fs.existsSync(obj), false)
+  await save(d, X, matt) // d stores X meanwhile: a fresh copy, with d's stamp
+  assert.ok(fs.existsSync(obj))
+  assert.equal(await h.recoverDroppedObjects(), 1)
+  assert.deepEqual(fs.readdirSync(path.dirname(obj)).filter(n => h.isDropped(n)), [])
+  await save(d, crypto.randomBytes(1000), matt) // d folds away from X: c still uses it
+  assert.deepEqual(Buffer.from(await showVersion(c, 1)), X)
+  assert.deepEqual(missingObjects(), [])
+})

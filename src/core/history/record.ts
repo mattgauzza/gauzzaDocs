@@ -7,6 +7,7 @@ import { appendEventLocked, type HistoryEvent } from './log'
 import { enqueue, idle } from './queue'
 import {
   HISTORY_DIR,
+  asidePath,
   bakPath,
   canonicalPath,
   historyKey,
@@ -16,6 +17,7 @@ import {
   listHistoryPaths,
   logPath,
   objectPath,
+  putBack,
   readIndex,
   renameRetrySync,
   storeObject,
@@ -153,7 +155,7 @@ async function dropReplaced(key: string, idx: HistoryIndex, replaced: string, se
     if (idx.versions.some(v => v.hash === replaced)) return // an earlier version of this file has the same content
     await writeAtomic(bakPath(key), fs.readFileSync(indexPath(key))) // the .bak must not point at it either
     const obj = objectPath(replaced)
-    const aside = path.join(path.dirname(obj), `.${replaced}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.drop.tmp`)
+    const aside = asidePath(replaced)
     fs.renameSync(obj, aside) // gone or held: leave it
     let st: fs.BigIntStats | null = null
     try {
@@ -170,15 +172,12 @@ async function dropReplaced(key: string, idx: HistoryIndex, replaced: string, se
       }
       return
     }
-    // Reused by another history since: theirs now. Back where it was, unless a fresh copy is already there.
-    try {
-      fs.linkSync(aside, obj)
-    } catch {
-      if (!fs.existsSync(obj)) renameRetrySync(aside, obj)
-    }
-    fs.rmSync(aside, { force: true })
+    // Reused by another history since: theirs now. Back where it was; if a fresh copy is already there, that copy is
+    // the one in use from now on, so its creator's stamp is broken before this one goes (putBack). If it cannot be
+    // put back right now, the aside copy stays for recoverDroppedObjects (worker start, cleanup): never deleted.
+    await putBack(aside, replaced)
   } catch {
-    /* left for cleanup */
+    /* an object moved aside and not put back is recovered later (recoverDroppedObjects) */
   }
 }
 

@@ -6,7 +6,7 @@ import { runOffline } from '../core/ops'
 import * as plugins from '../core/plugins'
 import * as projects from '../core/projects'
 import { detectAgents, installSkills, refreshInstalledSkills, removeSkills } from '../core/agentSkills'
-import { checkOutside, onHistoryPaused } from '../core/history'
+import { checkOutside, onHistoryPaused, recoverDroppedObjects } from '../core/history'
 import { setDocInstructions } from '../core/instructions'
 import { historyJobs } from './historyJobs'
 
@@ -62,6 +62,10 @@ const fns: Record<string, Fn> = {
 
 // A history failure never fails a save; main shows "Version history paused: <reason>" once.
 onHistoryPaused(reason => parentPort!.postMessage({ event: 'history-paused', reason }))
+
+// Objects a fold moved aside and could not put back (the app quit in between, or Windows refused) go back now, so the
+// versions that use them can be read again without waiting for the next cleanup.
+setTimeout(() => void recoverDroppedObjects().catch(() => {}), 500)
 
 parentPort!.on('message', async (msg: { id: number; fn: string; args: unknown[] }) => {
   const progress = (p: unknown) => parentPort!.postMessage({ id: msg.id, progress: p })

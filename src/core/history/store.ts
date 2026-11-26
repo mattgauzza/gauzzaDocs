@@ -205,6 +205,76 @@ export async function storeObject(bytes: Uint8Array, ext: string): Promise<{ has
 
 export const putObject = async (bytes: Uint8Array, ext: string): Promise<string> => (await storeObject(bytes, ext)).hash
 
+/**
+ * Where a fold moves an object aside while it judges whether it may delete it (dropReplaced in record.ts): next to the
+ * object, named after its hash. Cleanup never sweeps these: recoverDroppedObjects puts them back.
+ */
+export const asidePath = (hash: string) =>
+  path.join(path.dirname(objectPath(hash)), `.${hash}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.drop.tmp`)
+const DROPPED = /^\.([0-9a-f]{64})\.[^.]+\.[^.]+\.drop\.tmp$/
+export const isDropped = (name: string) => DROPPED.test(name)
+
+/**
+ * Puts an object a fold moved aside back in place, retrying for up to a second (without blocking the thread) while
+ * Windows refuses with EPERM or EBUSY. When a good copy is already there (another writer stored the same content
+ * meanwhile), that copy's mtime moves strictly later, so whoever created it can no longer take it for unused, and the
+ * aside copy goes. The aside copy is only ever deleted once the object is in place. Returns false when that could not
+ * be done: the aside copy stays, and recoverDroppedObjects puts it back later.
+ */
+export async function putBack(aside: string, hash: string): Promise<boolean> {
+  const obj = objectPath(hash)
+  const until = Date.now() + RENAME_RETRY_MS
+  for (;;) {
+    if (!fs.existsSync(aside)) return fs.existsSync(obj) // someone else put it back meanwhile
+    try {
+      if (fs.existsSync(obj)) {
+        if (await getObject(hash)) await touchLater(obj) // reuse the copy that is there
+        else await fs.promises.rename(aside, obj) // that copy is damaged: this one replaces it
+      } else {
+        try {
+          await fs.promises.link(aside, obj)
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'EEXIST' && Date.now() < until) continue // a copy appeared meanwhile: reuse it (above)
+          await fs.promises.rename(aside, obj)
+        }
+      }
+      await fs.promises.rm(aside, { force: true }).catch(() => {}) // the object is in place: a leftover goes next time
+      return true
+    } catch {
+      if (Date.now() >= until) return false
+      await sleep(25)
+    }
+  }
+}
+
+/**
+ * Puts back every object a fold moved aside and could not put back (the process died in between, or Windows refused
+ * for over a second), so the versions that use it can be read again. Run when the app's history worker starts and by
+ * every cleanup. Returns how many were put back or found in place.
+ */
+export async function recoverDroppedObjects(): Promise<number> {
+  let dirs: string[]
+  try {
+    dirs = await fs.promises.readdir(OBJECTS_DIR)
+  } catch {
+    return 0
+  }
+  let n = 0
+  for (const d of dirs) {
+    let names: string[]
+    try {
+      names = await fs.promises.readdir(path.join(OBJECTS_DIR, d))
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      const m = DROPPED.exec(name)
+      if (m && (await putBack(path.join(OBJECTS_DIR, d, name), m[1]))) n++
+    }
+  }
+  return n
+}
+
 export async function getObject(hash: string): Promise<Uint8Array | null> {
   let raw: Buffer
   try {

@@ -1,6 +1,19 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { HISTORY_DIR, volumeReachable, indexPath, bakPath, logPath, withLock, writeAtomic, writeIndex, type HistoryIndex, type HistoryVersion } from './store'
+import {
+  HISTORY_DIR,
+  volumeReachable,
+  indexPath,
+  bakPath,
+  isDropped,
+  logPath,
+  recoverDroppedObjects,
+  withLock,
+  writeAtomic,
+  writeIndex,
+  type HistoryIndex,
+  type HistoryVersion,
+} from './store'
 
 const DAY = 24 * 60 * 60 * 1000
 const FILES_DIR = path.join(HISTORY_DIR, 'files')
@@ -221,6 +234,7 @@ function sweep(dir: string, now: number): number {
       if (!st.isFile()) continue
       const aside = asideTime(n, dir)
       if (aside !== null) old = now - aside > ASIDE_MS
+      else if (isDropped(n)) continue // an object a fold moved aside: maybe the only copy, so recoverDroppedObjects puts it back, never this
       else if (n.endsWith('.tmp') || n.includes('.lock.stale-')) old = Date.now() - st.mtimeMs > FRESH_MS // a writer's temp file: judged by the real clock
       else continue
       if (!old) continue
@@ -265,6 +279,8 @@ async function thinLogFile(key: string, now: number, deleteIfOld: boolean): Prom
  */
 export async function cleanupHistory(now: number, capBytes: number): Promise<CleanupResult> {
   scanCount = 0
+  // Objects a fold moved aside and could not put back go back first: the versions that use them count as using them.
+  await recoverDroppedObjects().catch(() => 0)
   const first = scan()
   if (first.bad) return { removedVersions: 0, freedBytes: 0, skipped: 'corrupt-index' }
 
