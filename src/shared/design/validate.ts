@@ -434,7 +434,7 @@ const KNOWN: Record<string, Set<string>> = {
   // tracks and text effects arrive in a later release: until then their values count as unknown
   timing: keys('start end in out'),
   animation: keys('duration fps loop'),
-  // direction, spacing and nodeComponent aren't read here: they're kept like unknown fields, within the same bounds
+  // direction, spacing, nodeComponent and layer aren't read here: they're kept like unknown fields, within the same bounds
   diagram: keys('name nodes links containers'),
   // a part's layer is checked only when it's text (a reference to follow); otherwise it's kept like an unknown field
   diagramPart: keys('layer'),
@@ -1073,6 +1073,8 @@ function diagrams(v: unknown, scope: Scope, r: Reader): Obj[] | undefined {
     o.links = parts(d.links, 'link')
     o.containers = parts(d.containers, 'container')
     if (typeof o.nodeComponent === 'string') o.nodeComponent = follow(r.componentIds, o.nodeComponent) ?? o.nodeComponent
+    // the diagram's group, kept like nodeComponent (within the unknown bounds) and following a rename
+    if (typeof o.layer === 'string') o.layer = follow(scope, o.layer) ?? o.layer
     out.push(o)
   }
   return out

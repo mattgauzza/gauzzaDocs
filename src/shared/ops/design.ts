@@ -1,3 +1,4 @@
+import { type DiagramSpec, applyLayout, checkSpec, diagramGraph, diagramOn, diagramSizes, parseDiagramText, pinMoved, specOf } from '../design/diagram'
 import { type Box, boxOf, centerOf, fin } from '../design/geometry'
 import { ARTBOARD_TOO_LARGE, MAX_ARTBOARD_SIDE, PRESETS, artboardOf, newId, walk } from '../design/model'
 import { parsePath, pathBounds } from '../design/path'
@@ -5,7 +6,7 @@ import { designToSvg } from '../design/render'
 import { cleanSvg } from '../design/svgClean'
 import { importSvg, layerAsSvg } from '../design/svgImport'
 import { cleanText, num as fmt, textReport } from '../design/text'
-import type { Artboard, BlendMode, Component, Design, DesignFile, Layer, Override, Paint, TextRun } from '../design/types'
+import type { Artboard, BlendMode, Component, Design, DesignFile, Diagram, ElkGraph, Layer, Override, Paint, TextRun } from '../design/types'
 import {
   LIMIT, MAX_LAYERS, MAX_SVG_MARKUP, type Past, SVG_LAYERS_FULL, layerCount, limitsOf, pastLimit, pastZipLimit, svgMarkupIn, svgMarkupOf
 } from '../design/validate'
@@ -32,6 +33,14 @@ import { OpError, type OpHandler, type OpServices, str } from './types'
  *   artboard { action: add|resize|rename|delete, name?, size? } -> { id }
  *   style { color?: { name, color } | "Name=#hex", text?: { name, run }, remove?: name } -> { colors, text }
  *   svg { svg, name?, parent?, index?, x?, y? } -> { id, removed, kept }      svg { get: layer | true } -> { svg }
+ *   diagram { name?, spec | text }              -> { id, nodes, links, containers }: laid out by ELK (services.layout).
+ *     spec: { name, direction?: right|down|left|up, spacing?, nodes: [{ id, label, in?, icon? }],
+ *     links: [{ from, to, label? }], containers?: [{ id, label, in? }] } (or its JSON); text: one item per line,
+ *     "node <id>: <label> [in <box>]", "box <id>: <label> [in <box>]" or "<from> -> <to> [: <label>]". `id` is the
+ *     diagram's group; nodes and containers map spec ids to layer ids, links follow the spec's order. The same name
+ *     again updates that diagram by spec id.
+ *   tidy { diagram?, unpin? }                   -> the same: lays a diagram out again around the nodes moved by hand
+ *     (set or move pins a node); with unpin, every node is laid out again
  *   apply { ops }                               -> { results }
  * Every op runs on a copy, so a failure changes nothing; `apply` runs its ops in order on one copy and stops at the
  * first failure with "op <n>: <message>". An op (or a whole batch) that would leave the design past a limit reading
@@ -86,7 +95,7 @@ interface Change { verb: string; names: string[]; what?: string }
 
 type InstanceLayer = Layer & { type: 'instance' }
 
-const OPS = ['read', 'add', 'set', 'delete', 'move', 'group', 'ungroup', 'align', 'distribute', 'duplicate', 'artboard', 'style', 'svg', 'apply']
+const OPS = ['read', 'add', 'set', 'delete', 'move', 'group', 'ungroup', 'align', 'distribute', 'duplicate', 'artboard', 'style', 'svg', 'diagram', 'tidy', 'apply']
 
 async function runOp(d: Draft, op: AgentOp): Promise<unknown> {
   switch (op.op) {
@@ -116,6 +125,10 @@ async function runOp(d: Draft, op: AgentOp): Promise<unknown> {
       return styleOp(d, op)
     case 'svg':
       return svgOp(d, op)
+    case 'diagram':
+      return diagramOp(d, op)
+    case 'tidy':
+      return tidyOp(d, op)
     case 'apply':
       return applyOp(d, op)
     default:
@@ -360,12 +373,17 @@ function setOp(d: Draft, op: AgentOp): unknown {
       if (!Object.keys(props).length) throw new OpError('"set" needs props (what to change)')
       what = writeProps(d, board, layer, props, notes)
       refit(board, new Set([layer.id]))
+      // a diagram node placed by hand stays there, and its links re-route to it
+      if (GEOMETRY.some(k => k in props)) pinMoved(board, layer)
     }
   }
   d.changes.push({ verb: 'set', names: found.map(f => f.layer.name), what: what.length > 3 ? `${what.length} properties` : list(what.map(words)) })
   const ids = found.map(f => f.layer.id)
   return notes.length ? { ids, note: [...new Set(notes)].join(' ') } : { ids }
 }
+
+/** The props that move or resize a layer: set with any of them pins a diagram node (pinMoved). */
+const GEOMETRY = ['x', 'y', 'width', 'height', 'rotation', 'scaleX', 'scaleY']
 
 /** Writes an instance's override for one of its component's layers. */
 function setPart(d: Draft, layer: Layer, op: AgentOp): string[] {
@@ -409,6 +427,10 @@ function deleteOp(d: Draft, op: AgentOp): unknown {
     drop(board.layers)
     ids.push(...gone)
     if (at.parent) refit(board, new Set([at.parent.id]))
+    // a diagram whose group is deleted is gone: the same name drawn again starts afresh
+    if (board.diagrams?.some(x => typeof x.layer === 'string' && gone.has(x.layer))) {
+      board.diagrams = board.diagrams.filter(x => !(typeof x.layer === 'string' && gone.has(x.layer)))
+    }
   }
   d.changes.push({ verb: 'deleted', names: found.map(f => f.layer.name) })
   return { ids }
@@ -423,6 +445,7 @@ function moveOp(d: Draft, op: AgentOp): unknown {
       at.list.splice(at.index, 1)
       const i = to === 'front' ? at.list.length : to === 'back' ? 0 : to === 'forward' ? Math.min(at.index + 1, at.list.length) : Math.max(at.index - 1, 0)
       at.list.splice(i, 0, layer)
+      pinMoved(board, layer)
       continue
     }
     if (!to || typeof to !== 'object' || Array.isArray(to)) throw new OpError('to must be front, back, forward, backward or { parent, index }')
@@ -435,6 +458,7 @@ function moveOp(d: Draft, op: AgentOp): unknown {
     at.list.splice(at.index, 1)
     insert(board, layer, dest.parent, dest.index)
     refit(board, new Set([layer.id, ...(at.parent ? [at.parent.id] : [])]))
+    pinMoved(board, layer)
   }
   d.changes.push({ verb: 'moved', names: found.map(f => f.layer.name) })
   return { ids: found.map(f => f.layer.id) }
@@ -518,6 +542,7 @@ function alignOp(d: Draft, op: AgentOp): unknown {
     shift(l, dx, dy)
   }
   refit(board, new Set(layers.map(l => l.id)))
+  for (const l of layers) pinMoved(board, l)
   d.changes.push({ verb: 'aligned', names: layers.map(l => l.name) })
   return { ids: layers.map(l => l.id) }
 }
@@ -540,6 +565,7 @@ function distributeOp(d: Draft, op: AgentOp): unknown {
     at += size(b) + gap
   }
   refit(board, new Set(layers.map(l => l.id)))
+  for (const l of layers) pinMoved(board, l)
   d.changes.push({ verb: 'distributed', names: layers.map(l => l.name) })
   return { ids: layers.map(l => l.id) }
 }
@@ -728,6 +754,95 @@ function svgOp(d: Draft, op: AgentOp): unknown {
   refit(board, new Set([g.id]))
   d.changes.push({ verb: `imported SVG as ${named(name)}`, names: [] })
   return { id: g.id, removed: r.removed, kept: r.kept }
+}
+
+// ---------- diagrams ----------
+
+const NO_LAYOUT = "Diagram layout isn't available here. Run this with the gdocs command or in gauzzaDocs."
+
+/** What reading a spec throws, as an op's error. */
+function asOp<T>(fn: () => T): T {
+  try {
+    return fn()
+  } catch (e) {
+    throw e instanceof OpError ? e : new OpError(e instanceof Error ? e.message : String(e))
+  }
+}
+
+const plural = (n: number, one: string, many: string): string => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`
+
+async function diagramOp(d: Draft, op: AgentOp): Promise<unknown> {
+  const board = boardOf(d, op)
+  let spec: DiagramSpec
+  if (op.text !== undefined) {
+    if (typeof op.text !== 'string') throw new OpError('text must be text, one node, box or link per line')
+    const text = op.text
+    spec = asOp(() => checkSpec(parseDiagramText(text), op.name))
+  } else if (op.spec !== undefined) spec = asOp(() => checkSpec(op.spec, op.name))
+  else throw new OpError('diagram needs spec (JSON) or text')
+  return drawDiagram(d, board, spec, diagramOn(board, spec.name) ? 'redrew' : 'drew')
+}
+
+async function tidyOp(d: Draft, op: AgentOp): Promise<unknown> {
+  const board = boardOf(d, op)
+  const all = board.diagrams ?? []
+  const ref = op.diagram ?? op.name
+  let rec: Diagram | undefined
+  if (ref === undefined || ref === null || ref === '') {
+    if (all.length !== 1) throw new OpError(all.length ? `Name the diagram to tidy: ${all.map(x => x.name).join(', ')}` : `No diagram on ${board.name}`)
+    rec = all[0]
+  } else {
+    if (typeof ref !== 'string') throw new OpError('diagram must be the name of a diagram')
+    rec = diagramOn(board, ref)
+    if (!rec) throw new OpError(`No diagram "${ref}" on ${board.name}`)
+  }
+  if (op.unpin === true) for (const n of rec.nodes) if (n && typeof n === 'object') delete n.pinned
+  const found = rec
+  const now = specOf(d.design, board, found)
+  if (!now.nodes.length) throw new OpError(`Every node of the diagram "${found.name}" was deleted. Draw it again with the diagram op.`)
+  const spec = asOp(() => checkSpec(now, found.name))
+  return drawDiagram(d, board, spec, 'tidied')
+}
+
+/**
+ * Lays a checked spec out with services.layout (ELK, which runs in node only) and writes it onto the board: the
+ * diagram's own layers, mapped from spec ids in the result, with a note when it runs past the artboard.
+ */
+async function drawDiagram(d: Draft, board: Artboard, spec: DiagramSpec, verb: 'drew' | 'redrew' | 'tidied'): Promise<unknown> {
+  const layout = d.services.layout
+  if (!layout) throw new OpError(NO_LAYOUT)
+  const sizes = diagramSizes(d.design, board, spec, d.services.fonts)
+  let laidOut: ElkGraph
+  try {
+    laidOut = await layout(diagramGraph(spec, sizes))
+  } catch (e) {
+    throw new OpError(`The diagram could not be laid out: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  // a box larger than this is cut to it on reading, as the ops cut sizes
+  const [lw, lh] = [fin(laidOut?.width, 0), fin(laidOut?.height, 0)]
+  if (lw > MAX_SIZE || lh > MAX_SIZE) {
+    throw new OpError(`That diagram would be ${fmt(lw, 0)}x${fmt(lh, 0)} px, and a diagram can be at most ${MAX_SIZE.toLocaleString('en-US')} px per side. Split it, or try another direction.`)
+  }
+  asOp(() => applyLayout(d.design, board.id, spec, laidOut, { taken: d.taken, sizes }))
+  const rec = diagramOn(board, spec.name)!
+  const group = rec.layer ? layerOn(board, rec.layer) : null
+  if (group) refit(board, new Set([group.id]))
+  const result: Record<string, unknown> = {
+    id: rec.layer,
+    nodes: Object.fromEntries(rec.nodes.map(n => [n.id, n.layer])),
+    links: rec.links.map(k => k.layer),
+    containers: Object.fromEntries(rec.containers.map(c => [c.id, c.layer]))
+  }
+  if (group) {
+    const b = boundsOf(group)
+    const [W, H] = [fin(board.width, 0), fin(board.height, 0)]
+    if (b.x < 0 || b.y < 0 || b.x + b.w > W || b.y + b.h > H) {
+      result.note = `The diagram is ${fmt(b.w, 0)}x${fmt(b.h, 0)} px, so it runs past the artboard (${fmt(W, 0)}x${fmt(H, 0)}).`
+    }
+  }
+  const counts = `${plural(spec.nodes.length, 'box', 'boxes')}, ${plural(spec.links.length, 'link', 'links')}`
+  d.changes.push({ verb: verb === 'tidied' ? `tidied diagram ${named(spec.name)}` : `${verb} diagram ${named(spec.name)} (${counts})`, names: [] })
+  return result
 }
 
 /** Most ops one apply batch may hold. */

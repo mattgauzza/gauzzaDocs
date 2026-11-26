@@ -39,6 +39,8 @@ export interface Component { id: string; name: string; root: Layer & { type: 'gr
 export interface Styles { colors: { name: string; color: string }[]; text: { name: string; run: Omit<TextRun, 'text'> }[] }
 export interface Diagram {
   name: string; direction: 'right' | 'down' | 'left' | 'up'; spacing: number; nodeComponent: string
+  /** the group holding the diagram's layers */
+  layer?: string
   nodes: { id: string; layer: string; container?: string; pinned?: boolean; icon?: string }[]
   links: { from: string; to: string; layer: string; label?: string }[]
   containers: { id: string; layer: string; in?: string }[]
@@ -58,6 +60,8 @@ export interface ElkGraph {
   height?: number; children?: ElkGraph[]
   edges?: {
     id: string; sources: string[]; targets: string[]
+    /** a label's size, so the layout leaves room for it */
+    labels?: { text?: string; width: number; height: number; x?: number; y?: number }[]
     sections?: { startPoint: { x: number; y: number }; endPoint: { x: number; y: number }; bendPoints?: { x: number; y: number }[] }[]
   }[]
 }
