@@ -8,13 +8,13 @@ import {
 import { type RenderOptions, layerToSvg } from './render'
 import { sharedAssetName } from './sha256'
 import {
-  INKSCAPE_NS, MAX_USE_DEPTH, PRESENTATION, SVG_NS, XLINK_NS, allElements, cleanSvg, cleanSvgRoot, dataUriBytes,
-  elementChildren, hrefId, idMap, imageInfo, serializeSvg
+  INKSCAPE_NS, MAX_SVG_BYTES, MAX_SVG_ELEMENTS, MAX_USE_DEPTH, PRESENTATION, SVG_NS, XLINK_NS, allElements, cleanSvg, cleanSvgRoot, dataUriBytes,
+  elementChildren, hrefId, idMap, imageInfo, serializeSvg, urlRefs
 } from './svgClean'
 import { type PaintSpace, type Style, type Viewport, alphaOf, diagonal, len, paintOf, urlId } from './svgPaint'
 import { applyStyles } from './svgFragment'
 import { splitDeclarations } from './svgStyle'
-import { layoutText, num } from './text'
+import { cleanText, layoutText, num } from './text'
 import type { BlendMode, Design, Layer, Paint, TextLayer, TextRun } from './types'
 
 // SVG import: the cleaned SVG as one group of native layers, so a person can recolor and reshape it layer by layer.
@@ -37,6 +37,8 @@ export interface ImportResult {
 }
 
 interface Ctx extends Viewport {
+  /** Layers made and elements copied into svg layers, and those layers' markup, against the import limits. */
+  budget: { elements: number; bytes: number }
   ids: Map<string, Element>
   taken: Set<string>
   counts: Record<string, number>
@@ -124,6 +126,7 @@ function nameOf(el: Element, kind: string, ctx: Ctx): string {
 }
 
 function base(ctx: Ctx, name: string, b: Box, s: Style, drawn = true) {
+  spend(ctx, 1)
   const blend = s['mix-blend-mode']?.trim().toLowerCase() ?? ''
   return {
     id: newId(ctx.taken),
@@ -284,9 +287,11 @@ function contentBounds(el: Element, m: Matrix, ctx: Ctx, depth = 0): Box | null 
 /** Every id an element's attributes point at, through href or url(#id). */
 function refsOf(el: Element): string[] {
   const out: string[] = []
-  for (const a of Array.from(el.attributes)) {
-    if (a.localName === 'href' && a.value.trim().startsWith('#')) out.push(a.value.trim().slice(1))
-    for (const m of a.value.matchAll(/url\(\s*['"]?#([^'")\s]+)/g)) out.push(m[1])
+  const attrs = el.attributes
+  for (let i = 0; i < attrs.length; i++) {
+    const a = attrs[i]
+    if (a.localName === 'href' && a.value.startsWith('#')) out.push(a.value.slice(1))
+    else if (a.value.includes('url(#')) for (const id of urlRefs(a.value)) out.push(id)
   }
   return out
 }
@@ -295,28 +300,56 @@ const contains = (outer: Element, inner: Element): boolean => {
   return false
 }
 
-/** What an element needs from elsewhere in the document (gradients, filters, use targets), outermost only. */
-function referenced(el: Element, ctx: Ctx): Element[] {
+/**
+ * What an element needs from elsewhere in the document (gradients, filters, use targets), outermost only, and whether
+ * anything it refers to can't come along (an id that isn't there, or an ancestor of the element itself).
+ */
+function referenced(el: Element, ctx: Ctx): { defs: Element[]; dangling: boolean } {
   const found: Element[] = []
   const seen = new Set<Element>()
   const queue = [el]
-  while (queue.length) {
-    for (const e of allElements(queue.shift()!)) {
+  let dangling = false
+  for (let q = 0; q < queue.length; q++) {
+    for (const e of allElements(queue[q])) {
       for (const id of refsOf(e)) {
         const t = ctx.ids.get(id)
+        if (!t) dangling = true
         if (!t || seen.has(t)) continue
         seen.add(t)
-        if (contains(el, t) || contains(t, el)) continue
+        if (contains(el, t)) continue
+        if (contains(t, el)) {
+          dangling = true
+          continue
+        }
         found.push(t)
         queue.push(t)
       }
     }
   }
-  return found.filter(t => !found.some(o => o !== t && contains(o, t)))
+  // keep only the outermost: drop any whose ancestor is also needed
+  const needed = new Set(found)
+  const defs = found.filter(t => {
+    for (let n = t.parentNode; n; n = n.parentNode) if (needed.has(n as Element)) return false
+    return true
+  })
+  return { defs, dangling }
 }
 
-const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }
-const escAttr = (s: string): string => s.replace(/[&<>"]/g, c => ESC[c])
+const ESC: Record<string, string> = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;', '\t': '&#9;', '\n': '&#10;', '\r': '&#13;',
+  '\u0085': '&#133;', '\u2028': '&#8232;'
+}
+/** The same escapes as cleanSvg's serializer, so composed markup is already in its form. */
+const escAttr = (s: string): string => cleanText(s).replace(/[&<>"'\t\n\r\u0085\u2028]/g, c => ESC[c])
+
+/** Charges the import's budget: every layer and every element an svg layer copies, and the svg layers' markup. */
+function spend(ctx: Ctx, elements: number, bytes = 0): void {
+  ctx.budget.elements += elements
+  ctx.budget.bytes += bytes
+  if (ctx.budget.elements > MAX_SVG_ELEMENTS) throw new Error('This SVG expands to too much (over 50,000 elements).')
+  if (ctx.budget.bytes > MAX_SVG_BYTES) throw new Error('This SVG expands to too much (over 5 MB of SVG layers).')
+}
+
 
 /** The longest stroke the element or anything in it draws, in its user units. */
 function strokeReach(el: Element, s: Style, vp: Viewport): number {
@@ -360,19 +393,25 @@ function svgLayer(el: Element, ctm: Matrix, inh: Style, s: Style, why: string, c
   if (box && ctx.frame) box = intersect(box, ctx.frame)
   if (!box || !(box.w > 0) || !(box.h > 0)) return null
   box = roundBox(box, r3)
+  const { defs, dangling } = referenced(el, ctx)
+  // what this layer copies counts against the import, before any of it is written out
+  spend(ctx, defs.reduce((a, d) => a + allElements(d).length, allElements(el).length))
   const inherited = Object.entries(inh)
     .filter(([p]) => INHERITED.has(p) && PRESENTATION.has(p))
     .map(([p, v]) => ` ${p}="${escAttr(v)}"`)
     .join('')
-  const defs = referenced(el, ctx)
   const markup =
-    `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" width="${num(box.w, 3)}" height="${num(box.h, 3)}" ` +
+    `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" xmlns:inkscape="${INKSCAPE_NS}" width="${num(box.w, 3)}" height="${num(box.h, 3)}" ` +
     `viewBox="${num(box.x, 3)} ${num(box.y, 3)} ${num(box.w, 3)} ${num(box.h, 3)}">` +
     (defs.length ? `<defs>${defs.map(d => serializeSvg(d, false)).join('')}</defs>` : '') +
     `<g transform="matrix(${ctm.map(v => num(v, 6)).join(' ')})"${inherited}>${serializeSvg(el, false)}</g></svg>`
+  spend(ctx, 0, markup.length)
+  // Every part is already clean and in cleanSvg's own form, so cleaning again changes nothing, except where a
+  // reference points at something the layer didn't copy (an ancestor of the element); then it's cleaned again.
+  const svg = dangling ? cleanSvg(markup).svg : markup
   const label = name ?? nameOf(el, 'SVG', ctx)
   ctx.kept.push(`${label}: kept as an SVG layer because ${why}`)
-  return { ...base(ctx, label, box, { ...s, opacity: '1' }), type: 'svg', svg: cleanSvg(markup).svg }
+  return { ...base(ctx, label, box, { ...s, opacity: '1' }), type: 'svg', svg }
 }
 const alphaFraction = (v: string): number => {
   const m = /^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*(%?)\s*$/i.exec(v)
@@ -494,10 +533,11 @@ function clipShape(clip: Element, target: Element, m: Matrix, ctx: Ctx): (Layer 
     let raw = shapeSegs(shape, ctx)
     if (!raw) continue
     if (st['clip-rule'] === 'evenodd') {
-      raw = evenOddToNonZero(raw)
-      if (!raw) return null
+      const nz = evenOddToNonZero(raw)
+      if (typeof nz === 'string') return null
+      raw = nz
     }
-    segs.push(...positiveWinding(transformPath(raw, at)))
+    for (const seg of positiveWinding(transformPath(raw, at))) segs.push(seg)
   }
   const b = pathBounds(segs)
   if (!b) return 'empty'
@@ -517,7 +557,8 @@ function shapeLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, as?: string): La
   const fillRaw = el.localName === 'line' ? 'none' : (s.fill ?? 'black')
   if (s['fill-rule'] === 'evenodd' && fillRaw.trim() !== 'none') {
     const nz = evenOddToNonZero(segs)
-    if (!nz) return 'its even-odd fill has crossing outlines'
+    if (nz === 'crossing') return 'its even-odd fill has crossing outlines'
+    if (nz === 'too detailed') return 'its even-odd fill is too detailed to convert (over 2,000 edges)'
     segs = nz
   }
   const px = transformPath(segs, m)
@@ -707,7 +748,7 @@ export function importSvg(svg: string, name: string, opts: ImportOptions = {}): 
   const kept: string[] = []
   applyStyles(root, n => kept.push(n))
   const { m, vp, frame } = rootFrame(root)
-  const ctx: Ctx = { ...vp, ids: idMap(root), taken: opts.taken ?? new Set(), counts: {}, kept, assets: {}, frame, fonts: opts.fonts }
+  const ctx: Ctx = { ...vp, budget: { elements: 0, bytes: 0 }, ids: idMap(root), taken: opts.taken ?? new Set(), counts: {}, kept, assets: {}, frame, fonts: opts.fonts }
   const s = styleOf(root, {})
   const children: Layer[] = []
   for (const c of elementChildren(root)) {

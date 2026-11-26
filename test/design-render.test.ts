@@ -266,7 +266,7 @@ test('an svg layer is an image in raster mode and its cleaned fragment inline in
   assert.equal(new TextDecoder().decode(Uint8Array.from(atob(img.getAttribute('xlink:href')!.split(',')[1]), c => c.charCodeAt(0))), inner)
   const exported = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'export' })
   assert.ok(!exported.includes('<image'))
-  assert.ok(exported.includes('<svg x="0" y="0" width="50" height="50" viewBox="0 0 10 10" preserveAspectRatio="none"><circle id="s1-c" cx="5" cy="5" r="5"/></svg>'))
+  assert.ok(exported.includes('<svg x="0" y="0" width="50" height="50" viewBox="0 0 10 10" preserveAspectRatio="none"><circle id="s-s1-c" cx="5" cy="5" r="5"/></svg>'))
   assert.ok(!exported.includes('onclick'), 'the fragment is cleaned again on the way out')
 })
 

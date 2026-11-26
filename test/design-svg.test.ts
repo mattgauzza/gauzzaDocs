@@ -9,6 +9,7 @@ import { parsePath, pathBounds } from '../src/shared/design/path'
 import { designToSvg } from '../src/shared/design/render'
 import { sharedAssetName } from '../src/shared/design/sha256'
 import { cleanSvg } from '../src/shared/design/svgClean'
+import { inlineSvg } from '../src/shared/design/svgFragment'
 import { importSvg, layerAsSvg } from '../src/shared/design/svgImport'
 import { layoutText } from '../src/shared/design/text'
 import type { Design, Layer, TextLayer } from '../src/shared/design/types'
@@ -193,8 +194,9 @@ function blurredSvgLayer(color: string, dx = 0): Layer {
 }
 
 test('an export inlines svg layers with ids prefixed per layer, and survives cleanSvg unchanged', async () => {
-  const a = blurredSvgLayer('#ff0000')
-  const b = blurredSvgLayer('#0000ff', 50)
+  // ids that start with a digit, as base36 layer ids often do: the prefix must still make valid references
+  const a = { ...blurredSvgLayer('#ff0000'), id: '9a000001' }
+  const b = { ...blurredSvgLayer('#0000ff', 50), id: '1b000002' }
   const styled: Layer = {
     ...base, id: 'styled', name: 'Styled', type: 'svg', x: 0, y: 100, width: 10, height: 10,
     svg: svgOf('<style>rect{fill:#00ff00}</style><rect width="10" height="10"/>', 'viewBox="0 0 10 10"')
@@ -207,7 +209,7 @@ test('an export inlines svg layers with ids prefixed per layer, and survives cle
   assert.doesNotMatch(out, /svg\+xml|<image/, 'no svg layer is drawn as an image')
   const doc = parse(out)
   for (const l of [a, b]) {
-    for (const want of [`id="${l.id}-g"`, `fill="url(#${l.id}-g)"`, `id="${l.id}-f"`, `filter="url(#${l.id}-f)"`]) {
+    for (const want of [`id="s-${l.id}-g"`, `fill="url(#s-${l.id}-g)"`, `id="s-${l.id}-f"`, `filter="url(#s-${l.id}-f)"`]) {
       assert.ok(out.includes(want), `missing ${want}`)
     }
     const wrapper = doc.getElementsByTagName('g')
@@ -232,13 +234,13 @@ test('an export inlines svg layers with ids prefixed per layer, and survives cle
 })
 
 test('layerAsSvg of a group keeps the svg layers inside it', async () => {
-  const inner = blurredSvgLayer('#ff0000', 20)
+  const inner = { ...blurredSvgLayer('#ff0000', 20), id: '7c000003' }
   const dot: Layer = { ...base, id: 'dot', name: 'Dot', type: 'ellipse', x: 0, y: 0, width: 5, height: 5, fill: { type: 'color', color: '#000000' } }
   const group: Layer = { ...base, id: 'grp', name: 'Group', type: 'group', x: 0, y: -1, width: 31, height: 12, children: [dot, inner] }
   const d = newDesign('instagram')
   d.artboards[0].layers.push(group)
   const svg = layerAsSvg(d, group, { fonts: await fontsOf(d), assets: {}, mode: 'raster' })
-  assert.match(svg, new RegExp(`id="${inner.id}-g"`))
+  assert.match(svg, new RegExp(`id="s-${inner.id}-g"`))
   assert.ok(svg.includes(`<svg x="19" y="-1" width="12" height="12" viewBox="-1 -1 12 12" preserveAspectRatio="none">`), svg)
   assert.doesNotMatch(svg, /svg\+xml/)
   assert.deepEqual(cleanSvg(svg).removed, [])
@@ -504,4 +506,217 @@ test('an imported gradient path renders its gradient over its own box', async ()
   const grad = parse(out).getElementsByTagName('linearGradient')[0]
   // the path is drawn translated to its box, so its gradient runs over 0..50 in the path's own space
   assert.deepEqual([grad.getAttribute('x1'), grad.getAttribute('x2')], ['0', '50'])
+})
+
+// Fix round 1: canonical references, idempotence, budgets and linear time
+
+const bombOf = (pre: string): string => {
+  let body = '<rect id="l0" width="1" height="1"/>'
+  for (let i = 1; i <= 6; i++) body += `<g id="l${i}">${`<use href="${pre}#l${i - 1}"/>`.repeat(10)}</g>`
+  return svgOf(`<defs>${body}</defs><use href="${pre}#l6"/>`)
+}
+const CONTROL = ['&#1;', '&#x7f;', '&#x85;']
+
+for (const c of CONTROL) {
+  test(`a control character (${c}) before # can't carry a reference past the checks`, () => {
+    const bomb = cleanSvg(bombOf(c))
+    assert.doesNotMatch(bomb.svg, /<use/)
+    assert.ok(bomb.removed.some(r => /hidden characters/.test(r)), JSON.stringify(bomb.removed))
+    assert.doesNotMatch(cleanSvg(svgOf(`<g id="a"><use href="${c}#a"/></g>`)).svg, /<use/)
+    const refs = cleanSvg(
+      svgOf(`<linearGradient id="g"/><rect id="r" width="1" height="1" fill="url(${c}#g)" style="stroke:url(${c}#g)"/><use xlink:href="${c}#r"/><image width="1" height="1" href="${c}#r"/>`)
+    )
+    assert.doesNotMatch(refs.svg, /url\(|<use|<image|[\u0001\u007f\u0085]/)
+    assert.deepEqual(refs.removed, ['a value with control characters (2 times)', 'a reference with hidden characters (#r) (2 times)'])
+  })
+}
+
+const IDEMPOTENT: string[] = [
+  ...HOSTILE.map(h => h[1]),
+  CHAIN,
+  ...CONTROL.map(bombOf),
+  svgOf('<text>a&#x85;b&#x2028;c&#13;d&#9;e</text><rect data-name="x&#10;y&#13;z&#9;w&#x85;" width="1" height="1"/>'),
+  svgOf('<style>@media (min-width: 10px){g rect{fill:red}} g > rect{fill:blue}</style><g><rect width="1" height="1"/></g>'),
+  svgOf(`<style>text{font-family:'a\nb'}</style><text font-family="Font (Pro)">x</text>`),
+  '<!-- <!DOCTYPE decoy> --><!DOCTYPE svg [<!ENTITY y "EXPANDED">]>' + svgOf('<text>&y;</text>'),
+  svgOf('<text><![CDATA[<!DOCTYPE x]]></text>'),
+  svgOf(`<linearGradient id="g"/><rect width="1" height="1" fill="URL( '#g' )"/>`),
+  svgOf('\n  <g>\n    <rect width="1" height="1"/>\n  </g>\n  <text xml:space="preserve">  a\tb  </text>\n')
+]
+
+test('cleaning twice gives the same SVG as cleaning once, for every hostile input', () => {
+  for (const input of IDEMPOTENT) {
+    const once = cleanSvg(input).svg
+    assert.equal(cleanSvg(once).svg, once, input.slice(0, 120))
+  }
+})
+
+test('an svg layer is already in the form cleanSvg writes, so cleaning it again changes nothing', () => {
+  const every = (l: Layer): Layer[] => [l, ...(l.type === 'group' ? l.children.flatMap(every) : [])]
+  const inputs = [
+    svgOf(
+      '<defs><filter id="f"><feGaussianBlur stdDeviation="1"/></filter><linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient></defs>' +
+        `<g filter="url(#f)" font-family="A&#9;B" style="mix-blend-mode:screen"><rect width="5" height="5" fill="url(#g)"/><text>it's &amp; &#x85;</text></g>`
+    ),
+    svgOf(
+      '<defs><mask id="m"><rect width="5" height="5" fill="#fff"/></mask><marker id="k"><path d="M0 0L1 1"/></marker></defs>' +
+        '<rect width="5" height="5" mask="url(#m)"/><path d="M0 0L5 5" marker-end="url(#k)" stroke="red"/>'
+    ),
+    svgOf('<defs><path id="p" d="M0 20L100 20"/><pattern id="pt" width="2" height="2"><rect width="1" height="1"/></pattern></defs><text><textPath href="#p">Hi</textPath></text><rect width="5" height="5" fill="url(#pt)"/>'),
+    // a reference to the element's own ancestor can't come along: the layer is cleaned again, and drops it
+    svgOf('<defs><mask id="m"><rect width="5" height="5" fill="#fff"/></mask></defs><g id="outer"><rect width="5" height="5" mask="url(#m)" fill="url(#outer)"/></g>')
+  ]
+  let layers = 0
+  for (const input of inputs) {
+    for (const l of every(importSvg(input, 'T').group)) {
+      if (l.type !== 'svg') continue
+      layers++
+      const again = cleanSvg(l.svg)
+      assert.equal(again.svg, l.svg)
+      assert.deepEqual(again.removed, [])
+    }
+  }
+  assert.equal(layers, 6)
+})
+
+test('names with tabs, newlines and line separators round-trip through an export byte for byte', async () => {
+  const name = 'a\tb\nc\rd\u0085e\u2028f'
+  const d = newDesign('instagram')
+  d.artboards[0].layers.push({ ...base, id: 'r1', name, type: 'rect', x: 0, y: 0, width: 5, height: 5, fill: { type: 'color', color: '#000000' } })
+  const out = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' })
+  const { svg, removed } = cleanSvg(out)
+  assert.deepEqual(removed, [])
+  assert.equal(svg, out)
+  const g = parse(out).getElementsByTagName('g')[0]
+  assert.equal(g.getAttribute('data-name'), name)
+  assert.equal(g.getAttributeNS('http://www.inkscape.org/namespaces/inkscape', 'label'), name)
+})
+
+test('a font family with a space before a parenthesis is not taken for a function', () => {
+  const { svg, removed } = cleanSvg(svgOf(`<text font-family="Font (Pro)" style="font-family:'Other', Font (Pro)">a</text>`))
+  assert.match(svg, /font-family="Font \(Pro\)"/)
+  assert.match(svg, /style="font-family:&apos;Other&apos;, Font \(Pro\)"/)
+  assert.deepEqual(removed, [])
+})
+
+test('a DOCTYPE behind a decoy is still stripped, one with any subset is too, and DOCTYPE text in CDATA is text', () => {
+  for (const decoy of ['<!-- <!DOCTYPE fake> -->', '<?foo <!DOCTYPE fake>?>']) {
+    const { svg, removed } = cleanSvg(
+      `${decoy}<!DOCTYPE svg [<!ENTITY y "EXPANDED"><!ENTITY x SYSTEM "file:///c:/windows/win.ini">]>` + svgOf('<text>&y;&x;</text>')
+    )
+    assert.doesNotMatch(svg, /EXPANDED|DOCTYPE|win\.ini/)
+    assert.ok(removed.some(r => /DOCTYPE that declares entities/.test(r)), JSON.stringify(removed))
+  }
+  const cdata = cleanSvg(svgOf('<text><![CDATA[<!DOCTYPE x]]></text>'))
+  assert.match(cdata.svg, /<text>&lt;!DOCTYPE x<\/text>/)
+  assert.deepEqual(cdata.removed, [])
+  const subset = cleanSvg('<!DOCTYPE svg [<!ELEMENT svg ANY>]>' + svgOf('<rect width="1" height="1"/>'))
+  assert.ok(subset.removed.some(r => /DOCTYPE with declarations/.test(r)), JSON.stringify(subset.removed))
+})
+
+test('an image may only embed a picture, never point at an id', () => {
+  const { svg, removed } = cleanSvg(svgOf('<rect id="r" width="1" height="1"/><image href="#r" width="1" height="1"/>'))
+  assert.doesNotMatch(svg, /<image/)
+  assert.ok(removed.some(r => /not an embedded picture \(#r\)/.test(r)), JSON.stringify(removed))
+})
+
+test('style rules keep element, class, id and descendant selectors only; url() in them must name an id here', () => {
+  const { svg, removed } = cleanSvg(
+    svgOf('<style>g rect, .a.b, #x{fill:red} g > rect{fill:blue} rect[x]{fill:blue} rect:hover{fill:blue} rect{fill:url(#nope)}</style><rect width="1" height="1"/>')
+  )
+  assert.match(svg, /<style>g rect, \.a\.b, #x\{fill:red\}<\/style>/)
+  assert.ok(removed.some(r => /selector other than element, class, id or descendant \(3 times\)/.test(r)), JSON.stringify(removed))
+  assert.ok(removed.includes('a reference to a missing id (#nope)'), JSON.stringify(removed))
+  const { group } = importSvg(svgOf('<style>g rect{fill:#00ff00}</style><g><rect width="1" height="1"/></g><rect width="1" height="1"/>'), 'D')
+  const [g, plain] = kids(group)
+  assert.deepEqual(kids(g)[0].fill, { type: 'color', color: '#00ff00' })
+  assert.deepEqual(plain.fill, { type: 'color', color: '#000000' })
+})
+
+test('an inlined fragment clips like the image it replaces and prefixes references however they were written', () => {
+  const out = inlineSvg(
+    svgOf(`<linearGradient id="g"/><rect x="-100" width="300" height="10" fill="URL( '#g' )" style="stroke:Url(#g)"/>`, 'viewBox="0 0 10 10" overflow="visible" style="overflow:visible;fill:red"'),
+    { x: 0, y: 0, w: 10, h: 10 },
+    's-k-'
+  )
+  // style declarations become attributes on the way in, so the root's fill stays and its overflow goes
+  assert.doesNotMatch(out, /overflow/)
+  assert.match(out, /^<svg [^>]* fill="red">/)
+  assert.match(out, /fill="url\(#s-k-g\)" stroke="url\(#s-k-g\)"/)
+})
+
+test('an even-odd path past 2,000 edges stays svg, noted, without the crossing check', () => {
+  let d = 'M0 0'
+  for (let i = 0; i < 1100; i++) d += i % 2 ? `H0V${i + 1}` : `H1000V${i + 1}`
+  const { group, kept } = importSvg(svgOf(`<path id="snake" fill-rule="evenodd" d="${d}"/>`), 'E')
+  assert.equal(kids(group)[0].type, 'svg')
+  assert.ok(kept.some(k => /snake: .*too detailed/.test(k)), JSON.stringify(kept))
+})
+
+test('a gradient never gives a paint more than 256 stops', () => {
+  const stops = (n: number) => Array.from({ length: n }, (_, i) => `<stop offset="${(i / n).toFixed(6)}" stop-color="${i % 2 ? '#f00' : '#00f'}"/>`).join('')
+  const many = importSvg(svgOf(`<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" x2="100">${stops(10_000)}</linearGradient><rect id="bar" width="100" height="10" fill="url(#g)"/>`), 'S')
+  const fill = kids(many.group)[0].fill
+  assert.ok(fill && fill.type === 'linear' && fill.stops.length <= 256 && fill.stops.length > 200, JSON.stringify(fill).slice(0, 200))
+  assert.ok(many.kept.some(k => /bar: its gradient is approximated/.test(k)), JSON.stringify(many.kept))
+  const repeat = `<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" x2="${(100 / 60).toFixed(6)}" spreadMethod="repeat">${stops(1000)}</linearGradient>`
+  let r: ReturnType<typeof importSvg> | undefined
+  underASecond('1,000 stops repeated 60 times over 50 rects', () => {
+    r = importSvg(svgOf(repeat + '<rect width="100" height="10" fill="url(#g)"/>'.repeat(50)), 'R')
+  })
+  assert.ok(kids(r!.group).every(l => l.fill && l.fill.type === 'linear' && l.fill.stops.length <= 256))
+})
+
+test('svg layers that would copy too much are refused with a plain message', () => {
+  const mask = `<mask id="m">${'<rect width="1" height="1" fill="#fff"/>'.repeat(2000)}</mask>`
+  const shapes = Array.from({ length: 1000 }, (_, i) => `<rect x="${i}" width="1" height="1" mask="url(#m)"/>`).join('')
+  assert.throws(() => importSvg(svgOf(`<defs>${mask}</defs>${shapes}`, 'width="5000" height="10"'), 'M'), {
+    message: 'This SVG expands to too much (over 50,000 elements).'
+  })
+  const clip = `<clipPath id="c"><path d="M0 0${' L1 1'.repeat(40_000)}"/></clipPath><filter id="f"/>`
+  const users = '<rect width="1" height="1" filter="url(#f)" clip-path="url(#c)"/>'.repeat(30)
+  assert.throws(() => importSvg(svgOf(`<defs>${clip}</defs>${users}`), 'C'), { message: 'This SVG expands to too much (over 5 MB of SVG layers).' })
+})
+
+/**
+ * Asserts that `fn` finishes in under a second. The runner runs test files in parallel, which inflates both clocks:
+ * wall time counts waiting for other files, and this process's CPU time counts V8's parallel GC threads. The work
+ * itself is at most the smaller of the two, so that is what's checked.
+ */
+function underASecond(label: string, fn: () => unknown): void {
+  const cpu = process.cpuUsage()
+  const start = performance.now()
+  fn()
+  const used = process.cpuUsage(cpu)
+  const cpuMs = (used.user + used.system) / 1000
+  const wallMs = performance.now() - start
+  assert.ok(Math.min(cpuMs, wallMs) < 1000, `${label} took ${Math.round(wallMs)} ms (${Math.round(cpuMs)} ms of CPU)`)
+}
+
+test('pathological url( values clean in linear time', () => {
+  underASecond('url(# x 40,000', () => cleanSvg(svgOf(`<rect width="1" height="1" fill="${'url(#'.repeat(40_000)}"/>`)))
+})
+
+test('10,000 style rules over 10,000 elements clean and import in under a second each', () => {
+  const css = Array.from({ length: 10_000 }, (_, i) => `.c${i}{fill:#123456}`).join('')
+  const els = Array.from({ length: 10_000 }, (_, i) => `<rect class="c${i}" width="1" height="1"/>`).join('')
+  const svg = svgOf(`<style>${css}</style>${els}`)
+  underASecond('clean', () => cleanSvg(svg))
+  underASecond('import', () => importSvg(svg, 'X'))
+})
+
+test('a 48 KB serpentine even-odd path imports in under a second', () => {
+  let d = 'M0 0'
+  for (let i = 0; i < 5900; i++) d += i % 2 ? `H0V${i + 1}` : `H1000V${i + 1}`
+  underASecond('serpentine', () => importSvg(svgOf(`<path fill-rule="evenodd" d="${d}"/>`), 'X'))
+})
+
+test('15,000 gradient-filled rects in a filtered group import in under a second', () => {
+  const grads = Array.from({ length: 15_000 }, (_, i) => `<linearGradient id="g${i}"/>`).join('')
+  const rects = Array.from({ length: 15_000 }, (_, i) => `<rect width="1" height="1" fill="url(#g${i})"/>`).join('')
+  const svg = svgOf(`<defs><filter id="f"><feGaussianBlur stdDeviation="1"/></filter>${grads}</defs><g filter="url(#f)">${rects}</g>`)
+  underASecond('filtered group', () => {
+    const { group } = importSvg(svg, 'X')
+    assert.equal(kids(group)[0].type, 'svg')
+  })
 })

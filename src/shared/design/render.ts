@@ -24,9 +24,15 @@ export interface RenderOptions {
 interface Scope { prefix: string; overrides: Record<string, Override>; top: boolean; board: Artboard; comps: string[] }
 interface Ctx { design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string> }
 
-const ENTITIES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }
-/** Text or an attribute value made safe for XML. */
-export const esc = (s: unknown): string => cleanText(String(s ?? '')).replace(/[&<>"']/g, c => ENTITIES[c])
+const ENTITIES: Record<string, string> = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;', '\t': '&#9;', '\n': '&#10;', '\r': '&#13;',
+  '\u0085': '&#133;', '\u2028': '&#8232;'
+}
+/**
+ * Text or an attribute value made safe for XML. Tab, LF, CR, NEL and LINE SEPARATOR become references, so names read
+ * back exactly (a parser turns them into spaces or line ends) and cleanSvg leaves the output byte for byte the same.
+ */
+export const esc = (s: unknown): string => cleanText(String(s ?? '')).replace(/[&<>"'\t\n\r\u0085\u2028]/g, c => ENTITIES[c])
 const safeId = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_')
 const has = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k)
 
@@ -256,9 +262,10 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
     case 'paint':
       return imageEl(ctx, l.asset, l.fit, boxOf(l))
     case 'svg':
-      // the window only ever draws outside SVG as an image; an export inlines it, its ids prefixed per layer
+      // the window only ever draws outside SVG as an image; an export inlines it, its ids prefixed per layer with
+      // s-<key>- (an id must start with a letter to be referenced, and no id the renderer makes starts with s-)
       return ctx.opts.mode === 'export'
-        ? inlineSvg(String(l.svg ?? ''), boxOf(l), key + '-')
+        ? inlineSvg(String(l.svg ?? ''), boxOf(l), `s-${key}-`)
         : imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
     case 'group':
       return groupSvg(ctx, l, key, scope)

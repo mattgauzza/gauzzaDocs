@@ -474,10 +474,10 @@ function crosses(a: [number, number], b: [number, number], c: [number, number], 
 }
 
 /** Outlines with more edges than this aren't checked for crossings (the caller keeps such a shape as SVG). */
-const MAX_EDGES = 12000
+export const MAX_EDGES = 2000
 
-/** Whether any two edges of the outlines cross (sweeping along x). Null when there are too many edges to check. */
-function anyCrossing(cs: Contour[]): boolean | null {
+/** Whether any two edges of the outlines cross (sweeping along x). */
+function anyCrossing(cs: Contour[]): boolean {
   const edges: { a: [number, number]; b: [number, number]; lo: number; hi: number; c: number; i: number; n: number }[] = []
   cs.forEach((ct, c) => {
     const n = ct.pts.length
@@ -487,7 +487,6 @@ function anyCrossing(cs: Contour[]): boolean | null {
       edges.push({ a, b, lo: Math.min(a[0], b[0]), hi: Math.max(a[0], b[0]), c, i, n })
     }
   })
-  if (edges.length > MAX_EDGES) return null
   edges.sort((p, q) => p.lo - q.lo)
   for (let i = 0; i < edges.length; i++) {
     const e = edges[i]
@@ -518,20 +517,20 @@ function reverseContour(ct: Contour): Seg[] {
 }
 
 /**
- * The same shape for the nonzero rule as `segs` under the even-odd rule, or null when contours cross (the two rules
- * then can't be matched by orientation alone).
+ * The same shape for the nonzero rule as `segs` under the even-odd rule. 'crossing' when contours cross (the two rules
+ * then can't be matched by orientation alone); 'too detailed' past 2,000 edges, where the check isn't made.
  */
-export function evenOddToNonZero(segs: Seg[]): Seg[] | null {
+export function evenOddToNonZero(segs: Seg[]): Seg[] | 'crossing' | 'too detailed' {
   const cs = contours(segs).filter(c => c.pts.length > 1)
-  const crossing = anyCrossing(cs)
-  if (crossing !== false) return null
+  if (cs.reduce((a, c) => a + c.pts.length, 0) > MAX_EDGES) return 'too detailed'
+  if (anyCrossing(cs)) return 'crossing'
   const out: Seg[] = []
   cs.forEach((ct, i) => {
     let depth = 0
     for (let j = 0; j < cs.length; j++) if (j !== i && inside(ct.pts[0], cs[j].pts)) depth++
     const area = signedArea(ct.pts)
     const want = depth % 2 === 0 ? 1 : -1
-    out.push(...(area * want < 0 ? reverseContour(ct) : ct.segs))
+    for (const seg of area * want < 0 ? reverseContour(ct) : ct.segs) out.push(seg)
   })
   return out
 }

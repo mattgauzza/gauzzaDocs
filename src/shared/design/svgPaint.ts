@@ -59,7 +59,7 @@ export function paintOf(
   if (id !== null) {
     const target = ids.get(id)
     if (target && (target.localName === 'linearGradient' || target.localName === 'radialGradient')) {
-      return gradientPaint(target, alpha, space, ids, vp)
+      return cachedGradient(target, alpha, space, ids, vp)
     }
     if (target && target.localName === 'pattern') return { paint: null, pattern: true }
     const fallback = v.replace(/^\s*url\([^)]*\)\s*/i, '')
@@ -67,6 +67,28 @@ export function paintOf(
   }
   const c = v.toLowerCase() === 'currentcolor' ? parseColor(s.color ?? 'black') : parseColor(v)
   return { paint: solid(c ?? [0, 0, 0, 1], alpha) }
+}
+
+type GradientResult = { paint: Paint | null; note?: string }
+const PAINTS = new WeakMap<Element, Map<string, GradientResult>>()
+const MAX_CACHED = 64
+
+/** A gradient paint, worked out once per gradient and coordinate space; each caller gets its own copy. */
+function cachedGradient(el: Element, alpha: number, space: PaintSpace, ids: Map<string, Element>, vp: Viewport): GradientResult {
+  const u = space.userBox
+  const b = space.box
+  const key = [alpha, ...space.m, u ? `${u.x},${u.y},${u.w},${u.h}` : '-', b.x, b.y, b.w, b.h, vp.vw, vp.vh].join('|')
+  let byKey = PAINTS.get(el)
+  if (!byKey) PAINTS.set(el, (byKey = new Map()))
+  let hit = byKey.get(key)
+  if (!hit) {
+    if (byKey.size >= MAX_CACHED) byKey.clear()
+    hit = gradientPaint(el, alpha, space, ids, vp)
+    byKey.set(key, hit)
+  }
+  const p = hit.paint
+  const copy: Paint | null = p && (p.type === 'linear' || p.type === 'radial') ? { ...p, stops: p.stops.map(s => ({ ...s })) } : p && { ...p }
+  return { paint: copy, note: hit.note }
 }
 
 /** A gradient attribute, following href to the gradients it inherits from. */
@@ -81,15 +103,21 @@ function gradAttr(el: Element, name: string, ids: Map<string, Element>): string 
   return null
 }
 
-/** The stops of the first gradient along the href chain that has any. */
-function gradStops(el: Element, ids: Map<string, Element>): { o: number; c: RGBA }[] {
+type Stop = { o: number; c: RGBA }
+const STOPS = new WeakMap<Element, Stop[]>()
+
+/** The stops of the first gradient along the href chain that has any; parsed once per gradient. */
+function gradStops(el: Element, ids: Map<string, Element>): Stop[] {
+  const known = STOPS.get(el)
+  if (known) return known
+  let out: Stop[] = []
   let cur: Element | undefined = el
   for (let i = 0; cur && i <= 8; i++) {
     const stops: Element[] = []
     for (let n = cur.firstChild; n; n = n.nextSibling) if (n.nodeType === 1 && (n as Element).localName === 'stop') stops.push(n as Element)
     if (stops.length) {
       let last = 0
-      return stops.map(st => {
+      out = stops.map(st => {
         const raw = st.getAttribute('offset') ?? '0'
         const o = Math.min(1, Math.max(last, alphaOf(raw.trim() ? raw : '0')))
         last = o
@@ -99,36 +127,48 @@ function gradStops(el: Element, ids: Map<string, Element>): { o: number; c: RGBA
         const rgba = c ?? [0, 0, 0, 1]
         return { o, c: [rgba[0], rgba[1], rgba[2], rgba[3] * a] as RGBA }
       })
+      break
     }
     const next = ids.get(hrefId(cur) ?? '')
     cur = next && /Gradient$/.test(next.localName) && next !== el ? next : undefined
   }
-  return []
+  STOPS.set(el, out)
+  return out
 }
 
 const lerp = (a: RGBA, b: RGBA, t: number): RGBA => [0, 1, 2, 3].map(i => a[i] + (b[i] - a[i]) * t) as RGBA
+/** The first stop at or after `t` (strict: after `t`). Stops are sorted by offset. */
+function bound(stops: Stop[], t: number, strict: boolean): number {
+  let lo = 0
+  let hi = stops.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (strict ? stops[mid].o <= t : stops[mid].o < t) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
 
 /** The color at `t` in 0..1 (padded outside), from the left (side -1) or right (side 1) where stops share an offset. */
-function colorAt(stops: { o: number; c: RGBA }[], t: number, side: number): RGBA {
+function colorAt(stops: Stop[], t: number, side: number): RGBA {
   const first = stops[0]
   const last = stops[stops.length - 1]
   if (t < first.o || (t === first.o && side < 0)) return first.c
   if (t > last.o || (t === last.o && side > 0)) return last.c
   if (side < 0) {
-    const j = stops.findIndex(s => s.o >= t)
+    const j = bound(stops, t, false)
     if (stops[j].o === t) return stops[j].c
     const a = stops[j - 1]
     return lerp(a.c, stops[j].c, (t - a.o) / (stops[j].o - a.o))
   }
-  let j = stops.length - 1
-  while (stops[j].o > t) j--
-  if (stops[j].o === t || j === stops.length - 1) return stops[j].c
+  const j = bound(stops, t, true) - 1
+  if (stops[j].o === t) return stops[j].c
   const b = stops[j + 1]
   return lerp(stops[j].c, b.c, (t - stops[j].o) / (b.o - stops[j].o))
 }
 
 /** The color at gradient position `t` under a spread method (pad, repeat or reflect). */
-function spreadColor(stops: { o: number; c: RGBA }[], t: number, side: number, spread: string): RGBA {
+function spreadColor(stops: Stop[], t: number, side: number, spread: string): RGBA {
   if (spread === 'repeat') {
     let f = t - Math.floor(t)
     if (f === 0 && side < 0) f = 1 // the left side of a period boundary is the end of the previous period
@@ -142,18 +182,35 @@ function spreadColor(stops: { o: number; c: RGBA }[], t: number, side: number, s
 }
 
 const MAX_PERIODS = 64
+/** Most stops one paint gets; a gradient that would need more is sampled evenly instead. */
+export const MAX_PAINT_STOPS = 256
 const r6 = (v: number): number => Math.round(v * 1e6) / 1e6
+const withAlpha = (c: RGBA, alpha: number): string => hexColor([c[0], c[1], c[2], c[3] * alpha])
 
 /**
  * Stops for the design format's gradient, which runs 0..1 where the SVG gradient runs t0..t1. Every SVG stop inside the
- * span keeps its place and the ends take the color the SVG gradient has there, so the result is exact.
+ * span keeps its place and the ends take the color the SVG gradient has there, so the result is exact. Past 64 repeat
+ * periods the gradient is padded instead, and past 256 stops it is sampled at 256 even points; both are approximations.
  */
-function resample(stops: { o: number; c: RGBA }[], t0: number, t1: number, spread: string): { stops: { offset: number; color: string }[]; approx: boolean } {
+function resample(stops: Stop[], t0: number, t1: number, spread: string, alpha: number): { stops: { offset: number; color: string }[]; approx: boolean } {
   let approx = false
   let mode = spread === 'repeat' || spread === 'reflect' ? spread : 'pad'
-  if (mode !== 'pad' && Math.floor(t1) - Math.floor(t0) > MAX_PERIODS) {
+  const periods = Math.floor(t1) - Math.floor(t0) + 1
+  if (mode !== 'pad' && periods > MAX_PERIODS) {
     mode = 'pad'
     approx = true
+  }
+  const inside = mode === 'pad' ? bound(stops, t1, false) - bound(stops, t0, true) : periods * (stops.length + 1)
+  const out: { offset: number; color: string }[] = []
+  const push = (t: number, side: number) => {
+    const offset = r6((t - t0) / (t1 - t0))
+    const color = withAlpha(spreadColor(stops, t, side, mode), alpha)
+    const prev = out[out.length - 1]
+    if (!prev || prev.offset !== offset || prev.color !== color) out.push({ offset, color })
+  }
+  if (2 * inside + 2 > MAX_PAINT_STOPS) {
+    for (let k = 0; k < MAX_PAINT_STOPS; k++) push(t0 + ((t1 - t0) * k) / (MAX_PAINT_STOPS - 1), 1)
+    return { stops: out, approx: true }
   }
   const marks = new Set<number>()
   if (mode === 'pad') {
@@ -166,13 +223,6 @@ function resample(stops: { o: number; c: RGBA }[], t0: number, t1: number, sprea
         if (t > t0 && t < t1) marks.add(t)
       }
     }
-  }
-  const out: { offset: number; color: string }[] = []
-  const push = (t: number, side: number) => {
-    const offset = r6((t - t0) / (t1 - t0))
-    const color = hexColor(spreadColor(stops, t, side, mode))
-    const prev = out[out.length - 1]
-    if (!prev || prev.offset !== offset || prev.color !== color) out.push({ offset, color })
   }
   push(t0, 1)
   for (const t of [...marks].sort((a, b) => a - b)) {
@@ -195,9 +245,9 @@ function coord(v: string, bbox: boolean, ref: number): number {
 function gradientPaint(
   el: Element, alpha: number, space: PaintSpace, ids: Map<string, Element>, vp: Viewport
 ): { paint: Paint | null; note?: string } {
-  const stops = gradStops(el, ids).map(s => ({ o: s.o, c: [s.c[0], s.c[1], s.c[2], s.c[3] * alpha] as RGBA }))
+  const stops = gradStops(el, ids)
   if (!stops.length) return { paint: null }
-  const lastColor = (): Paint => solid(stops[stops.length - 1].c, 1)
+  const lastColor = (): Paint => solid(stops[stops.length - 1].c, alpha)
   if (stops.length === 1) return { paint: lastColor() }
   const attr = (n: string, d: string) => gradAttr(el, n, ids) ?? d
   const bbox = attr('gradientUnits', 'objectBoundingBox') !== 'userSpaceOnUse'
@@ -234,10 +284,10 @@ function gradientPaint(
     const half = (Math.abs(b.w * dx) + Math.abs(b.h * dy)) / 2
     const t0 = t(cx - dx * half, cy - dy * half)
     const t1 = t(cx + dx * half, cy + dy * half)
-    if (!(t1 - t0 > 1e-12)) return { paint: solid(spreadColor(stops, t(cx, cy), 1, spread), 1) }
-    const out = resample(stops, t0, t1, spread)
+    if (!(t1 - t0 > 1e-12)) return { paint: solid(spreadColor(stops, t(cx, cy), 1, spread), alpha) }
+    const out = resample(stops, t0, t1, spread, alpha)
     const deg = Math.round(((angle * 180) / Math.PI) * 1e4) / 1e4
-    return { paint: { type: 'linear', angle: deg === 0 ? 0 : deg, stops: out.stops }, note: out.approx ? 'its repeating gradient is drawn padded' : undefined }
+    return { paint: { type: 'linear', angle: deg === 0 ? 0 : deg, stops: out.stops }, note: out.approx ? 'its gradient is approximated (too many stops or repeats)' : undefined }
   }
 
   const ccx = coord(attr('cx', '50%'), bbox, vp.vw)
@@ -249,7 +299,7 @@ function gradientPaint(
   const [C0, C1] = apply(A, ccx, ccy)
   const R = r * Math.sqrt(Math.abs(D))
   const Rb = Math.hypot(b.w, b.h) / 2
-  if (!Rb) return { paint: solid(stops[0].c, 1) }
+  if (!Rb) return { paint: solid(stops[0].c, alpha) }
   const why: string[] = []
   const [a, bb, c, d] = A
   const scale = Math.sqrt(Math.abs(D))
@@ -257,7 +307,7 @@ function gradientPaint(
   const [F0, F1] = apply(A, fx, fy)
   if (Math.hypot(F0 - C0, F1 - C1) > 1e-6 * R) why.push('off center focus')
   if (Math.hypot(C0 - cx, C1 - cy) > 1e-3 * Math.max(1, Rb)) why.push('not centered on the shape')
-  const out = resample(stops, 0, Rb / R, spread)
-  if (out.approx) why.push('repeating')
+  const out = resample(stops, 0, Rb / R, spread, alpha)
+  if (out.approx) why.push('too many stops or repeats')
   return { paint: { type: 'radial', stops: out.stops }, note: why.length ? `its radial gradient is approximated (${why.join(', ')})` : undefined }
 }
