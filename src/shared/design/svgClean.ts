@@ -147,6 +147,7 @@ export const visible = (v: string): string => v.replace(HIDDEN_ALL, '').trim()
 /** How a reference that isn't a plain #name is named in `removed`. */
 function badReference(value: string): string {
   const t = xmlTrim(value)
+  if (!t) return 'an empty reference'
   if (HIDDEN.test(t) && visible(t).startsWith('#')) return `a reference with hidden characters (${short(visible(t))})`
   if (t.startsWith('#')) return `a reference to a name SVG doesn't allow (${short(t)})`
   return `a reference outside the file (${short(t)})`
@@ -178,9 +179,17 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
   if ((css ? CSS_CONTROL : ATTR_CONTROL).test(raw)) return { bad: 'a value with control characters' }
   if (raw.includes('\\')) return { bad: 'a style value with escapes' }
   if (raw.includes('<')) return { bad: 'a style value with markup' }
+  if (css && /[{}]/.test(raw)) return { bad: 'a style value with braces' }
+  if (css && raw.includes('/*')) return { bad: 'a style value with a comment' }
+  if (/url[ \t\n\r\f]+\(/i.test(raw)) return { bad: 'a reference with a gap between url and its bracket' }
   const k = KEYWORD.exec(raw)
   if (k) return { bad: `a style value using ${k[0].toLowerCase().replace(/[:(]$/, '')}` }
-  if (!/[('"]/.test(raw)) return { value: raw } // no function and no string: nothing more to check
+  if (css && raw.includes('!')) return { bad: 'a style value with a stray !' }
+  if (!/[('"]/.test(raw)) {
+    // no function and no string: nothing more to check, once a lone closing bracket is ruled out
+    return raw.includes(')') ? { bad: 'a style value with unbalanced brackets' } : { value: raw }
+  }
+  let depth = 0 // brackets open around the current position (url() closes its own)
   let out = ''
   let last = 0
   let start = -1 // where the identifier before the current position began
@@ -198,6 +207,11 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
       if (start < 0) start = i
       continue
     }
+    if (ch === ')') {
+      if (--depth < 0) return { bad: 'a style value with unbalanced brackets' }
+      start = -1
+      continue
+    }
     if (ch !== '(') {
       start = -1
       continue
@@ -205,6 +219,7 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
     const name = start < 0 ? '' : raw.slice(start, i).toLowerCase()
     if (name !== 'url') {
       if (!FUNCTIONS.has(name)) return { bad: `a style function that could load something (${short(name)})` }
+      depth++
       start = -1
       continue
     }
@@ -213,7 +228,7 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
     let arg: string
     if (raw[j] === '"' || raw[j] === "'") {
       const end = raw.indexOf(raw[j], j + 1)
-      if (end < 0) return { bad: `a reference outside the file (${short(raw.slice(j + 1))})` }
+      if (end < 0) return { bad: `a reference that isn't closed (${short(raw.slice(j))})` }
       arg = raw.slice(j + 1, end)
       j = end + 1
     } else {
@@ -223,24 +238,32 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
     }
     while (raw[j] === ' ' || raw[j] === '\t' || raw[j] === '\n' || raw[j] === '\r') j++
     const ref = fragment(arg)
+    if (j >= raw.length) return { bad: `a reference that isn't closed (${short(raw.slice(i - 3))})` }
     if (raw[j] !== ')' || !ref) return { bad: badReference(arg) }
     out += raw.slice(last, start) + `url(${ref})`
     last = j + 1
     i = j
     start = -1
   }
+  if (depth) return { bad: 'a style value with unbalanced brackets' }
   return { value: out + raw.slice(last) }
 }
 
 /**
- * A style attribute's declarations, keeping only allowed properties with safe values (in canonical form). With `ids`,
+ * A style attribute's (or rule's) declarations, keeping only allowed properties with safe values (in canonical form),
+ * one per property: a later one replaces an earlier one unless only the earlier is !important, as in CSS. With `ids`,
  * a declaration that refers to an id not among them goes too.
  */
 export function cleanDeclarations(text: string, note: (s: string) => void, ids?: Map<string, Element>): string {
-  const keep: string[] = []
+  return keptDeclarations(text, note, ids).join(';')
+}
+
+/** cleanDeclarations as a list, one entry per property. */
+function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<string, Element>): string[] {
+  const keep = new Map<string, { text: string; important: boolean }>()
   for (const d of splitDeclarations(text)) {
     if (d.prop.startsWith('--')) {
-      note(`a CSS variable (${d.prop})`)
+      note(`a CSS variable (${short(d.prop)})`)
       continue
     }
     if (d.prop.startsWith('-')) continue // vendor properties such as -inkscape-font-specification
@@ -258,40 +281,56 @@ export function cleanDeclarations(text: string, note: (s: string) => void, ids?:
       note(`a reference to a missing id (#${short(missing)})`)
       continue
     }
-    keep.push(`${d.prop}:${v.value}${d.important ? ' !important' : ''}`)
+    const had = keep.get(d.prop)
+    if (had && had.important && !d.important) continue
+    keep.delete(d.prop) // the later one takes the later place
+    keep.set(d.prop, { text: `${d.prop}:${v.value}${d.important ? ' !important' : ''}`, important: d.important })
   }
-  return keep.join(';')
+  return [...keep.values()].map(k => k.text)
 }
 
-const SAFE_MEDIA = /^[\w\s(),:.-]*$/
-const COMPOUND = /^(\*|[A-Za-z][\w-]*)?((?:[.#][\w-]+)*)$/
-/** Selectors made only of element, class and id parts, joined by descendant spaces and commas. */
+/** Most declarations a style rule may hold (one per property). */
+export const MAX_RULE_DECLARATIONS = 64
+/** Most simple parts (element, .class, #id) one selector may chain. */
+export const MAX_SELECTOR_PARTS = 4
+const SIMPLE = /^([A-Za-z][\w-]*)?((?:[.#][\w-]+)*)$/
+/**
+ * Whether one selector (one part of a comma list) is a simple one gauzzaDocs supports: an element, .class or #id, or
+ * a chain of them on the same element (rect.logo, .a.b) up to 4 parts. No combinators, no *, no pseudo-classes.
+ */
 export function simpleSelector(sel: string): boolean {
-  return sel.split(',').every(part => {
-    const t = part.trim()
-    return !!t && t.split(/\s+/).every(c => !!c && COMPOUND.test(c))
-  })
+  const m = SIMPLE.exec(sel.trim())
+  if (!m || (!m[1] && !m[2])) return false
+  const parts = (m[1] ? 1 : 0) + (m[2].match(/[.#]/g)?.length ?? 0)
+  return parts <= MAX_SELECTOR_PARTS
 }
 
-/** A style sheet with only plain rules (and @media around them) whose declarations pass cleanDeclarations. */
-export function cleanStylesheet(css: string, note: (s: string) => void, ids?: Map<string, Element>, depth = 0): string {
+const UNSUPPORTED = "a style rule gauzzaDocs doesn't support"
+
+/**
+ * A style sheet with only simple rules: each selector in a list a simple one (others are dropped from the list), at
+ * most 64 declarations once each property is kept once, and every declaration passing cleanDeclarations. At-rules
+ * go: @import and @font-face named as such, any other as a rule gauzzaDocs doesn't support.
+ */
+export function cleanStylesheet(css: string, note: (s: string) => void, ids?: Map<string, Element>): string {
   const out: string[] = []
   for (const b of cssBlocks(css)) {
     if (b.kind === 'at') {
       if (b.name === 'import') note(`a CSS @import (${short(b.prelude)})`)
       else if (b.name === 'font-face') note('a font loaded from CSS (@font-face)')
-      else if (b.name === 'media' && b.body !== null && depth < 4 && SAFE_MEDIA.test(b.prelude)) {
-        const inner = cleanStylesheet(b.body, note, ids, depth + 1)
-        if (inner) out.push(`@media ${b.prelude.trim().replace(/\s+/g, ' ')}{${inner}}`)
-      } else note(`a CSS @${short(b.name) || '?'} rule`)
+      else note(UNSUPPORTED)
       continue
     }
-    if (!simpleSelector(b.selector)) {
-      note('a CSS rule with a selector other than element, class, id or descendant')
+    const selectors = b.selector.split(',').map(s => s.trim())
+    const simple = selectors.filter(simpleSelector)
+    for (let i = simple.length; i < selectors.length; i++) note(UNSUPPORTED)
+    if (!simple.length) continue
+    const decls = keptDeclarations(b.body, note, ids)
+    if (decls.length > MAX_RULE_DECLARATIONS) {
+      note(UNSUPPORTED)
       continue
     }
-    const decls = cleanDeclarations(b.body, note, ids)
-    if (decls) out.push(`${b.selector.trim().replace(/\s+/g, ' ')}{${decls}}`)
+    if (decls.length) out.push(`${simple.join(', ')}{${decls.join(';')}}`)
   }
   return out.join('')
 }
@@ -523,7 +562,7 @@ function cleanAttributes(el: Element, notes: Notes): void {
       } else if (tag === 'image' && v.startsWith('data:image/svg')) drop('a nested SVG image')
       else if (tag === 'image' && v.startsWith('data:')) drop(`an image of a type that isn't allowed (${short(a.value.split(',')[0])})`)
       else if (tag === 'image') drop(`an external image (${short(a.value)})`)
-      else drop(`a reference outside the file (${short(a.value)})`)
+      else drop(badReference(a.value))
       continue
     }
     if (ns === XML_NS) {
@@ -761,9 +800,20 @@ function dropDeadUses(uses: Element[], ids: Map<string, Element>, notes: Notes):
  * such a use), then those whose chain of references is deeper than 8 (or loops), then any other href or url(#id) left
  * pointing nowhere; refuses the SVG when expanding every <use> would make more than 50,000 elements.
  */
-function checkReferences(root: Element, notes: Notes): void {
+function checkReferences(root: Element, notes: Notes): number {
   let all = allElements(root)
+  // one element per id: the first keeps it (as a browser resolves it), later ones lose theirs
+  const seenIds = new Set<string>()
+  for (const el of all) {
+    const id = el.getAttribute('id')
+    if (!id) continue
+    if (seenIds.has(id)) {
+      el.removeAttribute('id')
+      notes.add(`a repeated id (#${short(id)})`)
+    } else seenIds.add(id)
+  }
   let ids = idMap(all)
+  let drawn = all.length
   const uses = all.filter(el => el.localName === 'use')
   if (uses.length) {
     if (dropDeadUses(uses, ids, notes)) {
@@ -789,7 +839,8 @@ function checkReferences(root: Element, notes: Notes): void {
       ids = idMap(all)
     }
     const size = overGraph(all, target, (_el, kids, via) => 1 + kids.reduce((a, v) => a + v, 0) + (via ?? 0))
-    if ((size.get(root) ?? Infinity) > MAX_SVG_ELEMENTS) throw new Error(TOO_MANY)
+    drawn = size.get(root) ?? Infinity
+    if (drawn > MAX_SVG_ELEMENTS) throw new Error(TOO_MANY)
   }
   dropMissingHrefs(all, ids, notes)
   // url(#id) must name an id that is still here
@@ -816,6 +867,7 @@ function checkReferences(root: Element, notes: Notes): void {
       el.removeAttributeNode(a)
     }
   }
+  return drawn
 }
 
 // The same escapes as the renderer's esc, so cleaning the renderer's output leaves it byte for byte the same. Tab, LF
@@ -864,8 +916,8 @@ function write(el: Element, root: boolean, out: string[]): void {
   else out.push('</', el.localName, '>')
 }
 
-/** Cleans SVG text into its root element (see cleanSvg). */
-export function cleanSvgRoot(svg: string): { root: Element; removed: string[] } {
+/** Cleans SVG text into its root element (see cleanSvg), with how many elements it draws once every <use> expands. */
+export function cleanSvgRoot(svg: string): { root: Element; removed: string[]; drawn: number } {
   if (typeof svg !== 'string') throw new Error('An SVG must be text.')
   if (utf8Length(svg) > MAX_SVG_BYTES) throw new Error(TOO_LARGE)
   const notes = new Notes()
@@ -880,8 +932,8 @@ export function cleanSvgRoot(svg: string): { root: Element; removed: string[] } 
   }
   cleanAttributes(root, notes)
   cleanChildren(root, notes)
-  checkReferences(root, notes)
-  return { root, removed: notes.list() }
+  const drawn = checkReferences(root, notes)
+  return { root, removed: notes.list(), drawn }
 }
 
 /**
@@ -889,7 +941,7 @@ export function cleanSvgRoot(svg: string): { root: Element; removed: string[] } 
  * the fragment's own ids or embedded images, and `removed` naming each thing that went. Throws over 5 MB or 50,000
  * elements.
  */
-export function cleanSvg(svg: string): { svg: string; removed: string[] } {
-  const { root, removed } = cleanSvgRoot(svg)
-  return { svg: serializeSvg(root), removed }
+export function cleanSvg(svg: string): { svg: string; removed: string[]; drawn: number } {
+  const { root, removed, drawn } = cleanSvgRoot(svg)
+  return { svg: serializeSvg(root), removed, drawn }
 }

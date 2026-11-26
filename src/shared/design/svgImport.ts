@@ -158,12 +158,18 @@ const ellipse = (cx: number, cy: number, rx: number, ry: number): Seg[] => [
 ]
 
 /** A basic shape's outline in its own user space, or null when it draws nothing. */
+/** Parsed path data per <path> element, so a path drawn by many <use> elements is parsed once. Never changed. */
+const PATHS = new WeakMap<Element, Seg[] | null>()
+
 function shapeSegs(el: Element, vp: Viewport): Seg[] | null {
   const L = (n: string, ref: number) => len(el.getAttribute(n), ref)
   switch (el.localName) {
     case 'path': {
-      const segs = parsePath(el.getAttribute('d'))
-      return segs.length ? segs : null
+      if (PATHS.has(el)) return PATHS.get(el)!
+      const parsed = parsePath(el.getAttribute('d'))
+      const segs = parsed.length ? parsed : null
+      PATHS.set(el, segs)
+      return segs
     }
     case 'rect': {
       const x = L('x', vp.vw) ?? 0
@@ -410,8 +416,10 @@ function svgLayer(el: Element, ctm: Matrix, inh: Style, s: Style, why: string, c
   const carried = Object.entries(inh).filter(([p]) => INHERITED.has(p) && PRESENTATION.has(p))
   // an inherited url(#id) (a fill or marker set on an ancestor) brings its definition along
   const { defs } = referenced(el, ctx, carried.flatMap(([, v]) => urlRefs(v)))
-  // what this layer draws counts against the import with every <use> in it expanded, before any of it is written out
-  spend(ctx, defs.reduce((a, d) => a + (ctx.sizes.get(d) ?? Infinity), ctx.sizes.get(el) ?? Infinity))
+  // before anything is written out, what this layer would draw (every <use> expanded, as resolved in the source) is
+  // charged, so an import that asks too much stops before composing any more
+  const estimate = defs.reduce((a, d) => a + (ctx.sizes.get(d) ?? Infinity), ctx.sizes.get(el) ?? Infinity)
+  spend(ctx, estimate)
   const inherited = carried.map(([p, v]) => ` ${p}="${escAttr(v)}"`).join('')
   const markup =
     `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" xmlns:inkscape="${INKSCAPE_NS}" width="${num(box.w, 3)}" height="${num(box.h, 3)}" ` +
@@ -419,8 +427,10 @@ function svgLayer(el: Element, ctm: Matrix, inh: Style, s: Style, why: string, c
     (defs.length ? `<defs>${defs.map(d => serializeSvg(d, false)).join('')}</defs>` : '') +
     `<g transform="matrix(${ctm.map(v => num(v, 6)).join(' ')})"${inherited}>${serializeSvg(el, false)}</g></svg>`
   spend(ctx, 0, markup.length)
-  // what is stored is always cleanSvg's own output: composed markup is cleaned again, never trusted as it is
-  const svg = cleanSvg(markup).svg
+  // What is stored is always cleanSvg's own output: composed markup is cleaned again, never trusted as it is. The
+  // layer ends up charged at least what that cleaning says it draws, which is what a browser will draw from it.
+  const { svg, drawn } = cleanSvg(markup)
+  if (drawn > estimate) spend(ctx, drawn - estimate)
   const label = name ?? nameOf(el, 'SVG', ctx)
   ctx.kept.push(`${label}: kept as an SVG layer because ${why}`)
   return charge(ctx, { ...base(ctx, label, box, { ...s, opacity: '1' }), type: 'svg', svg })

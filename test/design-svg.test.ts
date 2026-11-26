@@ -8,7 +8,7 @@ import { newDesign } from '../src/shared/design/model'
 import { parsePath, pathBounds } from '../src/shared/design/path'
 import { designToSvg } from '../src/shared/design/render'
 import { sharedAssetName } from '../src/shared/design/sha256'
-import { cleanSvg } from '../src/shared/design/svgClean'
+import { PRESENTATION, STYLE_ONLY, cleanSvg } from '../src/shared/design/svgClean'
 import { inlineSvg } from '../src/shared/design/svgFragment'
 import { importSvg, layerAsSvg } from '../src/shared/design/svgImport'
 import { layoutText } from '../src/shared/design/text'
@@ -622,17 +622,22 @@ test('an image may only embed a picture, never point at an id', () => {
   assert.ok(removed.some(r => /not an embedded picture \(#r\)/.test(r)), JSON.stringify(removed))
 })
 
-test('style rules keep element, class, id and descendant selectors only; url() in them must name an id here', () => {
+test('style rules keep only simple selectors; url() in them must name an id here', () => {
   const { svg, removed } = cleanSvg(
-    svgOf('<style>g rect, .a.b, #x{fill:red} g > rect{fill:blue} rect[x]{fill:blue} rect:hover{fill:blue} rect{fill:url(#nope)}</style><rect width="1" height="1"/>')
+    svgOf(
+      '<style>g rect, .a.b, #x, rect.logo{fill:red} g > rect{fill:blue} rect[x]{fill:blue} rect:hover{fill:blue} *{fill:blue} ' +
+        '.a.b.c.d.e{fill:blue} @media all{rect{fill:blue}} rect{fill:url(#nope)}</style><rect width="1" height="1"/>'
+    )
   )
-  assert.match(svg, /<style>g rect, \.a\.b, #x\{fill:red\}<\/style>/)
-  assert.ok(removed.some(r => /selector other than element, class, id or descendant \(3 times\)/.test(r)), JSON.stringify(removed))
+  assert.match(svg, /<style>\.a\.b, #x, rect\.logo\{fill:red\}<\/style>/)
+  assert.ok(removed.includes("a style rule gauzzaDocs doesn't support (7 times)"), JSON.stringify(removed))
   assert.ok(removed.includes('a reference to a missing id (#nope)'), JSON.stringify(removed))
-  const { group } = importSvg(svgOf('<style>g rect{fill:#00ff00}</style><g><rect width="1" height="1"/></g><rect width="1" height="1"/>'), 'D')
+  // a descendant rule is dropped, not applied
+  const { group, removed: dropped } = importSvg(svgOf('<style>g rect{fill:#00ff00}</style><g><rect width="1" height="1"/></g><rect width="1" height="1"/>'), 'D')
   const [g, plain] = kids(group)
-  assert.deepEqual(kids(g)[0].fill, { type: 'color', color: '#00ff00' })
+  assert.deepEqual(kids(g)[0].fill, { type: 'color', color: '#000000' })
   assert.deepEqual(plain.fill, { type: 'color', color: '#000000' })
+  assert.ok(dropped.includes("a style rule gauzzaDocs doesn't support"))
 })
 
 test('an inlined fragment clips like the image it replaces and prefixes references however they were written', () => {
@@ -830,7 +835,9 @@ const STITCH = svgOf(
 test('style values are checked one by one, so two can never be stitched into a third', async () => {
   const clean = cleanSvg(STITCH)
   assert.doesNotMatch(clean.svg, /evil|<style/)
-  assert.ok(clean.removed.includes('a style value with a string that never ends (2 times)'), JSON.stringify(clean.removed))
+  // each value runs to the end of its rule (taking the closing brace with it), so it goes for its brace
+  assert.ok(clean.removed.includes('a style value with braces (2 times)'), JSON.stringify(clean.removed))
+  assert.ok(cleanSvg(svgOf(`<rect width="1" height="1" style="mix-blend-mode:';filter:url(https://evil.example/f.svg#f)"/>`)).removed.includes('a style value with a string that never ends'))
   const d = newDesign('instagram')
   d.artboards[0].layers.push({ ...base, id: 'a1', name: 'L', type: 'svg', x: 0, y: 0, width: 10, height: 10, svg: STITCH })
   const out = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' })
@@ -898,7 +905,9 @@ test('svg layers are numbered per render, so ids never collide between them', as
     const ids = Array.from(out.matchAll(/ id="(s[^"]+)"/g), m => m[1])
     assert.deepEqual(ids, ['s1-b-x', 's2-x'])
     assert.match(out, /<linearGradient id="s1-b-x">[\s\S]*fill="url\(#s1-b-x\)"[\s\S]*<linearGradient id="s2-x">[\s\S]*fill="url\(#s2-x\)"/)
-    assert.equal(cleanSvg(out).svg, out)
+    const again = cleanSvg(out)
+    if (first === second) assert.deepEqual(again.removed, [`a repeated id (#l-${first})`]) // the second l-z loses its id
+    else assert.equal(again.svg, out)
   }
 })
 
@@ -920,4 +929,109 @@ test('a reference to a name SVG does not allow is named plainly', () => {
   const { removed } = cleanSvg(svgOf('<rect id="9r" width="1" height="1"/><use href="#9r"/><linearGradient id="1g"/><rect width="1" height="1" fill="url(#1g)"/>'))
   assert.ok(removed.includes("a reference to a name SVG doesn't allow (#9r)"), JSON.stringify(removed))
   assert.ok(removed.includes("a reference to a name SVG doesn't allow (#1g)"), JSON.stringify(removed))
+})
+
+// Fix round 3: simple style rules only, repeated ids, and the smaller ones
+
+const BOX = { x: 0, y: 0, w: 10, h: 10 }
+/** Import and export (inline) both finish in under a second, or are refused within it. */
+function quickEither(label: string, svg: string): void {
+  underASecond(`${label} import`, () => {
+    try {
+      importSvg(svg, 'X')
+    } catch (e) {
+      assert.match((e as Error).message, /^This SVG/)
+    }
+  })
+  underASecond(`${label} export`, () => inlineSvg(svg, BOX, 's1-'))
+}
+
+test('the reviewer style inputs import and export in under a second each', () => {
+  const E = 5000
+  const K = 200_000
+  quickEither('one compound repeating .a 200,000 times', svgOf(`<style>${'.a'.repeat(K)}{fill:red}</style>${'<rect class="a" width="1" height="1"/>'.repeat(E)}`, 'width="10" height="10"'))
+  quickEither('one compound repeating #a 200,000 times', svgOf(`<style>${'#a'.repeat(K)}{fill:red}</style>${'<rect id="a" width="1" height="1"/>'.repeat(E)}`, 'width="10" height="10"'))
+  quickEither('a descendant chain of 200,000 parts', svgOf(`<style>${'g '.repeat(K)}rect{fill:red}</style><g>${'<rect width="1" height="1"/>'.repeat(E)}</g>`, 'width="10" height="10"'))
+  quickEither('.a repeated 100,000 times', svgOf(`<style>${'.a'.repeat(100_000)}{fill:red}</style>${'<rect class="a" width="1" height="1"/>'.repeat(E)}`, 'width="10" height="10"'))
+  const decls = svgOf(`<style>rect{${'fill:red;'.repeat(50_000)}}</style>${'<rect width="1" height="1"/>'.repeat(10_000)}`, 'width="10" height="10"')
+  quickEither('fill:red; 50,000 times over 10,000 rects', decls)
+  assert.equal((cleanSvg(decls).svg.match(/fill:red/g) ?? []).length, 1, 'one declaration per property')
+})
+
+test('a rule with more than 64 declarations, once each property is kept once, is dropped', () => {
+  const props = [...PRESENTATION, ...STYLE_ONLY]
+  assert.ok(props.length >= 65)
+  const rule = (n: number) => `rect{${props.slice(0, n).map(p => `${p}:inherit`).join(';')}}`
+  assert.match(cleanSvg(svgOf(`<style>${rule(64)}</style>`)).svg, /<style>rect\{/)
+  const over = cleanSvg(svgOf(`<style>${rule(65)}</style>`))
+  assert.doesNotMatch(over.svg, /<style/)
+  assert.ok(over.removed.includes("a style rule gauzzaDocs doesn't support"), JSON.stringify(over.removed))
+})
+
+test('a repeated id keeps only its first element, so a composed layer resolves a use the way the source did', () => {
+  // pZ: the pattern's <g id="x"> repeats the id of a small rect; copied into each layer first, it would win there
+  const N = 60
+  const layer = `<g filter="url(#f)"><rect width="1" height="1" fill="url(#pat)"/>${'<use href="#x"/>'.repeat(80)}</g>`
+  const src = svgOf(
+    '<defs><filter id="f"><feGaussianBlur stdDeviation="1"/></filter><rect id="x" width="1" height="1"/></defs>' +
+      layer.repeat(N) +
+      `<defs><pattern id="pat" width="1" height="1"><g id="x">${'<use href="#y"/>'.repeat(100)}</g></pattern>` +
+      `<g id="y">${'<rect width="1" height="1"/>'.repeat(4)}</g></defs>`,
+    'width="10" height="10"'
+  )
+  const clean = cleanSvg(src)
+  assert.ok(clean.removed.includes('a repeated id (#x)'), JSON.stringify(clean.removed))
+  assert.equal((clean.svg.match(/ id="x"/g) ?? []).length, 1)
+  let drawn = 0
+  try {
+    const every = (l: Layer): Layer[] => [l, ...(l.type === 'group' ? l.children.flatMap(every) : [])]
+    for (const l of every(importSvg(src, 'Z').group)) if (l.type === 'svg') drawn += browserElements(l.svg)
+  } catch (e) {
+    assert.equal((e as Error).message, 'This SVG expands to too much (over 50,000 elements).')
+  }
+  assert.ok(drawn <= 50_000, `the layers draw ${drawn} elements`)
+})
+
+test('a font family in any script keeps its letters; one with other characters is dropped', () => {
+  const family = (css: string) => {
+    const t = kids(importSvg(svgOf(`<style>${css}</style><text x="0" y="10">Hi</text>`), 'F').group)[0]
+    return t.type === 'text' ? t.runs[0].font.family : ''
+  }
+  assert.equal(family("text{font-family:'\u30d2\u30e9\u30ae\u30ce\u89d2\u30b4 Pro', sans-serif}"), '\u30d2\u30e9\u30ae\u30ce\u89d2\u30b4 Pro')
+  assert.equal(family("text{font-family:'M+ 1p', sans-serif}"), 'sans-serif', "a family that can't lose its quotes isn't applied")
+})
+
+test("an inlined fragment's root loses its transform too, however it was set", () => {
+  const root = (attrs: string, body = '') => {
+    const out = inlineSvg(svgOf(`${body}<rect width="10" height="10" fill="red"/>`, `viewBox="0 0 10 10" ${attrs}`), BOX, 's1-')
+    return out.slice(0, out.indexOf('>') + 1)
+  }
+  for (const r of [
+    root('transform="translate(500 0)"'),
+    root('style="transform:translate(500px,0)"'),
+    root('', '<style>svg{transform:scale(50);filter:url(#f)}</style><filter id="f"/>')
+  ]) {
+    assert.equal(r, '<svg x="0" y="0" width="10" height="10" viewBox="0 0 10 10" preserveAspectRatio="none">')
+  }
+})
+
+test('a path drawn by 5,000 uses is parsed once: a 4.4 MB padded path imports in under a second', () => {
+  const d = 'M0 0' + ' '.repeat(4_390_000) + 'L1 1'
+  const src = svgOf(`<defs><path id="p" d="${d}"/></defs>${'<use href="#p"/>'.repeat(5000)}`, 'width="10" height="10"')
+  underASecond('padded path', () => assert.equal(kids(importSvg(src, 'P').group).length, 5000))
+})
+
+test('url( with a gap, a comment, braces or no closing bracket is dropped with a plain note', () => {
+  const removed = (attrs: string) => cleanSvg(svgOf(`<linearGradient id="g"/><rect width="1" height="1" ${attrs}/>`)).removed
+  assert.deepEqual(removed('fill="url (#g)"'), ['a reference with a gap between url and its bracket'])
+  assert.deepEqual(removed('fill="url/**/(#g)"'), ['a style value with a comment'])
+  assert.deepEqual(removed('style="fill:red}"'), ['a style value with braces'])
+  assert.deepEqual(removed('fill="url(#g"'), ["a reference that isn't closed (url(#g)"])
+  assert.deepEqual(removed(`fill="url('#g"`), ["a reference that isn't closed ('#g)"])
+  assert.deepEqual(removed('style="stroke:https://evil.example/x)"'), ['a style value with unbalanced brackets'])
+  assert.deepEqual(removed('fill="rgb(1,2,3"'), ['a style value with unbalanced brackets'])
+  assert.deepEqual(removed('style="mix-blend-mode:multiply !important !important"'), ['a style value with a stray !'])
+  const empty = cleanSvg(svgOf('<rect id="r" width="1" height="1"/><use href="" xlink:href="#r"/>'))
+  assert.deepEqual(empty.removed, ['an empty reference'])
+  assert.match(empty.svg, /<use xlink:href="#r"\/>/)
 })
