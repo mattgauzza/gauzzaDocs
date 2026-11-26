@@ -249,8 +249,15 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
   return { lines, height, overflow: wrap && height > box.h + EPS }
 }
 
-/** Glyph outlines for one span: path data with the pen starting at `x` on baseline `y`. */
-export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: number, y: number): string {
+/** Characters of outline a caller still allows; building past it throws OutlinesTooLong. */
+export interface OutlineBudget { left: number }
+export class OutlinesTooLong extends Error {}
+
+/**
+ * Glyph outlines for one span: path data with the pen starting at `x` on baseline `y`. With `budget`, it stops (by
+ * throwing OutlinesTooLong) as soon as the outlines pass what's left of it, instead of building them all first.
+ */
+export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: number, y: number, budget?: OutlineBudget): string {
   const { glyphs, positions, k, spacing } = shape(fonts, run, text)
   const out: string[] = []
   let pen = x
@@ -266,6 +273,7 @@ export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: numb
     }
     for (const c of cmds) {
       const a = (c.args as number[]).map((v, j) => num(j % 2 ? oy - v * k : ox + v * k)).join(' ')
+      if (budget && (budget.left -= a.length + 1) < 0) throw new OutlinesTooLong('These outlines are too long to draw.')
       if (c.command === 'moveTo') out.push('M' + a)
       else if (c.command === 'lineTo') out.push('L' + a)
       else if (c.command === 'quadraticCurveTo') out.push('Q' + a)
@@ -277,13 +285,16 @@ export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: numb
   return out.join('')
 }
 
-/** Glyph outlines for every span that draws something, shifted by `dx`, `dy`, with the run each one is in. */
+/**
+ * Glyph outlines for every span that draws something, shifted by `dx`, `dy`, with the run each one is in. With
+ * `budget`, building stops (OutlinesTooLong) once the outlines pass it.
+ */
 export function textPaths(
-  layer: TextLayer, fonts: FontSource, overrideText?: string, dx = 0, dy = 0
+  layer: TextLayer, fonts: FontSource, overrideText?: string, dx = 0, dy = 0, budget?: OutlineBudget
 ): { d: string; run: number }[] {
   const runs = textRuns(layer, overrideText)
   return layoutText(layer, fonts, overrideText)
-    .lines.flatMap(l => l.spans.map(s => ({ d: glyphPath(fonts, runs[s.run], s.text, s.x + dx, l.y + dy), run: s.run })))
+    .lines.flatMap(l => l.spans.map(s => ({ d: glyphPath(fonts, runs[s.run], s.text, s.x + dx, l.y + dy, budget), run: s.run })))
     .filter(p => p.d)
 }
 

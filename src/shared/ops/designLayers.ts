@@ -376,7 +376,7 @@ export function runsOf(doc: DesignDoc, v: unknown): TextRun[] {
   if (!Array.isArray(v) || !v.length) throw new OpError('runs must be a list of { text, font, size, color? }')
   return v.map((x, i) => {
     const r = (x ?? {}) as Record<string, unknown>
-    const run: TextRun = { text: text(`run ${i + 1} text`, r.text ?? ''), font: fontOf(r.font ?? DEFAULT_FONT.family), size: number(`run ${i + 1} size`, r.size ?? 24, 0.1) }
+    const run: TextRun = { text: text(`run ${i + 1} text`, r.text ?? ''), font: fontOf(r.font ?? DEFAULT_FONT.family), size: size(`run ${i + 1} size`, r.size ?? 24, 0.1) }
     if (r.color !== undefined) {
       const p = paintOf(doc, `run ${i + 1} color`, r.color)
       if (p) run.color = p

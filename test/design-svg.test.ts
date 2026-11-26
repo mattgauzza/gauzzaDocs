@@ -701,7 +701,8 @@ test('svg layers that would copy too much are refused with a plain message', () 
  * this thread's own CPU time is what's checked (process.threadCpuUsage, Node 22.19 and later), or else the smaller of
  * wall and process CPU time.
  */
-function underASecond(label: string, fn: () => unknown): void {
+/** Runs `fn` and checks it took under `limit` ms (a second unless given) of its thread's CPU. */
+function underASecond(label: string, fn: () => unknown, limit = 1000): void {
   const thread = (process as { threadCpuUsage?: (prev?: NodeJS.CpuUsage) => NodeJS.CpuUsage }).threadCpuUsage?.bind(process)
   const t0 = thread?.()
   const cpu = process.cpuUsage()
@@ -712,7 +713,7 @@ function underASecond(label: string, fn: () => unknown): void {
   const cpuMs = (used.user + used.system) / 1000
   const own = t0 && thread ? thread(t0) : null
   const threadMs = own ? (own.user + own.system) / 1000 : Math.min(cpuMs, wallMs)
-  assert.ok(threadMs < 1000, `${label} took ${Math.round(threadMs)} ms of its thread's CPU (${Math.round(wallMs)} ms wall, ${Math.round(cpuMs)} ms process CPU)`)
+  assert.ok(threadMs < limit, `${label} took ${Math.round(threadMs)} ms of its thread's CPU (${Math.round(wallMs)} ms wall, ${Math.round(cpuMs)} ms process CPU)`)
 }
 
 test('pathological url( values clean in linear time', () => {
@@ -733,14 +734,15 @@ test('a 48 KB serpentine even-odd path imports in under a second', () => {
   underASecond('serpentine', () => importSvg(svgOf(`<path fill-rule="evenodd" d="${d}"/>`), 'X'))
 })
 
-test('15,000 gradient-filled rects in a filtered group import in under a second', () => {
+test('15,000 gradient-filled rects in a filtered group import in under two seconds', () => {
   const grads = Array.from({ length: 15_000 }, (_, i) => `<linearGradient id="g${i}"/>`).join('')
   const rects = Array.from({ length: 15_000 }, (_, i) => `<rect width="1" height="1" fill="url(#g${i})"/>`).join('')
   const svg = svgOf(`<defs><filter id="f"><feGaussianBlur stdDeviation="1"/></filter>${grads}</defs><g filter="url(#f)">${rects}</g>`)
+  // about half a second alone, near a second under the full suite's load: the limit is there to catch a blowup
   underASecond('filtered group', () => {
     const { group } = importSvg(svg, 'X')
     assert.equal(kids(group)[0].type, 'svg')
-  })
+  }, 2000)
 })
 
 // Fix round 2: one href per element, budgets that follow <use>, composed markup always clean, linear style matching
@@ -1600,4 +1602,103 @@ test('a drawing keeps one 128 MB budget over every part, caps names and instance
   const b = draw(broken, 'raster')
   assert.deepEqual(b.downgrades, [{ layer: 't', name: 't', reason: NOT_DRAWN }])
   assert.match(b.out, /data-name="after"/)
+})
+
+// Ruling 18: the renderer on designs that never went through validateDesign (as the ops and editor can hold them)
+
+test('designToSvg never throws on values no String() can convert, or on a broken background (rA)', async () => {
+  const fonts = await fontsOf(newDesign('instagram'))
+  const BAD = () => JSON.parse('{"toString":1}')
+  const at = { x: 0, y: 0, width: 10, height: 10 }
+  const rect = (id: unknown, name: unknown = id): Layer => ({ ...base, id, name, type: 'rect', ...at, fill: { type: 'color', color: '#ff0000' } }) as unknown as Layer
+  const draw = (layers: Layer[], tweak: (d: Design) => void = () => {}, assets: Record<string, Uint8Array> = {}) => {
+    const d = newDesign('instagram')
+    d.artboards[0].layers.push(...layers, rect('after', 'after'))
+    tweak(d)
+    return (['raster', 'export'] as const).map(mode => {
+      const downgrades: Downgrade[] = []
+      const out = designToSvg(d, d.artboards[0].id, { fonts, assets, mode, downgrades })
+      assert.match(out, /data-name="after"/)
+      return downgrades
+    })
+  }
+  draw([rect('r', BAD())])
+  draw([{ ...base, id: 'g', name: 'g', type: 'group', ...at, children: [rect('r', BAD())] } as Layer])
+  for (const d of draw([rect(BAD(), 'n')])) assert.deepEqual(d, [{ layer: '', name: 'n', reason: NOT_DRAWN }])
+  draw([rect('r', ['x', BAD()])])
+  draw([], d => (d.artboards[0].background = JSON.parse('{"type":"linear","stops":[null]}')))
+  draw([], d => {
+    d.artboards[0].background = { type: 'style', ref: 'x' }
+    d.styles = JSON.parse('{"colors":[null],"text":[]}')
+  })
+  draw([], d => (d.artboards[0].background = JSON.parse('{"type":"linear","stops":[{"color":"#fff","offset":0}],"angle":{"toString":1}}')))
+})
+
+test('one layer too big to draw at all leaves the rest alone; a layer left out gives back its definitions (rG, rF)', async () => {
+  const fonts = await fontsOf(newDesign('instagram'))
+  const at = { x: 0, y: 0, width: 10, height: 10 }
+  const rect = (id: string): Layer => ({ ...base, id, name: id, type: 'rect', ...at, fill: { type: 'color', color: '#ff0000' } })
+  const image = (id: string, asset: string): Layer => ({ ...base, id, name: id, type: 'image', ...at, asset, fit: 'fill' })
+  // rG: a photo whose base64 alone passes 128 MB is left out, and the title, logo and button still draw
+  const huge = new Uint8Array(100 * 1024 * 1024)
+  huge.set([0x89, 0x50, 0x4e, 0x47])
+  const g = newDesign('instagram')
+  g.artboards[0].layers.push(image('photo', 'huge.png'), rect('title'), rect('logo'), rect('button'))
+  const downgrades: Downgrade[] = []
+  const out = designToSvg(g, g.artboards[0].id, { fonts, assets: { 'huge.png': huge }, mode: 'raster', downgrades })
+  assert.deepEqual(downgrades.map(x => x.layer), ['photo'])
+  assert.match(out, /data-name="title".*data-name="logo".*data-name="button"/)
+  // rF: a photo that nearly fills the budget, then text whose 1,000 runs each bring a gradient: the text is left out
+  // when its definitions pass the budget, and none of them stays behind
+  const fills = new Uint8Array(100_600_000)
+  fills.set([0x89, 0x50, 0x4e, 0x47])
+  const f = newDesign('instagram')
+  const runs = Array.from({ length: 1000 }, (_, i) => ({ text: 'x', font: { family: 'Liberation Sans', weight: 400, style: 'normal' as const }, size: 12, color: { type: 'linear' as const, angle: i, stops: [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }] } }))
+  f.artboards[0].layers.push(image('photo', 'fills.png'), { ...base, id: 'words', name: 'words', type: 'text', ...at, mode: 'point', align: 'left', valign: 'top', runs })
+  const left: Downgrade[] = []
+  const out2 = designToSvg(f, f.artboards[0].id, { fonts, assets: { 'fills.png': fills }, mode: 'export', downgrades: left })
+  assert.deepEqual(left.map(x => [x.layer, x.reason]), [['words', OVER_BUDGET]])
+  assert.doesNotMatch(out2, /linearGradient/)
+  assert.ok(out2.length <= MAX_RENDER_OUTPUT, `${out2.length}`)
+})
+
+test('raster text is charged its outlines before they are built, so 2,000,000 characters are left out at once (rD)', async () => {
+  const fonts = await fontsOf(newDesign('instagram'))
+  const text = (n: number): Layer => ({
+    ...base, id: 't', name: 't', type: 'text', x: 0, y: 0, width: 1000, height: 1000, mode: 'box', align: 'left', valign: 'top',
+    runs: [{ text: R(n / 2, 'W&'), font: { family: 'Liberation Sans', weight: 400, style: 'normal' }, size: 12 }]
+  })
+  const d = newDesign('instagram')
+  d.artboards[0].layers.push(text(2_000_000), { ...base, id: 'after', name: 'after', type: 'rect', x: 0, y: 0, width: 5, height: 5 })
+  const downgrades: Downgrade[] = []
+  let out = ''
+  underASecond('2,000,000 characters in raster', () => (out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'raster', downgrades })))
+  assert.deepEqual(downgrades.map(x => [x.layer, x.reason]), [['t', OVER_BUDGET]])
+  assert.match(out, /data-name="after"/)
+})
+
+test('overrides are looked up through the instances, the outer one winning, and fragments convert once per drawing', async () => {
+  const fonts = await fontsOf(newDesign('instagram'))
+  const at = { x: 0, y: 0, width: 10, height: 10 }
+  const d = newDesign('instagram')
+  d.components = [
+    { id: 'A', name: 'A', root: { ...base, id: 'ga', name: 'ga', type: 'group', ...at, children: [{ ...base, id: 'r', name: 'r', type: 'rect', ...at, fill: { type: 'color', color: '#000000' } }] } },
+    { id: 'B', name: 'B', root: { ...base, id: 'gb', name: 'gb', type: 'group', ...at, children: [{ ...base, id: 'ia', name: 'ia', type: 'instance', ...at, component: 'A', overrides: { r: { fill: { type: 'color', color: '#0000ff' } } } }] } }
+  ]
+  d.artboards[0].layers.push(
+    { ...base, id: 'plain', name: 'plain', type: 'instance', ...at, component: 'B', overrides: {} },
+    { ...base, id: 'outer', name: 'outer', type: 'instance', ...at, component: 'B', overrides: { r: { fill: { type: 'color', color: '#ff0000' } } } }
+  )
+  const out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'export' })
+  assert.deepEqual(out.match(/fill="#(0000ff|ff0000)"/g), ['fill="#0000ff"', 'fill="#ff0000"'])
+  // rC: a fragment of 49,000 empty groups drawn by 200 instances is converted once, and every use is the same as a fresh one
+  const many = svgOf(R(49_000, '<g/>'), 'viewBox="0 0 10 10"')
+  const c = newDesign('instagram')
+  c.components = [{ id: 'S', name: 'S', root: { ...base, id: 'gs', name: 'gs', type: 'group', ...at, children: [{ ...base, id: 's', name: 's', type: 'svg', ...at, svg: many }] } }]
+  for (let i = 0; i < 200; i++) c.artboards[0].layers.push({ ...base, id: `i${i}`, name: `i${i}`, type: 'instance', ...at, component: 'S', overrides: {} })
+  let drawn = ''
+  underASecond('49,000 groups drawn 200 times', () => (drawn = designToSvg(c, c.artboards[0].id, { fonts, assets: {}, mode: 'export' })))
+  assert.equal(drawn.split('preserveAspectRatio="none"').length - 1, 200)
+  const cache = new Map()
+  for (const prefix of ['s1-', 's2-']) assert.equal(inlineSvg(many, BOX, prefix, cache), inlineSvg(many, BOX, prefix))
 })

@@ -1,6 +1,7 @@
 // Reading and writing .gdesign files: a zip holding only design.json, assets/<sha256>.<ext> and thumbnail.png.
 import { createHash } from 'node:crypto'
 import type { Design, DesignFile, Layer } from '../../shared/design/types'
+import { validateDesign } from '../../shared/design/validate'
 
 type JSZipT = InstanceType<typeof import('jszip')>
 const loadZip = async (bytes: Uint8Array): Promise<JSZipT> => (await import('jszip')).default.loadAsync(bytes)
@@ -9,7 +10,6 @@ const newZip = async (): Promise<JSZipT> => new (await import('jszip')).default(
 export const MAX_ENTRIES = 10_000
 export const MAX_UNCOMPRESSED = 1024 * 1024 * 1024
 const ASSET_RE = /^assets\/[0-9a-f]{64}\.[a-z0-9]+$/
-const MAX_ARTBOARD_SIDE = 8192
 const DESIGN ='design.json'
 const THUMB = 'thumbnail.png'
 
@@ -134,28 +134,26 @@ function referencedAssets(design: Design): Set<string> {
   return refs
 }
 
-export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile> {
+/**
+ * Reads a .gdesign. design.json goes through validateDesign before anything else sees it, so the design that comes
+ * back holds only what the schema allows (see validate.ts); `notes` lists, in plain words, what was repaired or
+ * dropped on the way (absent when nothing was). A file that can't be repaired throws "This design file is damaged:
+ * <reason>.".
+ */
+export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile & { notes?: string[] }> {
   const zip = await openChecked(bytes)
   const entry = zip.files[DESIGN]
   if (!entry || entry.dir) throw new Error('This is not a design file: design.json is missing')
   const budget: Budget = { left: MAX_UNCOMPRESSED }
   const json = await readEntry(entry, 'design.json', MAX_DESIGN_JSON, budget)
-  let design: Design
+  let raw: unknown
   try {
-    design = JSON.parse(Buffer.from(json).toString('utf8')) as Design
+    raw = JSON.parse(Buffer.from(json).toString('utf8'))
   } catch {
     throw new Error('This design file is damaged: design.json is not valid JSON')
   }
-  if (!design || design.format !== 1 || !Array.isArray(design.artboards)) {
-    throw new Error('This design file is from a newer version of gauzzaDocs or is damaged')
-  }
-  design.components ??= []
-  design.styles ??= { colors: [], text: [] }
-  for (const a of design.artboards) {
-    if (!(a.width <= MAX_ARTBOARD_SIDE) || !(a.height <= MAX_ARTBOARD_SIDE)) {
-      throw new Error(`Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`)
-    }
-  }
+  const notes: string[] = []
+  const design = validateDesign(raw, notes)
   checkAssetRefs(design)
   const assets: Record<string, Uint8Array> = {}
   for (const name of Object.keys(zip.files)) {
@@ -164,7 +162,9 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile> {
   }
   const t = zip.files[THUMB]
   const thumbnail = t && !t.dir ? await readEntry(t, THUMB, MAX_THUMBNAIL, budget) : undefined
-  return thumbnail ? { design, assets, thumbnail } : { design, assets }
+  const file: DesignFile & { notes?: string[] } = thumbnail ? { design, assets, thumbnail } : { design, assets }
+  if (notes.length) file.notes = notes
+  return file
 }
 
 /**

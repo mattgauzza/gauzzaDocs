@@ -254,25 +254,40 @@ function prefixIds(root: Element, prefix: string): void {
  * with such a layer still comes out, without it. With `cache`, each fragment is cleaned once (or found refused once)
  * however many times it's inlined, as instances of one component inline the same layer.
  */
-export function inlineSvg(svg: string, box: Box, prefix: string, cache?: Map<string, Element | null>): string {
+export function inlineSvg(svg: string, box: Box, prefix: string, cache?: Map<string, InlineCache | null>): string {
   try {
-    return inlined(svg, box, prefix, cache)
+    const known = cache?.get(svg)
+    if (known === null) return ''
+    const c = known ?? converted(svg)
+    if (!known) cache?.set(svg, c)
+    return `<svg x="${num(box.x)}" y="${num(box.y)}" width="${num(box.w)}" height="${num(box.h)}"` + c.tail.split(c.mark).join(prefix)
   } catch {
     cache?.set(svg, null)
     return ''
   }
 }
 
-function inlined(svg: string, box: Box, prefix: string, cache?: Map<string, Element | null>): string {
-  let clean = cache?.get(svg)
-  if (clean === null) return ''
-  if (!clean) {
-    clean = cleanSvgRoot(svg).root
-    applyStyles(clean, () => undefined)
-    cache?.set(svg, clean)
+/**
+ * A fragment converted for inlining, ready for any box and prefix: its markup after the placement attributes, with
+ * every id prefixed by `mark` (a private-use character the source doesn't hold, so it marks only those). `size` is
+ * at least what one use writes.
+ */
+export interface InlineCache { tail: string; mark: string; size: number }
+/** How the root begins before the box is put in. */
+const HEAD = '<svg x="0" y="0" width="0" height="0"'
+
+/** A character the source doesn't hold, from the private use area, to stand for the prefix. */
+function markFor(svg: string): string {
+  for (let c = 0xe000; c <= 0xf8ff; c++) {
+    const m = String.fromCharCode(c)
+    if (!svg.includes(m)) return m
   }
-  // the cached copy stays as cleaned; each use changes its own
-  const root = cache ? (clean.cloneNode(true) as Element) : clean
+  throw new Error('This SVG uses every private use character.')
+}
+
+function converted(svg: string): InlineCache {
+  const root = cleanSvgRoot(svg).root
+  applyStyles(root, () => undefined)
   let viewBox = root.getAttribute('viewBox')
   if (!viewBox) {
     // as an image, a fragment without a viewBox is stretched from its own size
@@ -280,16 +295,15 @@ function inlined(svg: string, box: Box, prefix: string, cache?: Map<string, Elem
     const h = len(root.getAttribute('height'), 0)
     if (w && h && w > 0 && h > 0) viewBox = `0 0 ${num(w, 3)} ${num(h, 3)}`
   }
-  prefixIds(root, prefix)
-  // the placement first, then whatever else the fragment's root carries (inherited paint, its prefixed id)
+  const mark = markFor(svg)
+  prefixIds(root, mark)
+  // the placement first (zeros here, the box at each use), then whatever else the root carries (inherited paint, its
+  // prefixed id)
   const rest = Array.from(root.attributes)
     .filter(a => a.namespaceURI || !ROOT_DROPPED.has(a.localName ?? a.name))
     .map(a => ({ ns: a.namespaceURI, name: a.name, value: a.value }))
   for (const a of Array.from(root.attributes)) root.removeAttributeNode(a)
-  root.setAttribute('x', num(box.x))
-  root.setAttribute('y', num(box.y))
-  root.setAttribute('width', num(box.w))
-  root.setAttribute('height', num(box.h))
+  for (const k of ['x', 'y', 'width', 'height']) root.setAttribute(k, '0')
   if (viewBox) root.setAttribute('viewBox', viewBox)
   root.setAttribute('preserveAspectRatio', 'none')
   for (const a of rest) {
@@ -298,7 +312,10 @@ function inlined(svg: string, box: Box, prefix: string, cache?: Map<string, Elem
       if (kept.length) root.setAttribute('style', kept.map(d => `${d.prop}:${d.value}${d.important ? ' !important' : ''}`).join(';'))
     } else root.setAttributeNS(a.ns, a.name, a.value)
   }
-  return serializeSvg(root, false)
+  const out = serializeSvg(root, false)
+  if (!out.startsWith(HEAD)) throw new Error('This SVG could not be inlined.')
+  const tail = out.slice(HEAD.length)
+  return { tail, mark, size: tail.length }
 }
 /** What a fragment's root loses inline: its own placement (the layer box replaces it), overflow, filter and transform. */
 const ROOT_DROPPED = new Set(['x', 'y', 'width', 'height', 'viewBox', 'preserveAspectRatio', 'overflow', 'filter', 'transform'])

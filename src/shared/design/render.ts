@@ -2,9 +2,9 @@ import type { FontSource } from './fonts'
 import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, midpoint, transformedBounds, union } from './geometry'
 import { artboardOf, walk } from './model'
 import { escapedLength } from './svgClean'
-import { inlineSvg } from './svgFragment'
-import { cleanText, layoutText, num as n, runSize, textPaths, textRuns } from './text'
-import type { Artboard, Design, Layer, Override, Paint, TextLayer } from './types'
+import { type InlineCache, inlineSvg } from './svgFragment'
+import { OutlinesTooLong, cleanText, layoutText, num as n, runSize, textPaths, textRuns } from './text'
+import type { Artboard, Component, Design, Layer, Override, Paint, TextLayer } from './types'
 
 export { connectorPath } from './geometry'
 
@@ -45,9 +45,15 @@ export const SVG_NOT_CONVERTED = 'This SVG layer could not be converted for expo
 /** Most stops a gradient is written with (an import never makes more). */
 const MAX_STOPS = 256
 
-interface Scope { prefix: string; overrides: Record<string, Override>; top: boolean; board: Artboard; comps: string[] }
+/**
+ * Where a layer is drawn. `overrides` is the chain of override maps from the outermost instance in: the first that
+ * holds a layer's id wins, so nothing is copied per instance.
+ */
+interface Scope { prefix: string; overrides: Record<string, Override>[]; top: boolean; board: Artboard; comps: string[] }
 interface Ctx {
   design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string>
+  /** gradient signatures in the order they were added, so a layer left out can take its own back */
+  paintLog: string[]
   /** svg layers inlined so far, which numbers each one's id prefix */
   svgs: number
   /** characters written so far, and whether MAX_RENDER_OUTPUT has been reached (after which nothing more is drawn) */
@@ -55,10 +61,25 @@ interface Ctx {
   full: boolean
   /** instances expanded so far */
   instances: number
-  /** svg layers cleaned for inlining, by their markup (null: it couldn't be), so each is cleaned once per drawing */
-  svgCache: Map<string, Element | null>
+  /** svg layers converted for inlining, by their markup (null: they couldn't be), so each is converted once per drawing */
+  svgCache: Map<string, InlineCache | null>
   /** downgrades already listed, by layer and reason */
   listed: Set<string>
+  /** components by id, made on first use */
+  comps?: Map<string, Component>
+  /** characters the layer being built may still write (what the drawing had left when it began) */
+  room: number
+}
+
+/** Thrown while a layer is built once what it adds passes the budget: the layer is left out without finishing. */
+class OverBudget extends Error {}
+/** The longest key (a layer id with its instance prefixes) a layer can be drawn with; validated designs stay far below. */
+const MAX_KEY = 2048
+
+/** The override a scope gives a layer: the outermost instance's first. */
+function overrideIn(scope: Scope, id: string): Override | undefined {
+  for (const map of scope.overrides) if (has(map, id)) return map[id]
+  return undefined
 }
 
 const ENTITIES: Record<string, string> = {
@@ -106,48 +127,90 @@ function nextId(ctx: Ctx, prefix: string, key: string): string {
   return `${k}-${count}`
 }
 
-/** Takes `size` characters from the drawing's budget; false, and the budget reached for good, when they don't fit. */
+/**
+ * Takes `size` characters from the drawing's budget. When they don't fit, false; and the budget counts as reached
+ * (every later layer left out) only when they would have fitted an empty budget, so one layer too big to draw at all
+ * leaves the rest of the drawing alone.
+ */
 function spend(ctx: Ctx, size: number): boolean {
-  if (ctx.full || ctx.used + size > MAX_RENDER_OUTPUT) {
-    ctx.full = true
+  if (ctx.full) return false
+  if (ctx.used + size > MAX_RENDER_OUTPUT) {
+    if (size <= MAX_RENDER_OUTPUT) ctx.full = true
     return false
   }
   ctx.used += size
   return true
 }
 
-/** A definition the drawing needs (a gradient, filter or marker, a few KB at most): counted, never refused. */
+/**
+ * A definition the drawing needs (a gradient, filter or marker, a few KB at most). Past the budget it stops the layer
+ * that asked for it, which is then left out and gives its definitions back.
+ */
 function addDef(ctx: Ctx, def: string): void {
+  if (ctx.used + def.length > MAX_RENDER_OUTPUT) {
+    ctx.full = true
+    throw new OverBudget('The drawing is full.')
+  }
   ctx.defs.push(def)
   ctx.used += def.length
-  if (ctx.used > MAX_RENDER_OUTPUT) ctx.full = true
 }
+
+/** What a layer's drawing has added so far, so a layer left out partway can take it all back. */
+interface Mark { defs: number; used: number; paints: number }
+const mark = (ctx: Ctx): Mark => ({ defs: ctx.defs.length, used: ctx.used, paints: ctx.paintLog.length })
+function rollBack(ctx: Ctx, m: Mark): void {
+  ctx.defs.length = m.defs
+  ctx.used = m.used
+  for (const sig of ctx.paintLog.splice(m.paints)) ctx.paints.delete(sig)
+}
+
+/** Text a downgrade can hold, from whatever a layer field holds (never converted with String()). */
+const plain = (v: unknown): string => (typeof v === 'string' ? cleanText(v.slice(0, MAX_NAME_OUTPUT)) : typeof v === 'number' ? String(v) : '')
 
 /** Lists a layer as left out (once per layer and reason) and draws nothing for it. */
 function leftOut(ctx: Ctx, l: Layer, reason: string): string {
-  const id = String(l.id ?? '')
+  const id = plain(l?.id)
   const key = `${id}\u0000${reason}`
   if (!ctx.listed.has(key)) {
     ctx.listed.add(key)
-    ctx.opts.downgrades?.push({ layer: id, name: cleanText(String(l.name ?? '').slice(0, MAX_NAME_OUTPUT)), reason })
+    ctx.opts.downgrades?.push({ layer: id, name: plain(l?.name), reason })
   }
   return ''
 }
 
 /** How many characters base64 makes of `bytes` bytes. */
 const base64Size = (bytes: number): number => 4 * Math.ceil(bytes / 3)
+/**
+ * About what one visible character's outline writes in raster mode (Liberation Sans: letters 550 to 1,600,
+ * punctuation 110 to 140). It's charged before outlines are built, so a text too long to draw is left out without
+ * building hundreds of megabytes first; what was charged beyond what was written is given back afterwards.
+ */
+const OUTLINE_PER_GLYPH = 500
 
 /**
- * The least a layer's own drawing will write, read cheaply before it's built: an image's base64, path data and text
- * as escaped. A layer whose least doesn't fit is left out before any of it is built.
+ * The least a layer's own drawing will write, read cheaply before it's built: an image's base64, path data as
+ * escaped, text as escaped (export) or as outlines (raster), a converted svg layer's markup. A layer whose least
+ * doesn't fit is left out before any of it is built.
  */
 function leastSize(ctx: Ctx, l: Layer): number {
   if ((l.type === 'image' || l.type === 'paint') && typeof l.asset === 'string' && has(ctx.opts.assets, l.asset)) {
     return base64Size(ctx.opts.assets[l.asset]?.length ?? 0)
   }
-  if (l.type === 'svg' && ctx.opts.mode === 'raster') return base64Size(String(l.svg ?? '').length)
-  if (l.type === 'path') return escapedLength(String(l.d ?? ''))
-  if (l.type === 'text') return (Array.isArray(l.runs) ? l.runs : []).reduce((a, r) => a + String(r?.text ?? '').length, 0)
+  if (l.type === 'svg') {
+    const svg = typeof l.svg === 'string' ? l.svg : ''
+    return ctx.opts.mode === 'raster' ? base64Size(svg.length) : (ctx.svgCache.get(svg)?.size ?? 0)
+  }
+  if (l.type === 'path') return typeof l.d === 'string' ? escapedLength(l.d) : 0
+  if (l.type === 'text') {
+    let chars = 0
+    let visible = 0
+    for (const r of Array.isArray(l.runs) ? l.runs : []) {
+      const t = typeof r?.text === 'string' ? r.text : ''
+      chars += t.length
+      if (ctx.opts.mode === 'raster' || ctx.opts.outlines || l.outlines) for (let i = 0; i < t.length; i++) if (t.charCodeAt(i) > 32) visible++
+    }
+    return Math.max(chars, visible * OUTLINE_PER_GLYPH)
+  }
   return 0
 }
 
@@ -177,8 +240,8 @@ function color(c: unknown): { hex: string; alpha: number } {
 /** A paint as one color: a style through design.styles.colors (unknown is black), a gradient by its first stop. */
 function solid(ctx: Ctx, p: Paint): { hex: string; alpha: number } {
   if (p.type === 'color') return color(p.color)
-  if (p.type === 'style') return color(ctx.design.styles?.colors?.find(c => c.name === p.ref)?.color)
-  return color(p.stops?.[0]?.color)
+  if (p.type === 'style') return color((Array.isArray(ctx.design.styles?.colors) ? ctx.design.styles.colors : []).find(c => c?.name === p.ref)?.color)
+  return color(Array.isArray(p.stops) ? p.stops[0]?.color : undefined)
 }
 
 /** ` fill="..."` (or stroke) for a paint; gradients go into defs as g-<key>-<n>, over the box in user space. */
@@ -190,17 +253,18 @@ function paintAttr(ctx: Ctx, p: Paint | null | undefined, attr: 'fill' | 'stroke
 }
 
 function gradient(ctx: Ctx, p: Extract<Paint, { stops: unknown }>, key: string, b: Box): string {
-  const sig = `${key}|${JSON.stringify(p)}|${b.x},${b.y},${b.w},${b.h}`
-  const known = ctx.paints.get(sig)
-  if (known) return known
-  const id = nextId(ctx, 'g', key)
+  // the stops as written: at most 256, each a color at an offset (anything else in the paint can't change the output)
   const stops = (Array.isArray(p.stops) ? p.stops.slice(0, MAX_STOPS) : [])
     .map(s => {
-      const c = color(s.color)
-      const at = Math.min(1, Math.max(0, fin(s.offset, 0)))
+      const c = color(s?.color)
+      const at = Math.min(1, Math.max(0, fin(s?.offset, 0)))
       return `<stop offset="${n(at, 4)}" stop-color="${c.hex}"${c.alpha < 1 ? ` stop-opacity="${n(c.alpha, 3)}"` : ''}/>`
     })
     .join('')
+  const sig = `${key}|${p.type}|${n(fin(p.angle, 0), 4)}|${stops}|${b.x},${b.y},${b.w},${b.h}`
+  const known = ctx.paints.get(sig)
+  if (known) return known
+  const id = nextId(ctx, 'g', key)
   const cx = b.x + b.w / 2
   const cy = b.y + b.h / 2
   if (p.type === 'linear') {
@@ -219,6 +283,7 @@ function gradient(ctx: Ctx, p: Extract<Paint, { stops: unknown }>, key: string, 
     addDef(ctx, `<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${n(cx)}" cy="${n(cy)}" r="${n(r)}">${stops}</radialGradient>`)
   }
   ctx.paints.set(sig, id)
+  ctx.paintLog.push(sig)
   return id
 }
 
@@ -325,22 +390,30 @@ const offstage = (l: Layer, s: number | undefined): boolean =>
 
 /** The opening attributes every layer group carries: id, name and Inkscape label (the name cut at 1,000 characters). */
 const layerAttrs = (key: string, name: unknown): string => {
-  const shown = esc(String(name ?? '').slice(0, MAX_NAME_OUTPUT))
+  const shown = esc(typeof name === 'string' ? name.slice(0, MAX_NAME_OUTPUT) : '')
   return `id="l-${key}" data-name="${shown}" inkscape:label="${shown}"`
 }
 
 /**
  * A layer's group and what it draws, within the drawing's budget: a layer that doesn't fit, or that fails to draw,
- * draws nothing and is listed, and once the budget is reached every later layer is left out without being built.
+ * draws nothing and is listed, and takes back what it had added (definitions and budget). Once the budget is reached
+ * every later layer is left out without being built.
  */
 function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
   if (ctx.full) return leftOut(ctx, src, OVER_BUDGET)
+  const before = mark(ctx)
+  const out = (reason: string): string => {
+    rollBack(ctx, before)
+    return leftOut(ctx, src, reason)
+  }
   try {
-    const o = has(scope.overrides, src.id) ? scope.overrides[src.id] : undefined
+    if (typeof src.id !== 'string') throw new Error('a layer without an id')
+    const o = overrideIn(scope, src.id)
     const l = withOverride(src, o)
     const hidden = !l.visible || offstage(l, ctx.opts.seconds)
     if (hidden && ctx.opts.mode === 'raster') return ''
     const key = safeId(scope.prefix + l.id)
+    if (key.length > MAX_KEY) throw new Error('an id too long to draw with')
     let a = layerAttrs(key, l.name)
     if (scope.top) a += ' inkscape:groupmode="layer"'
     if (hidden) a += ' display="none"'
@@ -350,19 +423,22 @@ function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
     const tf = l.type === 'connector' ? '' : transformOf(l)
     if (tf) a += ` transform="${tf}"`
     const least = leastSize(ctx, l)
-    if (!spend(ctx, a.length + 8 + least)) return leftOut(ctx, src, OVER_BUDGET)
+    if (!spend(ctx, a.length + 8 + least)) return out(OVER_BUDGET)
+    ctx.room = MAX_RENDER_OUTPUT - ctx.used + least
     const overrideText = typeof o?.text === 'string' ? o.text : undefined
     const pts = l.type === 'connector' ? connectorPath(ctx.design, scope.board, l) : []
     const fid = filterFor(ctx, l, key, () => extentOf(ctx, l, overrideText, pts))
     if (fid) a += ` filter="url(#${fid})"`
     const inner = content(ctx, l, key, scope, o, pts)
-    // a group's or instance's layers paid for themselves; anything else pays for what it drew beyond its least
-    if (l.type !== 'group' && l.type !== 'instance' && !spend(ctx, Math.max(0, inner.length - least))) {
-      return leftOut(ctx, src, OVER_BUDGET)
+    // a group's or instance's layers paid for themselves; anything else pays for what it drew beyond its least, or
+    // gets back what it was charged and didn't write
+    if (l.type !== 'group' && l.type !== 'instance') {
+      if (inner.length < least) ctx.used -= least - inner.length
+      else if (!spend(ctx, inner.length - least)) return out(OVER_BUDGET)
     }
     return `<g ${a}>${inner}</g>`
-  } catch {
-    return leftOut(ctx, src, NOT_DRAWN)
+  } catch (e) {
+    return out(e instanceof OverBudget || e instanceof OutlinesTooLong ? OVER_BUDGET : NOT_DRAWN)
   }
 }
 
@@ -383,7 +459,7 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
       // by the order svg layers are drawn: the number ends at the dash, so no two prefixes can run into each other
       // (as layer ids a and a-b would), duplicate layer ids don't matter, and no id the renderer makes starts with s.
       if (ctx.opts.mode === 'export') return exportSvgLayer(ctx, l)
-      return imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
+      return imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(typeof l.svg === 'string' ? l.svg : ''))
     case 'group':
       return groupSvg(ctx, l, key, scope)
     case 'instance':
@@ -399,7 +475,7 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
  * one that can't be converted draws nothing and is listed.
  */
 function exportSvgLayer(ctx: Ctx, l: Layer & { type: 'svg' }): string {
-  const out = inlineSvg(String(l.svg ?? ''), boxOf(l), `s${++ctx.svgs}-`, ctx.svgCache)
+  const out = inlineSvg(typeof l.svg === 'string' ? l.svg : '', boxOf(l), `s${++ctx.svgs}-`, ctx.svgCache)
   return out || leftOut(ctx, l, SVG_NOT_CONVERTED)
 }
 
@@ -455,7 +531,8 @@ function textSvg(ctx: Ctx, l: TextLayer, key: string, fonts: FontSource, overrid
     return `<path d="${esc(l.glyphs)}"${move}${paint}${strokeAttr(ctx, l, key, own, l.stroke)}/>`
   }
   if (ctx.opts.mode === 'raster' || ctx.opts.outlines || l.outlines) {
-    return textPaths(l, fonts, overrideText).map(p => `<path d="${p.d}"${fillOf(p.run)}${stroke}/>`).join('')
+    // built against what the drawing has left, so outlines too long to keep stop as soon as they pass it
+    return textPaths(l, fonts, overrideText, 0, 0, { left: ctx.room }).map(p => `<path d="${p.d}"${fillOf(p.run)}${stroke}/>`).join('')
   }
   const style = (i: number): string => {
     const r = runs[i]
@@ -490,7 +567,7 @@ function groupSvg(ctx: Ctx, g: Layer & { type: 'group' }, key: string, scope: Sc
   const inner: Scope = { ...scope, top: false }
   const kids = Array.isArray(g.children) ? g.children : []
   const first = kids[0]
-  const mask = g.clip && kids.length > 1 ? withOverride(first, has(scope.overrides, first.id) ? scope.overrides[first.id] : undefined) : null
+  const mask = g.clip && kids.length > 1 ? withOverride(first, overrideIn(scope, first.id)) : null
   if (mask?.visible) {
     const id = nextId(ctx, 'c', key)
     const maskKey = safeId(scope.prefix + mask.id)
@@ -507,8 +584,8 @@ function clipShape(ctx: Ctx, l: Layer, key: string, scope: Scope): string {
   if (l.type === 'rect' || l.type === 'ellipse' || l.type === 'path') return shapeEl(ctx, l, key, false, tf)
   const t = tf ? ` transform="${tf}"` : ''
   if (l.type === 'text') {
-    const text = has(scope.overrides, l.id) ? scope.overrides[l.id].text : undefined
-    return `<path d="${textPaths(l, ctx.opts.fonts, text).map(p => p.d).join('')}"${t}/>`
+    const text = overrideIn(scope, l.id)?.text
+    return `<path d="${textPaths(l, ctx.opts.fonts, typeof text === 'string' ? text : undefined, 0, 0, { left: ctx.room }).map(p => p.d).join('')}"${t}/>`
   }
   return `<rect ${boxAttrs(boxOf(l))}${t}/>`
 }
@@ -518,7 +595,11 @@ function clipShape(ctx: Ctx, l: Layer, key: string, scope: Scope): string {
  * Past MAX_INSTANCES expanded in one drawing, an instance is left out and listed.
  */
 function instanceSvg(ctx: Ctx, l: Layer & { type: 'instance' }, key: string, scope: Scope): string {
-  const comp = (ctx.design.components ?? []).find(c => c.id === l.component)
+  if (!ctx.comps) {
+    ctx.comps = new Map()
+    for (const c of Array.isArray(ctx.design.components) ? ctx.design.components : []) if (c && !ctx.comps.has(c.id)) ctx.comps.set(c.id, c)
+  }
+  const comp = ctx.comps.get(l.component)
   if (!comp?.root || scope.comps.includes(comp.id) || scope.comps.length >= MAX_NESTING) return ''
   if (++ctx.instances > MAX_INSTANCES) return leftOut(ctx, l, TOO_MANY_INSTANCES)
   const r = boxOf(comp.root)
@@ -528,7 +609,8 @@ function instanceSvg(ctx: Ctx, l: Layer & { type: 'instance' }, key: string, sco
   const tf = `translate(${n(b.x)} ${n(b.y)}) scale(${n(sx, 6)} ${n(sy, 6)})` + (r.x || r.y ? ` translate(${n(-r.x)} ${n(-r.y)})` : '')
   const inner: Scope = {
     prefix: key + '-',
-    overrides: { ...(l.overrides ?? {}), ...scope.overrides },
+    // the outer instances' overrides win over this one's: looked up in that order, never copied
+    overrides: l.overrides && typeof l.overrides === 'object' ? [...scope.overrides, l.overrides] : scope.overrides,
     top: false,
     board: { ...scope.board, layers: [comp.root] },
     comps: [...scope.comps, comp.id]
@@ -582,20 +664,38 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
   return {
-    design, opts, defs: [], ids: new Map(), paints: new Map(), svgs: 0, used: 0, full: false, instances: 0, svgCache: new Map(),
-    listed: new Set()
+    design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, used: 0, full: false, instances: 0,
+    svgCache: new Map(), listed: new Set(), room: MAX_RENDER_OUTPUT
   }
 }
 
-/** One artboard as a standalone SVG document. Never throws for what a layer holds: see MAX_RENDER_OUTPUT. */
+/** The artboard's background; one that can't be drawn is left out like a layer (it's listed under the artboard). */
+function background(ctx: Ctx, board: Artboard, W: string, H: string): string {
+  if (!board.background) return ''
+  const before = mark(ctx)
+  try {
+    const area = { x: 0, y: 0, w: fin(board.width, 0), h: fin(board.height, 0) }
+    const bg = `<rect width="${W}" height="${H}"${paintAttr(ctx, board.background, 'fill', safeId('bg-' + plain(board.id)), area)}/>`
+    if (spend(ctx, bg.length)) return bg
+  } catch {
+    // a background that can't be drawn is left out below
+  }
+  rollBack(ctx, before)
+  return leftOut(ctx, board as unknown as Layer, NOT_DRAWN)
+}
+
+/**
+ * One artboard as a standalone SVG document. Never throws for what its layers hold: a layer that can't be drawn, or
+ * doesn't fit in MAX_RENDER_OUTPUT, is left out and listed in opts.downgrades. (validateDesign is what makes a design
+ * read from a file safe to give it.)
+ */
 export function designToSvg(design: Design, artboardId: string, opts: RenderOptions): string {
   const board = artboardOf(design, artboardId)
   const ctx = newCtx(design, opts)
   const W = n(fin(board.width, 0))
   const H = n(fin(board.height, 0))
-  const area = { x: 0, y: 0, w: fin(board.width, 0), h: fin(board.height, 0) }
-  const bg = board.background ? `<rect width="${W}" height="${H}"${paintAttr(ctx, board.background, 'fill', safeId('bg-' + board.id), area)}/>` : ''
-  const scope: Scope = { prefix: '', overrides: {}, top: true, board, comps: [] }
+  const bg = background(ctx, board, W, H)
+  const scope: Scope = { prefix: '', overrides: [], top: true, board, comps: [] }
   const body = board.layers.map(l => renderLayer(ctx, l, scope)).join('')
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
@@ -620,7 +720,7 @@ export function layerToSvg(design: Design, layer: Layer, opts: RenderOptions): s
     }
   }
   const ctx = newCtx(design, opts)
-  const out = renderLayer(ctx, layer, { prefix: '', overrides: {}, top, board, comps: [] })
+  const out = renderLayer(ctx, layer, { prefix: '', overrides: [], top, board, comps: [] })
   if (!out || !ctx.defs.length) return out
   const at = out.indexOf('>') + 1
   return out.slice(0, at) + `<defs>${ctx.defs.join('')}</defs>` + out.slice(at)
