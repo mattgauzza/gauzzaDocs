@@ -157,10 +157,25 @@ const ellipse = (cx: number, cy: number, rx: number, ry: number): Seg[] => [
   M(cx + rx, cy), Arc(rx, ry, cx, cy + ry), Arc(rx, ry, cx - rx, cy), Arc(rx, ry, cx, cy - ry), Arc(rx, ry, cx + rx, cy), Z
 ]
 
-/** A basic shape's outline in its own user space, or null when it draws nothing. */
 /** Parsed path data per <path> element, so a path drawn by many <use> elements is parsed once. Never changed. */
 const PATHS = new WeakMap<Element, Seg[] | null>()
+/**
+ * A shape's even-odd outline turned for the nonzero rule, per element, so a shape drawn by many <use> elements or
+ * clipping many shapes is converted once (the check for crossings is quadratic in its edges). The conversion runs in
+ * the shape's own user space, before any transform is baked in, so one result serves every use. Never changed.
+ */
+const NONZERO = new WeakMap<Element, ReturnType<typeof evenOddToNonZero>>()
 
+function nonZeroOf(el: Element, segs: Seg[]): ReturnType<typeof evenOddToNonZero> {
+  let out = NONZERO.get(el)
+  if (out === undefined) {
+    out = evenOddToNonZero(segs)
+    NONZERO.set(el, out)
+  }
+  return out
+}
+
+/** A basic shape's outline in its own user space, or null when it draws nothing. */
 function shapeSegs(el: Element, vp: Viewport): Seg[] | null {
   const L = (n: string, ref: number) => len(el.getAttribute(n), ref)
   switch (el.localName) {
@@ -537,58 +552,88 @@ function clipShape(clip: Element, target: Element, m: Matrix, ctx: Ctx): (Layer 
     if (!bb || !bb.w || !bb.h) return 'empty'
     cm = mul(cm, [bb.w, 0, 0, bb.h, bb.x, bb.y])
   }
-  const cs = styleOf(clip, {})
-  const segs: Seg[] = []
-  for (const c of elementChildren(clip)) {
-    if (c.localName === 'title' || c.localName === 'desc') continue
-    let shape = c
-    let at = mul(cm, transformOf(c))
-    if (c.localName === 'use') {
-      const t = ctx.ids.get(hrefId(c) ?? '')
-      if (!t) continue
-      shape = t
-      at = mul(useMatrix(c, at, ctx), transformOf(t))
+  // what the clip path comes to depends only on it and where it lands (cm), so it's worked out once per place
+  const outline = bakedAt(CLIPS, clip, cm.join(' '), (): Baked | 'empty' | null => {
+    const cs = styleOf(clip, {})
+    const segs: Seg[] = []
+    for (const c of elementChildren(clip)) {
+      if (c.localName === 'title' || c.localName === 'desc') continue
+      let shape = c
+      let at = mul(cm, transformOf(c))
+      if (c.localName === 'use') {
+        const t = ctx.ids.get(hrefId(c) ?? '')
+        if (!t) continue
+        shape = t
+        at = mul(useMatrix(c, at, ctx), transformOf(t))
+      }
+      if (!SHAPES.has(shape.localName) || c.getAttribute('clip-path')) return null
+      const st = styleOf(shape, styleOf(c, cs))
+      if (st.display === 'none' || st.visibility === 'hidden') continue
+      let raw = shapeSegs(shape, ctx)
+      if (!raw) continue
+      if (st['clip-rule'] === 'evenodd') {
+        const nz = nonZeroOf(shape, raw)
+        if (typeof nz === 'string') return null
+        raw = nz
+      }
+      for (const seg of positiveWinding(transformPath(raw, at))) segs.push(seg)
     }
-    if (!SHAPES.has(shape.localName) || c.getAttribute('clip-path')) return null
-    const st = styleOf(shape, styleOf(c, cs))
-    if (st.display === 'none' || st.visibility === 'hidden') continue
-    let raw = shapeSegs(shape, ctx)
-    if (!raw) continue
-    if (st['clip-rule'] === 'evenodd') {
-      const nz = evenOddToNonZero(raw)
-      if (typeof nz === 'string') return null
-      raw = nz
-    }
-    for (const seg of positiveWinding(transformPath(raw, at))) segs.push(seg)
-  }
-  const b = pathBounds(segs)
-  if (!b) return 'empty'
-  return charge(ctx, pathLayer(ctx, 'Clip', segs, b, {}, { type: 'color', color: '#000000' }))
+    const b = pathBounds(segs)
+    return b ? bake(segs, b) : 'empty'
+  })
+  if (outline === null || outline === 'empty') return outline
+  return charge(ctx, pathLayer(ctx, 'Clip', outline, {}, { type: 'color', color: '#000000' }))
 }
 
-function pathLayer(ctx: Ctx, name: string, segs: Seg[], bounds: Box, s: Style, fill: Paint | null): Layer & { type: 'path' } {
-  const b = roundBox(bounds)
-  return { ...base(ctx, name, b, s), type: 'path', d: pathToString(transformPath(segs, translate(-b.x, -b.y))), fill }
+/** An outline in px as a path layer holds it: its box, and its data relative to that box. */
+interface Baked { box: Box; d: string }
+function bake(px: Seg[], bounds: Box): Baked {
+  const box = roundBox(bounds)
+  return { box, d: pathToString(transformPath(px, translate(-box.x, -box.y))) }
+}
+/**
+ * Baked outlines per element and place (its matrix, and for a shape whether its even-odd fill was turned), so a shape
+ * drawn by many uses at one place, or a clip path clipping many shapes there, is transformed and written out once.
+ * Each layer is still made on its own; the cache only spares redoing the same geometry. Never changed.
+ */
+const SHAPES_AT = new WeakMap<Element, Map<string, (Baked & { userBox: Box }) | null>>()
+const CLIPS = new WeakMap<Element, Map<string, Baked | 'empty' | null>>()
+function bakedAt<T>(cache: WeakMap<Element, Map<string, T>>, el: Element, key: string, make: () => T): T {
+  let byPlace = cache.get(el)
+  if (!byPlace) cache.set(el, (byPlace = new Map()))
+  if (byPlace.has(key)) return byPlace.get(key)!
+  const out = make()
+  byPlace.set(key, out)
+  return out
+}
+
+function pathLayer(ctx: Ctx, name: string, geo: Baked, s: Style, fill: Paint | null): Layer & { type: 'path' } {
+  return { ...base(ctx, name, geo.box, s), type: 'path', d: geo.d, fill }
 }
 
 /** A shape as a path layer, null when it draws nothing, or the reason it has to stay SVG. */
 function shapeLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, as?: string): Layer | null | string {
-  let segs = shapeSegs(el, ctx)
-  if (!segs) return null
-  const userBox = pathBounds(segs)
+  const raw = shapeSegs(el, ctx)
+  if (!raw) return null
+  let segs = raw
   const fillRaw = el.localName === 'line' ? 'none' : (s.fill ?? 'black')
-  if (s['fill-rule'] === 'evenodd' && fillRaw.trim() !== 'none') {
-    const nz = evenOddToNonZero(segs)
+  const evenOdd = s['fill-rule'] === 'evenodd' && fillRaw.trim() !== 'none'
+  if (evenOdd) {
+    const nz = nonZeroOf(el, raw)
     if (nz === 'crossing') return 'its even-odd fill has crossing outlines'
     if (nz === 'too detailed') return 'its even-odd fill is too detailed to convert (over 2,000 edges)'
     segs = nz
   }
-  const px = transformPath(segs, m)
-  const bounds = pathBounds(px)
-  if (!bounds || !userBox) return null
+  const geo = bakedAt(SHAPES_AT, el, `${m.join(' ')}${evenOdd ? ' e' : ''}`, () => {
+    const userBox = pathBounds(raw)
+    const px = transformPath(segs, m)
+    const bounds = pathBounds(px)
+    return bounds && userBox ? { ...bake(px, bounds), userBox } : null
+  })
+  if (!geo) return null
   const name = as ?? nameOf(el, 'Path', ctx)
-  const layer = pathLayer(ctx, name, px, bounds, s, null)
-  const space: PaintSpace = { m, userBox, box: roundBox(bounds) }
+  const layer = pathLayer(ctx, name, geo, s, null)
+  const space: PaintSpace = { m, userBox: geo.userBox, box: geo.box }
   const fill = paintOf(fillRaw, s, alphaOf(s['fill-opacity']), space, ctx.ids, ctx)
   const stroke = paintOf(s.stroke ?? 'none', s, alphaOf(s['stroke-opacity']), space, ctx.ids, ctx)
   layer.fill = fill.paint

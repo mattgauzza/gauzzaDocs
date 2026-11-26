@@ -1,5 +1,8 @@
 import type { Box } from './geometry'
-import { INKSCAPE_NS, MAX_RULE_DECLARATIONS, PRESENTATION, XLINK_NS, allElements, cleanSvgRoot, cleanValue, serializeSvg, simpleSelector } from './svgClean'
+import {
+  INKSCAPE_NS, MAX_RULE_DECLARATIONS, MAX_STYLE_STEPS, PRESENTATION, TOO_COMPLEX_STYLES, XLINK_NS, allElements, cleanSvgRoot, cleanValue,
+  serializeSvg, simpleSelector
+} from './svgClean'
 import { len } from './svgPaint'
 import { type Decl, cssBlocks, splitDeclarations } from './svgStyle'
 import { num } from './text'
@@ -23,15 +26,22 @@ function parseSelector(s: string): Selector | null {
   return { tag: m[1] || null, ids, classes, spec: ids.length * 10000 + classes.length * 100 + (m[1] ? 1 : 0) }
 }
 
-/** `font: italic bold 12px/1.2 Arial` as its longhands. */
+/**
+ * `font: italic bold 12px/1.2 Arial` as its longhands: at most four (size, family, and the last style and weight
+ * word), however many words lead it, so a declaration costs the same to apply whatever its length.
+ */
 function expandFont(v: string): Decl[] {
   const m = /^\s*((?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{3})\s+)*)([\d.]+[a-z%]*)(?:\s*\/\s*\S+)?\s+(.+)$/i.exec(v)
   if (!m) return []
   const out: Decl[] = [{ prop: 'font-size', value: m[2], important: false }, { prop: 'font-family', value: m[3], important: false }]
+  let style = ''
+  let weight = ''
   for (const w of m[1].trim().split(/\s+/).filter(Boolean)) {
-    if (/^(italic|oblique)$/i.test(w)) out.push({ prop: 'font-style', value: w, important: false })
-    else if (/^(bold|bolder|lighter|\d{3})$/i.test(w)) out.push({ prop: 'font-weight', value: w, important: false })
+    if (/^(italic|oblique)$/i.test(w)) style = w
+    else if (/^(bold|bolder|lighter|\d{3})$/i.test(w)) weight = w
   }
+  if (style) out.push({ prop: 'font-style', value: style, important: false })
+  if (weight) out.push({ prop: 'font-weight', value: weight, important: false })
   return out
 }
 
@@ -57,8 +67,7 @@ function safeDecl(d: Decl): Decl | null {
 }
 
 interface Rule { sel: Selector; decls: Decl[]; order: number }
-/** Candidate checks one style sheet may take to apply its rules; past this, the SVG is refused. */
-export const MAX_STYLE_STEPS = 2_000_000
+export { MAX_STYLE_STEPS }
 
 /**
  * Applies the simple <style> rules (element, .class, #id and chains of up to 4 of them on one element) as
@@ -69,8 +78,8 @@ export const MAX_STYLE_STEPS = 2_000_000
  * its own (safeDecl) before it's written, so two can never be stitched into a third.
  *
  * Rules are indexed by an id, class or element of their selector, so each element checks only the rules that could
- * match it, and a check looks at the element alone (at most 4 parts). All candidate checks are counted before any
- * is made, against MAX_STYLE_STEPS; past it, the SVG is refused.
+ * match it, and a check looks at the element alone (at most 4 parts). Every candidate is charged 1 plus its declaration
+ * count (what applying it would cost), all before any is checked, against MAX_STYLE_STEPS; past it, the SVG is refused.
  */
 export function applyStyles(root: Element, note: (s: string) => void): void {
   const byId = new Map<string, Rule[]>()
@@ -92,6 +101,7 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
       // one declaration per property, the later winning unless only the earlier is !important
       const one = new Map<string, Decl>()
       for (const d of splitDeclarations(b.body)) {
+        if (!d.value) continue // an empty declaration is invalid, so it never replaces one before it
         const had = one.get(d.prop)
         if (had && had.important && !d.important) continue
         one.delete(d.prop)
@@ -128,15 +138,28 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
     }
     return f
   }
-  // every candidate check is a step: count them all first, so a sheet that asks too much is refused before any work
+  // Every candidate costs a check plus, if it matches, a pass over each of its declarations: count it all first, so a
+  // sheet that asks too much is refused before any work. (A declaration applies as at most four attributes: a font
+  // shorthand as its longhands.)
   if (indexed) {
+    const costs = new Map<Rule[], number>()
+    const cost = (list: Rule[] | undefined): number => {
+      if (!list) return 0
+      let c = costs.get(list)
+      if (c === undefined) {
+        c = 0
+        for (const r of list) c += 1 + r.decls.length
+        costs.set(list, c)
+      }
+      return c
+    }
     let steps = 0
     for (const el of all) {
       if (!el.parentNode) continue
       const f = factsOf(el)
-      steps += (f.id ? (byId.get(f.id)?.length ?? 0) : 0) + (byTag.get(f.tag)?.length ?? 0)
-      for (const c of f.classes) steps += byClass.get(c)?.length ?? 0
-      if (steps > MAX_STYLE_STEPS) throw new Error("This SVG's style rules are too complex to apply.")
+      steps += (f.id ? cost(byId.get(f.id)) : 0) + cost(byTag.get(f.tag))
+      for (const c of f.classes) steps += cost(byClass.get(c))
+      if (steps > MAX_STYLE_STEPS) throw new Error(TOO_COMPLEX_STYLES)
     }
   }
   // a rule's declarations apply to every element it matches: each is checked once

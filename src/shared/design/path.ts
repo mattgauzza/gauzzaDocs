@@ -230,6 +230,53 @@ export function parsePath(d: string | null | undefined): Seg[] {
   return out
 }
 
+/**
+ * How many vertices path data has where markers can sit: one per command it draws (each move, segment and close, a
+ * zero-length arc included), read the way parsePath reads it and stopping at the same first error. Linear, and it
+ * builds nothing, so it can count a long path cheaply.
+ */
+export function pathVertices(d: string | null | undefined): number {
+  const s = String(d ?? '')
+  let n = 0
+  let i = 0
+  let cmd = ''
+  const skip = () => {
+    SEP.lastIndex = i
+    SEP.exec(s)
+    i = SEP.lastIndex
+  }
+  while (i < s.length) {
+    skip()
+    if (i >= s.length) break
+    const ch = s[i]
+    if (/[a-zA-Z]/.test(ch)) {
+      if (!(ch.toUpperCase() in ARGS)) break
+      cmd = ch
+      i++
+      if (!n && cmd.toUpperCase() !== 'M') break
+      if (cmd === 'Z' || cmd === 'z') {
+        n++
+        continue
+      }
+    } else if (!cmd || cmd === 'Z' || cmd === 'z') break
+    const up = cmd.toUpperCase()
+    for (let k = 0; k < ARGS[up]; k++) {
+      skip()
+      if (up === 'A' && (k === 3 || k === 4)) {
+        if (s[i] !== '0' && s[i] !== '1') return n
+        i++
+      } else {
+        NUM.lastIndex = i
+        if (!NUM.exec(s)) return n
+        i = NUM.lastIndex
+      }
+    }
+    n++
+    if (up === 'M') cmd = cmd === 'm' ? 'l' : 'L' // more pairs after a move are lines
+  }
+  return n
+}
+
 /** An elliptical arc as cubic curves, each [x1 y1 x2 y2 x y], at most a quarter turn apiece (SVG 1.1 F.6.5). */
 export function arcToCubics(
   x1: number, y1: number, rx: number, ry: number, rotation: number, large: boolean, sweep: boolean, x2: number, y2: number

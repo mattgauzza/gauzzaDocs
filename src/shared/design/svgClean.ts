@@ -1,5 +1,6 @@
 import { DOMParser } from '@xmldom/xmldom'
-import { cssBlocks, splitDeclarations } from './svgStyle'
+import { numbers, pathVertices } from './path'
+import { type Decl, cssBlocks, splitDeclarations } from './svgStyle'
 import { cleanText } from './text'
 
 // The security boundary for SVG from outside. An allowlist: only known SVG elements and attributes survive, every
@@ -28,6 +29,15 @@ export const MAX_USE_DEPTH = 8
 /** Deeper nesting than any real drawing; it keeps every walk well inside the call stack. */
 export const MAX_NESTING = 256
 export const MAX_IMAGE_PIXELS = 50_000_000
+
+/**
+ * Steps one style sheet may take to apply its rules (each candidate rule costing 1 plus its declarations when applied
+ * as attributes, or 1 when only its references are read); past this, the SVG is refused. A rule's declarations each
+ * become an attribute, so this also bounds what a sheet can write: about 500,000 attributes, some 8 MB of markup.
+ * (Ten steps for each of 50,000 elements: a class rule and an element rule of four declarations apiece fit.)
+ */
+export const MAX_STYLE_STEPS = 500_000
+export const TOO_COMPLEX_STYLES = "This SVG's style rules are too complex to apply."
 
 const TOO_LARGE = 'This SVG is too large (over 5 MB).'
 const TOO_MANY = 'This SVG has too many elements (over 50,000).'
@@ -251,16 +261,20 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
 
 /**
  * A style attribute's (or rule's) declarations, keeping only allowed properties with safe values (in canonical form),
- * one per property: a later one replaces an earlier one unless only the earlier is !important, as in CSS. With `ids`,
- * a declaration that refers to an id not among them goes too.
+ * one per property: a later one replaces an earlier one unless only the earlier is !important, as in CSS. Only a valid
+ * declaration (not empty, and passing every check here) can replace one; a browser skips an invalid one, so the earlier
+ * stays. With `ids`, a declaration that refers to an id not among them goes too. Without them, such a reference can't
+ * be checked yet, so the declarations it would replace stay in front of it until a pass with the ids settles which
+ * one is left (cleanSvg makes that pass on every value holding a url(#id)).
  */
 export function cleanDeclarations(text: string, note: (s: string) => void, ids?: Map<string, Element>): string {
-  return keptDeclarations(text, note, ids).join(';')
+  return keptDeclarations(text, note, ids).list.join(';')
 }
 
-/** cleanDeclarations as a list, one entry per property. */
-function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<string, Element>): string[] {
-  const keep = new Map<string, { text: string; important: boolean }>()
+/** cleanDeclarations as a list, and how many properties it sets (one, unless a reference is still to be checked). */
+function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<string, Element>): { list: string[]; props: number } {
+  // per property: the declaration that wins, after any it would replace that stay until its reference is checked
+  const keep = new Map<string, { text: string; important: boolean }[]>()
   for (const d of splitDeclarations(text)) {
     if (d.prop.startsWith('--')) {
       note(`a CSS variable (${short(d.prop)})`)
@@ -271,6 +285,7 @@ function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<str
       note(`a style property (${short(d.prop)})`)
       continue
     }
+    if (!d.value) continue // empty: invalid, so it neither stays nor replaces an earlier one
     const v = cleanValue(d.value, true)
     if ('bad' in v) {
       note(v.bad)
@@ -282,11 +297,16 @@ function keptDeclarations(text: string, note: (s: string) => void, ids?: Map<str
       continue
     }
     const had = keep.get(d.prop)
-    if (had && had.important && !d.important) continue
+    if (had && had[had.length - 1].important && !d.important) continue
+    const entry = { text: `${d.prop}:${v.value}${d.important ? ' !important' : ''}`, important: d.important }
+    const list = had && !ids && v.value.includes('url(#') ? had : []
+    list.push(entry)
     keep.delete(d.prop) // the later one takes the later place
-    keep.set(d.prop, { text: `${d.prop}:${v.value}${d.important ? ' !important' : ''}`, important: d.important })
+    keep.set(d.prop, list)
   }
-  return [...keep.values()].map(k => k.text)
+  const list: string[] = []
+  for (const entries of keep.values()) for (const e of entries) list.push(e.text)
+  return { list, props: keep.size }
 }
 
 /** Most declarations a style rule may hold (one per property). */
@@ -326,11 +346,11 @@ export function cleanStylesheet(css: string, note: (s: string) => void, ids?: Ma
     for (let i = simple.length; i < selectors.length; i++) note(UNSUPPORTED)
     if (!simple.length) continue
     const decls = keptDeclarations(b.body, note, ids)
-    if (decls.length > MAX_RULE_DECLARATIONS) {
+    if (decls.props > MAX_RULE_DECLARATIONS) {
       note(UNSUPPORTED)
       continue
     }
-    if (decls.length) out.push(`${simple.join(', ')}{${decls.join(';')}}`)
+    if (decls.list.length) out.push(`${simple.join(', ')}{${decls.list.join(';')}}`)
   }
   return out.join('')
 }
@@ -744,6 +764,285 @@ export function expandedSizes(root: Element, ids: Map<string, Element>): Map<Ele
   return size
 }
 
+// Repeated painting. A browser paints a marker's content at every vertex that carries it, a pattern's content for every
+// element filled or stroked with it, and a mask's or clip path's content for every element that uses it. What an SVG
+// draws counts all of that, so a small file can't ask for millions of elements this way either.
+
+/** Properties whose url(#id) paints the content of the element it names again, and the kind that element must be. */
+const REPAINTS = new Map([
+  ['marker-start', 'marker'], ['marker-mid', 'marker'], ['marker-end', 'marker'], ['fill', 'pattern'], ['stroke', 'pattern'],
+  ['mask', 'mask'], ['clip-path', 'clipPath']
+])
+const REPAINT_PROPS = [...REPAINTS.keys()]
+const REPAINT_KINDS = new Set(REPAINTS.values())
+const MARKER_PROPS = ['marker-start', 'marker-mid', 'marker-end']
+/** Of those, the ones an element inherits from its parent. */
+const INHERITED_REPAINTS = new Set([...MARKER_PROPS, 'fill', 'stroke'])
+/** Values that can take a property from the parent. */
+const FROM_PARENT = new Set(['inherit', 'unset', 'revert', 'revert-layer'])
+/** Elements drawn only through a reference, never where they stand. */
+const DEFINITIONS = new Set([
+  'defs', 'symbol', 'marker', 'pattern', 'mask', 'clipPath', 'linearGradient', 'radialGradient', 'filter', 'style', 'title', 'desc'
+])
+const MARKABLE = new Set(['path', 'line', 'polyline', 'polygon'])
+const PAINTED = new Set(['path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'tspan', 'textPath'])
+
+/** For each of REPAINT_PROPS, the definitions an element may paint through it (more than one when its sources differ). */
+type Paints = Readonly<Record<string, ReadonlySet<Element>>>
+const NONE: ReadonlySet<Element> = new Set()
+const NO_PAINTS: Paints = Object.fromEntries(REPAINT_PROPS.map(p => [p, NONE]))
+
+/** A style rule's selector as the cleaner keeps it (an element, .class or #id, or a chain of them), with its declarations. */
+interface SheetRule { tag: string | null; ids: string[]; classes: string[]; decls: Decl[] }
+
+/**
+ * How many elements the SVG draws: each element once, each <use> expanded (`sizes`, from expandedSizes), and the content
+ * of each marker, pattern, mask and clip path once for every time it's painted (the copy where it stands being the
+ * first). Which definitions an element paints follows its attributes, its style attribute, the style rules that match
+ * it, and inheritance (through a <use> as well); where those disagree, every one counts. A definition painted inside
+ * its own painting counts nothing there (no browser paints that), and only what doesn't depend on such a loop is
+ * remembered, so the count never depends on the order it was made in. Throws as soon as the count passes 50,000.
+ */
+function drawnWithRepaints(root: Element, ids: Map<string, Element>, sizes: Map<Element, number>): number {
+  const all = allElements(root)
+  // style rules that can name a definition, indexed by an id, class or element of their selector
+  const rules = new Map<string, SheetRule[]>()
+  for (const st of all) {
+    if (st.localName !== 'style') continue
+    for (const b of cssBlocks(st.textContent ?? '')) {
+      if (b.kind !== 'rule') continue
+      const decls = splitDeclarations(b.body).filter(d => (REPAINTS.has(d.prop) || d.prop === 'marker') && (d.value.includes('url(#') || FROM_PARENT.has(d.value.toLowerCase())))
+      if (!decls.length) continue
+      for (const s of b.selector.split(',')) {
+        const m = SIMPLE.exec(s.trim())
+        if (!m || (!m[1] && !m[2])) continue
+        const parts = m[2].match(/[.#][\w-]+/g) ?? []
+        const rule: SheetRule = {
+          tag: m[1] || null, ids: parts.filter(p => p[0] === '#').map(p => p.slice(1)), classes: parts.filter(p => p[0] === '.').map(p => p.slice(1)), decls
+        }
+        const key = rule.ids.length ? `#${rule.ids[0]}` : rule.classes.length ? `.${rule.classes[0]}` : rule.tag!
+        const list = rules.get(key)
+        if (list) list.push(rule)
+        else rules.set(key, [rule])
+      }
+    }
+  }
+  let steps = 0
+
+  // what an element sets itself, by property: the definitions it names, and whether it takes the parent's value too
+  const owns = new Map<Element, Map<string, { refs: Set<Element>; parent: boolean }> | null>()
+  const ownOf = (el: Element) => {
+    if (owns.has(el)) return owns.get(el)!
+    let own: Map<string, { refs: Set<Element>; parent: boolean }> | null = null
+    const put = (prop: string, value: string, fromSheet: boolean) => {
+      const props = prop === 'marker' ? MARKER_PROPS : REPAINTS.has(prop) ? [prop] : null
+      if (!props) return
+      const refs = urlRefs(value)
+      const parent = FROM_PARENT.has(value.trim().toLowerCase())
+      // a rule's other values can only take a definition away, so they're left out: counting more is safe
+      if (fromSheet && !refs.length && !parent) return
+      own ??= new Map()
+      for (const p of props) {
+        let o = own.get(p)
+        if (!o) own.set(p, (o = { refs: new Set(), parent: false }))
+        for (const id of refs) {
+          const t = ids.get(id)
+          if (t && t.localName === REPAINTS.get(p)) o.refs.add(t)
+        }
+        if (parent) o.parent = true
+      }
+    }
+    const attrs = el.attributes
+    for (let i = 0; i < attrs.length; i++) {
+      const a = attrs[i]
+      if (a.namespaceURI) continue
+      const name = a.localName ?? a.name
+      if (name === 'style') for (const d of splitDeclarations(a.value)) put(d.prop, d.value, false)
+      else put(name, a.value, false)
+    }
+    if (rules.size) {
+      const id = el.getAttribute('id')
+      const classes = new Set((el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean))
+      const check = (list: SheetRule[] | undefined) => {
+        if (!list) return
+        steps += list.length
+        if (steps > MAX_STYLE_STEPS) throw new Error(TOO_COMPLEX_STYLES)
+        for (const r of list) {
+          if ((r.tag && r.tag !== el.localName) || !r.ids.every(i => i === id) || !r.classes.every(c => classes.has(c))) continue
+          for (const d of r.decls) put(d.prop, d.value, true)
+        }
+      }
+      if (id) check(rules.get(`#${id}`))
+      for (const c of classes) check(rules.get(`.${c}`))
+      check(rules.get(el.localName))
+    }
+    owns.set(el, own)
+    return own
+  }
+
+  /** An element's paints, given its parent's. */
+  const paintsOf = (el: Element, parent: Paints): Paints => {
+    const own = ownOf(el)
+    if (!own && parent.mask === NONE && parent['clip-path'] === NONE) return parent
+    const out: Record<string, ReadonlySet<Element>> = {}
+    for (const p of REPAINT_PROPS) {
+      const o = own?.get(p)
+      if (!o) out[p] = INHERITED_REPAINTS.has(p) ? parent[p] : NONE
+      else if (!o.parent || parent[p] === NONE) out[p] = o.refs.size ? o.refs : NONE
+      else out[p] = new Set([...o.refs, ...parent[p]])
+    }
+    return out
+  }
+  /** An element's paints where it stands in the document, which is what a definition's content inherits. */
+  const placed = new Map<Element, Paints>()
+  const paintsInPlace = (el: Element): Paints => {
+    let p = placed.get(el)
+    if (!p) {
+      const up = el.parentNode
+      p = paintsOf(el, up && up.nodeType === 1 ? paintsInPlace(up as Element) : NO_PAINTS)
+      placed.set(el, p)
+    }
+    return p
+  }
+
+  const vertices = new Map<Element, number>()
+  const verticesOf = (el: Element): number => {
+    let n = vertices.get(el)
+    if (n === undefined) {
+      if (el.localName === 'path') n = pathVertices(el.getAttribute('d'))
+      else if (el.localName === 'line') n = 2
+      else n = Math.floor(numbers(el.getAttribute('points') ?? '').length / 2) + (el.localName === 'polygon' ? 1 : 0)
+      vertices.set(el, n)
+    }
+    return n
+  }
+  const tallyPaints = (el: Element, p: Paints, tally: Map<Element, number>) => {
+    const add = (set: ReadonlySet<Element>, times: number) => {
+      for (const d of set) tally.set(d, (tally.get(d) ?? 0) + times)
+    }
+    add(p.mask, 1)
+    add(p['clip-path'], 1)
+    const tag = el.localName
+    if (PAINTED.has(tag)) {
+      add(p.fill, 1)
+      add(p.stroke, 1)
+    }
+    if (MARKABLE.has(tag) && (p['marker-start'].size || p['marker-mid'].size || p['marker-end'].size)) {
+      const n = verticesOf(el)
+      if (n) {
+        add(p['marker-start'], 1)
+        add(p['marker-mid'], n) // every vertex: the ends as well, which only adds two
+        add(p['marker-end'], 1)
+      }
+    }
+  }
+
+  // Every element drawn counts toward the total, which can't be below what has been walked, so the walking stops the
+  // moment it passes the limit.
+  let work = 0
+  const tooMany = (n: number) => {
+    if (n > MAX_SVG_ELEMENTS) throw new Error(TOO_MANY)
+  }
+  /** Draws `items` once: how many elements that takes, and how many times each definition gets painted. */
+  const draw = (items: [Element, Paints][]): { count: number; tally: Map<Element, number> } => {
+    let count = 0
+    const tally = new Map<Element, number>()
+    const stack = items.slice()
+    while (stack.length) {
+      const [el, parent] = stack.pop()!
+      if (DEFINITIONS.has(el.localName)) {
+        count += sizes.get(el) ?? 1 // as it stands: itself and what it holds, uses expanded, painted nowhere here
+        continue
+      }
+      count++
+      tooMany(++work)
+      const p = paintsOf(el, parent)
+      tallyPaints(el, p, tally)
+      for (const c of elementChildren(el)) stack.push([c, p])
+      if (el.localName !== 'use') continue
+      const t = ids.get(hrefId(el) ?? '')
+      if (!t) continue
+      if (t.localName !== 'symbol') stack.push([t, p])
+      else {
+        count++
+        const sp = paintsOf(t, p)
+        for (const c of elementChildren(t)) stack.push([c, sp])
+      }
+    }
+    return { count, tally }
+  }
+  /** The element whose children one painting of a definition draws: itself, or for a pattern without any, its template. */
+  const holderOf = (def: Element): Element | null => {
+    let holder = def
+    const seen = new Set<Element>()
+    while (holder.localName === 'pattern' && !elementChildren(holder).length) {
+      seen.add(holder)
+      const t = ids.get(hrefId(holder) ?? '')
+      if (!t || t.localName !== 'pattern' || seen.has(t)) return null
+      holder = t
+    }
+    return holder
+  }
+  /**
+   * What one painting of a holder's children draws (at least 1, the painting itself) and what they paint in turn: the
+   * same wherever it's painted, since content inherits from where its definition stands. Drawn once per holder.
+   */
+  const contents = new Map<Element, { count: number; next: [Element, number][] }>()
+  const contentOf = (holder: Element) => {
+    let c = contents.get(holder)
+    if (!c) {
+      const p = paintsInPlace(holder)
+      const { count, tally } = draw(elementChildren(holder).map(k => [k, p]))
+      c = { count: Math.max(count, 1), next: [...tally] }
+      contents.set(holder, c)
+    }
+    return c
+  }
+  /** What painting `def` once paints in turn: its content's definitions, and its own mask or clip path (a clipped clip). */
+  const nextOf = (def: Element, holder: Element | null): [Element, number][] => {
+    const own = paintsInPlace(def)
+    const next = holder ? contentOf(holder).next : []
+    if (own.mask === NONE && own['clip-path'] === NONE) return next
+    return [...next, ...[...own.mask, ...own['clip-path']].map((x): [Element, number] => [x, 1])]
+  }
+
+  const page = draw([[root, NO_PAINTS]])
+  let drawn = page.count
+  // The copy of a holder's children where it stands is already counted (in `page`), so it counts as the first painting
+  // of them; every further one adds their count again.
+  const painted = new Set<Element>()
+  const paint = (def: Element, times: number): Element | null => {
+    const holder = holderOf(def)
+    if (holder) {
+      drawn += contentOf(holder).count * (painted.has(holder) ? times : times - 1)
+      painted.add(holder)
+      tooMany(drawn)
+    }
+    return holder
+  }
+  // Every chain of paintings from the page, walked (not recursed), with a definition never painted inside its own
+  // painting. Each step past a holder's first painting adds at least 1 to the count, so the walk is as short as that.
+  interface Frame { def: Element; times: number; next: [Element, number][]; i: number }
+  const active = new Set<Element>()
+  for (const [top, times] of page.tally) {
+    active.add(top)
+    const frames: Frame[] = [{ def: top, times, next: nextOf(top, paint(top, times)), i: 0 }]
+    while (frames.length) {
+      const f = frames[frames.length - 1]
+      if (f.i < f.next.length) {
+        const [def, k] = f.next[f.i++]
+        if (active.has(def)) continue // a reference back into what is being painted paints nothing
+        active.add(def)
+        frames.push({ def, times: f.times * k, next: nextOf(def, paint(def, f.times * k)), i: 0 })
+        continue
+      }
+      frames.pop()
+      active.delete(f.def)
+    }
+  }
+  return drawn
+}
+
 /** Drops the hrefs (outside <use>) that point at an id not in `ids`. */
 function dropMissingHrefs(all: Element[], ids: Map<string, Element>, notes: Notes): void {
   for (const el of all) {
@@ -798,7 +1097,8 @@ function dropDeadUses(uses: Element[], ids: Map<string, Element>, notes: Notes):
 /**
  * Every reference must name an id that exists in the fragment. Drops <use> elements whose target is missing (or is
  * such a use), then those whose chain of references is deeper than 8 (or loops), then any other href or url(#id) left
- * pointing nowhere; refuses the SVG when expanding every <use> would make more than 50,000 elements.
+ * pointing nowhere; refuses the SVG when it would draw more than 50,000 elements, with every <use> expanded and every
+ * marker, pattern, mask and clip path counted each time it's painted. Returns that count.
  */
 function checkReferences(root: Element, notes: Notes): number {
   let all = allElements(root)
@@ -867,6 +1167,9 @@ function checkReferences(root: Element, notes: Notes): number {
       el.removeAttributeNode(a)
     }
   }
+  // markers, patterns, masks and clip paths paint their content again wherever they're used: counted once the
+  // references that stay are known
+  if (all.some(el => REPAINT_KINDS.has(el.localName))) drawn = drawnWithRepaints(root, ids, expandedSizes(root, ids))
   return drawn
 }
 
@@ -916,7 +1219,10 @@ function write(el: Element, root: boolean, out: string[]): void {
   else out.push('</', el.localName, '>')
 }
 
-/** Cleans SVG text into its root element (see cleanSvg), with how many elements it draws once every <use> expands. */
+/**
+ * Cleans SVG text into its root element (see cleanSvg), with how many elements it draws: every <use> expanded, and
+ * every marker, pattern, mask and clip path counted each time it's painted.
+ */
 export function cleanSvgRoot(svg: string): { root: Element; removed: string[]; drawn: number } {
   if (typeof svg !== 'string') throw new Error('An SVG must be text.')
   if (utf8Length(svg) > MAX_SVG_BYTES) throw new Error(TOO_LARGE)
