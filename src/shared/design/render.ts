@@ -1,7 +1,10 @@
 import type { FontSource } from './fonts'
+import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, midpoint, transformedBounds, union } from './geometry'
 import { artboardOf, walk } from './model'
-import { cleanText, layoutText, num as n, textPaths, textRuns } from './text'
+import { cleanText, layoutText, num as n, runSize, textPaths, textRuns } from './text'
 import type { Artboard, Design, Layer, Override, Paint, TextLayer } from './types'
+
+export { connectorPath } from './geometry'
 
 // The one renderer. designToSvg is the only code that turns a design into SVG: the editor canvas, `gdocs look`,
 // thumbnails and every export call it. The same input always gives the same bytes: every id comes from a layer id.
@@ -16,8 +19,6 @@ export interface RenderOptions {
   seconds?: number
 }
 
-type Point = [number, number]
-interface Box { x: number; y: number; w: number; h: number }
 interface Scope { prefix: string; overrides: Record<string, Override>; top: boolean; board: Artboard; comps: string[] }
 interface Ctx { design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string> }
 
@@ -26,7 +27,6 @@ const ENTITIES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;
 export const esc = (s: unknown): string => cleanText(String(s ?? '')).replace(/[&<>"']/g, c => ENTITIES[c])
 const safeId = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_')
 const has = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k)
-const fin = (v: unknown, d: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : d)
 
 const BLACK: Paint = { type: 'color', color: '#000000' }
 const BLENDS = new Set([
@@ -35,6 +35,7 @@ const BLENDS = new Set([
 ])
 const MIME: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
 const MAX_NESTING = 16
+const CONNECTOR_WIDTH = 2
 const EMPTY_BOARD: Artboard = { id: '', name: '', width: 0, height: 0, background: null, layers: [] }
 
 function nextId(ctx: Ctx, prefix: string, key: string): string {
@@ -44,23 +45,7 @@ function nextId(ctx: Ctx, prefix: string, key: string): string {
   return `${k}-${count}`
 }
 
-function boxOf(l: Layer): Box {
-  let x = fin(l.x, 0)
-  let y = fin(l.y, 0)
-  let w = fin(l.width, 0)
-  let h = fin(l.height, 0)
-  if (w < 0) [x, w] = [x + w, -w]
-  if (h < 0) [y, h] = [y + h, -h]
-  return { x, y, w, h }
-}
 const boxAttrs = (b: Box): string => `x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}"`
-function boundsOf(pts: Point[]): Box {
-  const xs = pts.map(p => p[0])
-  const ys = pts.map(p => p[1])
-  const x = Math.min(...xs)
-  const y = Math.min(...ys)
-  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }
-}
 
 function base64(bytes: Uint8Array): string {
   const B = (globalThis as any).Buffer
@@ -69,6 +54,10 @@ function base64(bytes: Uint8Array): string {
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
   return btoa(s)
 }
+
+/** An embedded image. xlink:href, which SVG 1.1 importers (Illustrator) need and HTML inlining maps too. */
+const imageTag = (b: Box, fit: string, mime: string, bytes: Uint8Array): string =>
+  `<image ${boxAttrs(b)} preserveAspectRatio="${fit}" xlink:href="data:${mime};base64,${base64(bytes)}"/>`
 
 /** #rgb, #rrggbb or #rrggbbaa as a 6 digit color plus an opacity (SVG 1.1 has no 8 digit colors). Anything else is black. */
 function color(c: unknown): { hex: string; alpha: number } {
@@ -148,30 +137,62 @@ function transformOf(l: Layer): string {
   return parts.join(' ')
 }
 
-/** An SVG 1.1 filter for the shadow and blur, as f-<key>-<n>. Lines and connectors use a region in user space. */
-function filterFor(ctx: Ctx, l: Layer, key: string, lineBounds: Box | null): string {
+/** Where a text layer's glyphs can reach: its box plus every span's ink (point text and overflow go past the box). */
+function textExtent(fonts: FontSource, l: TextLayer, overrideText?: string): Box {
+  const runs = textRuns(l, overrideText)
+  let b = boxOf(l)
+  for (const line of layoutText(l, fonts, overrideText).lines) {
+    for (const s of line.spans) {
+      const size = runSize(runs[s.run])
+      const font = fonts.get(runs[s.run].font).font
+      const k = size / (font?.unitsPerEm || 1000)
+      const asc = fin(font?.ascent, 800) * k
+      const desc = Math.abs(fin(font?.descent, -200)) * k
+      const pad = size / 4 // overhangs past the advance and accents above the ascent
+      b = union(b, { x: s.x - pad, y: line.y - asc - pad, w: s.width + 2 * pad, h: asc + desc + 2 * pad })
+    }
+  }
+  return b
+}
+
+/** The area a layer draws in its own coordinates, before its filter: what the filter region has to cover. */
+function extentOf(ctx: Ctx, l: Layer, overrideText: string | undefined, pts: Point[]): Box {
+  if (l.type === 'connector') {
+    if (!pts.length) return boxOf(l)
+    const sw = fin(l.strokeWidth, CONNECTOR_WIDTH)
+    let b = grow(boundsOf(pts), sw * 4) // arrowheads are 4 stroke widths
+    const label = cleanText(String(l.label ?? '')).trim()
+    if (label) b = union(b, labelParts(ctx, '', label, midpoint(pts), '#000000').rect)
+    return b
+  }
+  let b = l.type === 'text' ? textExtent(ctx.opts.fonts, l, overrideText) : boxOf(l)
+  if (l.type === 'group') {
+    walk(l.children ?? [], d => {
+      b = union(b, transformedBounds(d.type === 'text' ? textExtent(ctx.opts.fonts, d) : grow(boxOf(d), fin(d.strokeWidth, 0)), d))
+    })
+  }
+  return grow(b, fin(l.strokeWidth, 0))
+}
+
+/**
+ * An SVG 1.1 filter for the shadow and blur, as f-<key>-<n>. The region is in user space: the layer's drawn extent
+ * grown by the shadow offset and three times each blur, so glyph shadows and blurs are never cut off.
+ */
+function filterFor(ctx: Ctx, l: Layer, key: string, extent: () => Box): string {
   const sh = l.shadow
   const blur = Math.max(0, fin(l.blur, 0))
   if (!sh && !blur) return ''
   const id = nextId(ctx, 'f', key)
-  const sBlur = sh ? Math.max(0, fin(sh.blur, 0)) / 2 : 0 // a shadow's blur is a radius, as in CSS: the deviation is half
-  const reach = (sh ? Math.abs(fin(sh.x, 0)) + Math.abs(fin(sh.y, 0)) + sBlur * 3 : 0) + blur * 3 + fin(l.strokeWidth, 0) + 2
-  let region: string
-  if (lineBounds) {
-    const b = lineBounds
-    region = `filterUnits="userSpaceOnUse" ${boxAttrs({ x: b.x - reach, y: b.y - reach, w: b.w + 2 * reach, h: b.h + 2 * reach })}`
-  } else {
-    const b = boxOf(l)
-    const mx = reach / Math.max(b.w, 1) + 0.1
-    const my = reach / Math.max(b.h, 1) + 0.1
-    region = `x="${n(-mx, 4)}" y="${n(-my, 4)}" width="${n(1 + 2 * mx, 4)}" height="${n(1 + 2 * my, 4)}"`
-  }
+  const shBlur = sh ? Math.max(0, fin(sh.blur, 0)) : 0
+  const reach = (sh ? Math.abs(fin(sh.x, 0)) + Math.abs(fin(sh.y, 0)) + 3 * shBlur : 0) + 3 * blur + 2
+  const region = `filterUnits="userSpaceOnUse" ${boxAttrs(grow(extent(), reach))}`
   let body = ''
   let input = 'SourceGraphic'
   if (sh) {
+    // a shadow's blur is a radius, as in CSS: the deviation is half of it
     const c = color(sh.color)
     body +=
-      `<feGaussianBlur in="SourceAlpha" stdDeviation="${n(sBlur)}"/><feOffset dx="${n(fin(sh.x, 0))}" dy="${n(fin(sh.y, 0))}" result="o"/>` +
+      `<feGaussianBlur in="SourceAlpha" stdDeviation="${n(shBlur / 2)}"/><feOffset dx="${n(fin(sh.x, 0))}" dy="${n(fin(sh.y, 0))}" result="o"/>` +
       `<feFlood flood-color="${c.hex}" flood-opacity="${n(c.alpha, 3)}"/><feComposite in2="o" operator="in" result="s"/>` +
       `<feMerge result="m"><feMergeNode in="s"/><feMergeNode in="SourceGraphic"/></feMerge>`
     input = 'm'
@@ -195,14 +216,17 @@ const offstage = (l: Layer, s: number | undefined): boolean =>
   s !== undefined && !!l.timing &&
   ((typeof l.timing.start === 'number' && s < l.timing.start) || (typeof l.timing.end === 'number' && s >= l.timing.end))
 
+/** The opening attributes every layer group carries: id, name and Inkscape label. */
+const layerAttrs = (key: string, name: unknown): string =>
+  `id="l-${key}" data-name="${esc(name)}" inkscape:label="${esc(name)}"`
+
 function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
   const o = has(scope.overrides, src.id) ? scope.overrides[src.id] : undefined
   const l = withOverride(src, o)
   const hidden = !l.visible || offstage(l, ctx.opts.seconds)
   if (hidden && ctx.opts.mode === 'raster') return ''
   const key = safeId(scope.prefix + l.id)
-  const name = esc(l.name)
-  let a = `id="l-${key}" data-name="${name}" inkscape:label="${name}"`
+  let a = layerAttrs(key, l.name)
   if (scope.top) a += ' inkscape:groupmode="layer"'
   if (hidden) a += ' display="none"'
   const opacity = Math.min(1, Math.max(0, fin(l.opacity, 1)))
@@ -210,13 +234,14 @@ function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
   if (BLENDS.has(l.blend)) a += ` style="mix-blend-mode:${l.blend}"`
   const tf = l.type === 'connector' ? '' : transformOf(l)
   if (tf) a += ` transform="${tf}"`
-  const pts = l.type === 'connector' ? connectorPath(ctx.design, scope.board, l) : null
-  const fid = filterFor(ctx, l, key, pts ? (pts.length ? boundsOf(pts) : null) : l.type === 'line' ? boxOf(l) : null)
+  const overrideText = typeof o?.text === 'string' ? o.text : undefined
+  const pts = l.type === 'connector' ? connectorPath(ctx.design, scope.board, l) : []
+  const fid = filterFor(ctx, l, key, () => extentOf(ctx, l, overrideText, pts))
   if (fid) a += ` filter="url(#${fid})"`
-  return `<g ${a}>${content(ctx, l, key, scope, o?.text, pts ?? [])}</g>`
+  return `<g ${a}>${content(ctx, l, key, scope, o, pts)}</g>`
 }
 
-function content(ctx: Ctx, l: Layer, key: string, scope: Scope, overrideText: string | undefined, pts: Point[]): string {
+function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | undefined, pts: Point[]): string {
   switch (l.type) {
     case 'rect':
     case 'ellipse':
@@ -224,14 +249,12 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, overrideText: st
     case 'path':
       return shapeEl(ctx, l, key, true)
     case 'text':
-      return textSvg(ctx, l, key, ctx.opts.fonts, typeof overrideText === 'string' ? overrideText : undefined)
+      return textSvg(ctx, l, key, ctx.opts.fonts, typeof o?.text === 'string' ? o.text : undefined, o?.fill ?? undefined)
     case 'image':
     case 'paint':
       return imageEl(ctx, l.asset, l.fit, boxOf(l))
-    case 'svg': {
-      const data = base64(new TextEncoder().encode(String(l.svg ?? '')))
-      return `<image ${boxAttrs(boxOf(l))} preserveAspectRatio="none" href="data:image/svg+xml;base64,${data}"/>`
-    }
+    case 'svg':
+      return imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
     case 'group':
       return groupSvg(ctx, l, key, scope)
     case 'instance':
@@ -278,13 +301,14 @@ function cssFamily(f: string): string {
   return bare ? f : `'${f.replace(/['\\]/g, '\\$&')}'`
 }
 
-function textSvg(ctx: Ctx, l: TextLayer, key: string, fonts: FontSource, overrideText?: string): string {
+/** Text as outlines or live `<text>`. A fill override (from an instance) replaces every run's color. */
+function textSvg(ctx: Ctx, l: TextLayer, key: string, fonts: FontSource, overrideText?: string, fill?: Paint): string {
   const b = boxOf(l)
   const runs = textRuns(l, overrideText)
   const stroke = strokeAttr(ctx, l, key, b, l.stroke)
-  const fillOf = (i: number): string => paintAttr(ctx, runs[i]?.color ?? l.fill ?? BLACK, 'fill', key, b)
+  const fillOf = (i: number): string => paintAttr(ctx, fill ?? runs[i]?.color ?? l.fill ?? BLACK, 'fill', key, b)
   if (typeof l.glyphs === 'string' && l.glyphs && overrideText === undefined && runs.some(r => fonts.get(r.font).missing)) {
-    const move = l.x || l.y ? ` transform="translate(${n(fin(l.x, 0))} ${n(fin(l.y, 0))})"` : ''
+    const move = b.x || b.y ? ` transform="translate(${n(b.x)} ${n(b.y)})"` : ''
     return `<path d="${esc(l.glyphs)}"${move}${fillOf(0)}${stroke}/>`
   }
   if (ctx.opts.mode === 'raster' || ctx.opts.outlines || l.outlines) {
@@ -292,7 +316,7 @@ function textSvg(ctx: Ctx, l: TextLayer, key: string, fonts: FontSource, overrid
   }
   const style = (i: number): string => {
     const r = runs[i]
-    let s = ` font-family="${esc(cssFamily(String(r.font?.family ?? '')))}" font-size="${n(fin(r.size, 0))}"`
+    let s = ` font-family="${esc(cssFamily(String(r.font?.family ?? '')))}" font-size="${n(runSize(r))}"`
     if (fin(r.font?.weight, 400) !== 400) s += ` font-weight="${n(fin(r.font.weight, 400), 0)}"`
     if (r.font?.style === 'italic') s += ' font-style="italic"'
     if (fin(r.letterSpacing, 0)) s += ` letter-spacing="${n(fin(r.letterSpacing, 0))}"`
@@ -312,11 +336,13 @@ function imageEl(ctx: Ctx, asset: unknown, fit: string | undefined, b: Box): str
   const bytes = ctx.opts.assets[asset]
   const mime = MIME[(/\.([a-z0-9]+)$/i.exec(asset)?.[1] ?? '').toLowerCase()]
   if (!(bytes instanceof Uint8Array) || !mime) return ''
-  const par = fit === 'contain' ? 'xMidYMid meet' : fit === 'cover' ? 'xMidYMid slice' : 'none'
-  return `<image ${boxAttrs(b)} preserveAspectRatio="${par}" href="data:${mime};base64,${base64(bytes)}"/>`
+  return imageTag(b, fit === 'contain' ? 'xMidYMid meet' : fit === 'cover' ? 'xMidYMid slice' : 'none', mime, bytes)
 }
 
-/** Children in order. With `clip`, the first child (when visible) becomes a clip path for the rest and isn't drawn. */
+/**
+ * Children in order. With `clip`, the first child (when visible) is the mask: its layer group holds the clip path
+ * (never drawn) and the rest are clipped to it.
+ */
 function groupSvg(ctx: Ctx, g: Layer & { type: 'group' }, key: string, scope: Scope): string {
   const inner: Scope = { ...scope, top: false }
   const kids = Array.isArray(g.children) ? g.children : []
@@ -324,8 +350,9 @@ function groupSvg(ctx: Ctx, g: Layer & { type: 'group' }, key: string, scope: Sc
   const mask = g.clip && kids.length > 1 ? withOverride(first, has(scope.overrides, first.id) ? scope.overrides[first.id] : undefined) : null
   if (mask?.visible) {
     const id = nextId(ctx, 'c', key)
-    ctx.defs.push(`<clipPath id="${id}">${clipShape(ctx, mask, safeId(scope.prefix + mask.id), scope)}</clipPath>`)
-    return `<g clip-path="url(#${id})">${kids.slice(1).map(k => renderLayer(ctx, k, inner)).join('')}</g>`
+    const maskKey = safeId(scope.prefix + mask.id)
+    const holder = `<g ${layerAttrs(maskKey, mask.name)}><clipPath id="${id}">${clipShape(ctx, mask, maskKey, scope)}</clipPath></g>`
+    return holder + `<g clip-path="url(#${id})">${kids.slice(1).map(k => renderLayer(ctx, k, inner)).join('')}</g>`
   }
   return kids.map(k => renderLayer(ctx, k, inner)).join('')
 }
@@ -361,86 +388,6 @@ function instanceSvg(ctx: Ctx, l: Layer & { type: 'instance' }, key: string, sco
   return `<g transform="${tf}">${renderLayer(ctx, comp.root, inner)}</g>`
 }
 
-type Side = 'top' | 'right' | 'bottom' | 'left'
-const centerOf = (b: Box): Point => [b.x + b.w / 2, b.y + b.h / 2]
-function sideMid(b: Box, s: Side): Point {
-  const [cx, cy] = centerOf(b)
-  return s === 'top' ? [cx, b.y] : s === 'bottom' ? [cx, b.y + b.h] : s === 'left' ? [b.x, cy] : [b.x + b.w, cy]
-}
-/** Where the line from the box center toward `to` crosses the box edge. */
-function edgeToward(b: Box, to: Point): Point {
-  const [cx, cy] = centerOf(b)
-  const dx = to[0] - cx
-  const dy = to[1] - cy
-  if (!dx && !dy) return [cx, cy]
-  const t = Math.min(dx ? b.w / 2 / Math.abs(dx) : Infinity, dy ? b.h / 2 / Math.abs(dy) : Infinity)
-  return [cx + dx * t, cy + dy * t]
-}
-const explicitSide = (s: unknown): Side | null => (s === 'top' || s === 'right' || s === 'bottom' || s === 'left' ? s : null)
-
-/**
- * The connector's points: its own `points`, or a route between the attached layers' boxes. `straight` goes center to
- * center, clipped to each box (or from a named side's middle); `orthogonal` leaves and enters through sides with one
- * or two elbows. An end whose layer is missing sits at the other end's box center; with both missing there is none.
- */
-export function connectorPath(design: Design, artboard: Artboard, layer: Layer): Point[] {
-  if (layer.type !== 'connector') return []
-  if (Array.isArray(layer.points) && layer.points.length >= 2) return layer.points.map(p => [fin(p[0], 0), fin(p[1], 0)])
-  const find = (id: string): Box | null => {
-    let hit: Box | null = null
-    walk(artboard?.layers ?? [], l => {
-      if (!hit && l.id === id && l.id !== layer.id) hit = boxOf(l)
-    })
-    return hit
-  }
-  const A = find(layer.from?.layer)
-  const B = find(layer.to?.layer)
-  if (!A && !B) return []
-  if (!A || !B) {
-    const c = centerOf((A ?? B)!)
-    return [c, c]
-  }
-  const ca = centerOf(A)
-  const cb = centerOf(B)
-  const sa = explicitSide(layer.from.side)
-  const sb = explicitSide(layer.to.side)
-  if (layer.route !== 'orthogonal') {
-    return [sa ? sideMid(A, sa) : edgeToward(A, cb), sb ? sideMid(B, sb) : edgeToward(B, ca)]
-  }
-  const dx = cb[0] - ca[0]
-  const dy = cb[1] - ca[1]
-  const across = Math.abs(dx) >= Math.abs(dy)
-  const fromSide: Side = sa ?? (across ? (dx >= 0 ? 'right' : 'left') : dy >= 0 ? 'bottom' : 'top')
-  const toSide: Side = sb ?? (across ? (dx >= 0 ? 'left' : 'right') : dy >= 0 ? 'top' : 'bottom')
-  const p = sideMid(A, fromSide)
-  const q = sideMid(B, toSide)
-  const flat = (s: Side) => s === 'left' || s === 'right'
-  if (flat(fromSide) && flat(toSide)) {
-    if (p[1] === q[1]) return [p, q]
-    const mx = (p[0] + q[0]) / 2
-    return [p, [mx, p[1]], [mx, q[1]], q]
-  }
-  if (!flat(fromSide) && !flat(toSide)) {
-    if (p[0] === q[0]) return [p, q]
-    const my = (p[1] + q[1]) / 2
-    return [p, [p[0], my], [q[0], my], q]
-  }
-  return flat(fromSide) ? [p, [q[0], p[1]], q] : [p, [p[0], q[1]], q]
-}
-
-function midpoint(pts: Point[]): Point {
-  const lens = pts.slice(1).map((p, i) => Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]))
-  let half = lens.reduce((a, v) => a + v, 0) / 2
-  for (let i = 0; i < lens.length; i++) {
-    if (half <= lens[i]) {
-      const t = lens[i] ? half / lens[i] : 0
-      return [pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t]
-    }
-    half -= lens[i]
-  }
-  return pts[pts.length - 1]
-}
-
 /** An arrowhead as m-<key>-<n>, pointing along the line at the end (or back along it at the start). */
 function marker(ctx: Ctx, key: string, hex: string, start: boolean): string {
   const id = nextId(ctx, 'm', key)
@@ -460,14 +407,17 @@ function connectorSvg(ctx: Ctx, l: Layer & { type: 'connector' }, key: string, p
   if (l.arrow === 'end' || l.arrow === 'both') markers += ` marker-end="url(#${marker(ctx, key, ink, false)})"`
   if (l.arrow === 'both') markers += ` marker-start="url(#${marker(ctx, key, ink, true)})"`
   const points = pts.map(p => `${n(p[0])},${n(p[1])}`).join(' ')
-  let out = `<polyline points="${points}" fill="none"${strokeAttr(ctx, l, key, boundsOf(pts), paint, 2)}${markers}/>`
+  let out = `<polyline points="${points}" fill="none"${strokeAttr(ctx, l, key, boundsOf(pts), paint, CONNECTOR_WIDTH)}${markers}/>`
   const label = cleanText(String(l.label ?? '')).trim()
-  if (label) out += labelSvg(ctx, key, label, midpoint(pts), ink)
+  if (label) {
+    const { layer, fonts, rect } = labelParts(ctx, key, label, midpoint(pts), ink)
+    out += `<rect ${boxAttrs(rect)} fill="#ffffff"/>` + textSvg(ctx, layer, key, fonts)
+  }
   return out
 }
 
-/** A connector label: the fallback font at 14 px, centered on the point, on a white backing. */
-function labelSvg(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: string): string {
+/** A connector label: the fallback font at 14 px, centered on the point, and its white backing. */
+function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: string): { layer: TextLayer; fonts: FontSource; rect: Box } {
   const fb = ctx.opts.fonts.fallback
   const fonts: FontSource = { fallback: fb, get: () => fb }
   const layer: TextLayer = {
@@ -478,7 +428,7 @@ function labelSvg(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: st
   const layout = layoutText(layer, fonts)
   const w = Math.max(0, ...layout.lines.map(l => l.width)) + 8
   const h = layout.height
-  return `<rect ${boxAttrs({ x: mx - w / 2, y: my - h / 2, w, h })} fill="#ffffff"/>` + textSvg(ctx, layer, key, fonts)
+  return { layer, fonts, rect: { x: mx - w / 2, y: my - h / 2, w, h } }
 }
 
 function newCtx(design: Design, opts: RenderOptions): Ctx {

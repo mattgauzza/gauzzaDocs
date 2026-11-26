@@ -1,4 +1,5 @@
 import type { FontSource } from './fonts'
+import { boxOf } from './geometry'
 import type { TextLayer, TextRun } from './types'
 
 // Text layout for designs, measured with the font files themselves (fontkit), so line breaks are the same in the
@@ -21,11 +22,20 @@ export function cleanText(s: string): string {
   return s.replace(/[\u{0}-\u{8}\u{B}\u{C}\u{E}-\u{1F}\u{D800}-\u{DFFF}\u{FFFE}\u{FFFF}]/gu, '')
 }
 
-/** A number rounded to 2 decimals (or `digits`), with no trailing zeros. Bad values are 0. */
+/** A number rounded to 2 decimals (or `digits`), with no trailing zeros. Bad values are 0; never Infinity. */
 export function num(v: number, digits = 2): string {
   if (!Number.isFinite(v)) return '0'
+  if (Math.abs(v) >= 1e15) return String(v) // too big to have decimals, and v * 10^digits could overflow
   const p = 10 ** digits
   return String(Math.round(v * p) / p)
+}
+
+let segmenter: Intl.Segmenter | null = null
+/** User-perceived characters, so a letter and its combining marks break together. */
+function graphemes(s: string): string[] {
+  if (typeof Intl === 'undefined' || typeof Intl.Segmenter !== 'function') return Array.from(s)
+  segmenter ??= new Intl.Segmenter('en', { granularity: 'grapheme' })
+  return Array.from(segmenter.segment(s), x => x.segment)
 }
 
 /** The runs a layer draws: its own, or one run of `overrideText` in the first run's style. Text is cleaned for XML. */
@@ -34,7 +44,9 @@ export function textRuns(layer: TextLayer, overrideText?: string): TextRun[] {
   return runs.map(r => ({ ...r, text: cleanText(String(r.text ?? '')).replace(/\r\n?/g, '\n') }))
 }
 
-const sizeOf = (r: TextRun): number => (Number.isFinite(r.size) && r.size > 0 ? r.size : 0)
+/** A run's size as layout uses it: a positive finite number, else 0. */
+export const runSize = (r: TextRun): number => (Number.isFinite(r.size) && r.size > 0 ? r.size : 0)
+const sizeOf = runSize
 
 interface Shaped { glyphs: any[]; positions: any[]; k: number; spacing: number; width: number }
 
@@ -159,8 +171,8 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
   )
 
   const wrap = layer.mode === 'box'
-  const boxW = Number.isFinite(layer.width) ? layer.width : 0
-  const maxW = Math.max(0, boxW)
+  const box = boxOf(layer)
+  const maxW = box.w
   const raw: { pieces: Piece[]; run: number; last: boolean }[] = []
   for (const para of paras) {
     if (!wrap) {
@@ -169,12 +181,10 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
     }
     let cur: Piece[] = []
     let w = 0
-    let hasWord = false
     const flush = () => {
       raw.push({ pieces: cur, run: para.run, last: false })
       cur = []
       w = 0
-      hasWord = false
     }
     for (const t of tokenize(para.pieces, measure)) {
       if (t.space) {
@@ -182,20 +192,19 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
         w += t.width
         continue
       }
-      if (hasWord && w + t.width > maxW + EPS) flush()
+      // spaces before the word stay on the line they end, leading spaces included
+      if (cur.length && w + t.width > maxW + EPS) flush()
       if (t.width <= maxW + EPS) {
         cur.push(...t.pieces)
         w += t.width
-        hasWord = true
         continue
       }
       for (const p of t.pieces) {
-        for (const ch of Array.from(p.text)) {
+        for (const ch of graphemes(p.text)) {
           const cw = measure(p.run, ch)
-          if (hasWord && w + cw > maxW + EPS) flush()
+          if (cur.length && w + cw > maxW + EPS) flush()
           cur.push({ run: p.run, text: ch })
           w += cw
-          hasWord = true
         }
       }
     }
@@ -226,20 +235,18 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
         x += s.width
       }
     }
-    const x0 =
-      layer.align === 'center' ? layer.x + (boxW - width) / 2 : layer.align === 'right' ? layer.x + boxW - width : layer.x
+    const x0 = layer.align === 'center' ? box.x + (box.w - width) / 2 : layer.align === 'right' ? box.x + box.w - width : box.x
     for (const s of spans) s.x += x0
     lines.push({ x: x0, y: 0, width, spans })
   }
 
   const height = metrics.reduce((a, m) => a + m.lh, 0)
-  const boxH = Number.isFinite(layer.height) ? layer.height : 0
-  let top = layer.valign === 'middle' ? layer.y + (boxH - height) / 2 : layer.valign === 'bottom' ? layer.y + boxH - height : layer.y
+  let top = layer.valign === 'middle' ? box.y + (box.h - height) / 2 : layer.valign === 'bottom' ? box.y + box.h - height : box.y
   lines.forEach((l, i) => {
     l.y = top + metrics[i].ascent
     top += metrics[i].lh
   })
-  return { lines, height, overflow: wrap && height > boxH + EPS }
+  return { lines, height, overflow: wrap && height > box.h + EPS }
 }
 
 /** Glyph outlines for one span: path data with the pen starting at `x` on baseline `y`. */
@@ -282,7 +289,8 @@ export function textPaths(
 
 /** A text layer's glyph outlines as one path in the layer box's coordinates: the form `glyphs` stores. */
 export function textOutlines(layer: TextLayer, fonts: FontSource): string {
-  return textPaths(layer, fonts, undefined, -layer.x, -layer.y).map(p => p.d).join('')
+  const b = boxOf(layer)
+  return textPaths(layer, fonts, undefined, -b.x, -b.y).map(p => p.d).join('')
 }
 
 /** What later tasks show about a text layer: a font that isn't available, and text taller than its box. */

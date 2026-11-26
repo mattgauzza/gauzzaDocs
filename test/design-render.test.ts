@@ -5,7 +5,7 @@ import { DOMParser } from '@xmldom/xmldom'
 import { fontsFor, type FontSource } from '../src/shared/design/fonts'
 import { newDesign, walk } from '../src/shared/design/model'
 import { connectorPath, designToSvg, layerToSvg } from '../src/shared/design/render'
-import { cleanText, layoutText, textReport } from '../src/shared/design/text'
+import { cleanText, layoutText, num, textReport } from '../src/shared/design/text'
 import type { Component, Design, FontRef, Layer, TextLayer, TextRun } from '../src/shared/design/types'
 
 const liberation = new Uint8Array(fs.readFileSync('node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf'))
@@ -191,7 +191,7 @@ test('a layer outside its timing window is hidden at that time', async () => {
   assert.ok(!at(4).includes('l-r1'))
 })
 
-test('a clipping group clips the rest to its first child, which is not drawn', async () => {
+test('a clipping group clips the rest to its first child, which keeps its group but is not drawn', async () => {
   const d = designOf({
     ...base, ...box(0, 0, 200, 200), id: 'g1', name: 'Masked', type: 'group', clip: true,
     children: [{ ...rect('m1', 'Mask'), type: 'ellipse' } as Layer, rect('r1', 'Photo')]
@@ -200,7 +200,11 @@ test('a clipping group clips the rest to its first child, which is not drawn', a
   const clip = byId(doc, 'c-g1-1')!
   assert.equal(clip.tagName, 'clipPath')
   assert.equal(clip.getElementsByTagName('ellipse').length, 1)
-  assert.equal(byId(doc, 'l-m1'), null)
+  const mask = byId(doc, 'l-m1')!
+  assert.equal(mask.getAttribute('inkscape:label'), 'Mask')
+  assert.equal(mask.getAttribute('data-name'), 'Mask')
+  assert.equal(clip.parentNode, mask, 'the mask layer holds its clip path, which never draws')
+  assert.equal(children(mask, 'ellipse').length, 0)
   assert.equal((byId(doc, 'l-r1')!.parentNode as Element).getAttribute('clip-path'), 'url(#c-g1-1)')
 })
 
@@ -256,9 +260,9 @@ test('an svg layer is drawn as an image, never inline', async () => {
   const svg = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' })
   const img = parse(svg).getElementsByTagName('image')[0]
   assert.ok(img)
-  assert.ok(img.getAttribute('href')!.startsWith('data:image/svg+xml;base64,'))
+  assert.ok(img.getAttribute('xlink:href')!.startsWith('data:image/svg+xml;base64,'))
   assert.ok(!svg.includes('<circle'))
-  assert.equal(new TextDecoder().decode(Uint8Array.from(atob(img.getAttribute('href')!.split(',')[1]), c => c.charCodeAt(0))), inner)
+  assert.equal(new TextDecoder().decode(Uint8Array.from(atob(img.getAttribute('xlink:href')!.split(',')[1]), c => c.charCodeAt(0))), inner)
 })
 
 test('images embed their asset and a missing asset draws nothing', async () => {
@@ -270,7 +274,7 @@ test('images embed their asset and a missing asset draws nothing', async () => {
   const svg = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: { 'assets/abc.png': png }, mode: 'raster' })
   const imgs = parse(svg).getElementsByTagName('image')
   assert.equal(imgs.length, 1)
-  assert.equal(imgs[0].getAttribute('href'), 'data:image/png;base64,iVBORwECAw==')
+  assert.equal(imgs[0].getAttribute('xlink:href'), 'data:image/png;base64,iVBORwECAw==')
   assert.equal(imgs[0].getAttribute('preserveAspectRatio'), 'xMidYMid slice')
 })
 
@@ -324,7 +328,7 @@ test('connectors route between boxes and draw markers and a label', async () => 
   assert.deepEqual(s.map(p => p.map(v => Math.round(v * 100) / 100)), [[100, 83.33], [300, 216.67]])
   assert.deepEqual(connectorPath(d, board, elbow), [[100, 50], [200, 50], [200, 250], [300, 250]])
   assert.deepEqual(connectorPath(d, board, fixed), [[1, 2], [3, 4]])
-  assert.deepEqual(connectorPath(d, board, dangling), [[50, 50], [50, 50]])
+  assert.deepEqual(connectorPath(d, board, dangling), [], 'a connector whose end layer is missing has no route')
   const fonts = await fontsOf(d)
   const svg = designToSvg(d, board.id, { fonts, assets: {}, mode: 'export' })
   const doc = parse(svg)
@@ -335,4 +339,118 @@ test('connectors route between boxes and draw markers and a label', async () => 
   assert.equal(label.textContent, 'sends')
   assert.equal(label.getElementsByTagName('tspan')[0].getAttribute('font-size'), '14')
   assert.equal(byId(doc, 'l-s')!.getElementsByTagName('rect')[0].getAttribute('fill'), '#ffffff')
+  assert.equal(byId(doc, 'l-d')!.childNodes.length, 0, 'and draws nothing')
+})
+
+test('a filter region covers the glyphs and their shadow, past the box', async () => {
+  const shadow = { x: 0, y: 12, blur: 24, color: '#00000080' }
+  const probe = text('p1', [{ text: 'Hi', font: LIB, size: 40 }], { ...box(0, 0, 600, 400), shadow })
+  const point = text('p2', [{ text: 'Hello', font: LIB, size: 40 }], { ...box(100, 100, 10, 10), mode: 'point', shadow })
+  const d = designOf(probe, point)
+  const fonts = await fontsOf(d)
+  const doc = parse(designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'raster' }))
+  const reach = 3 * 12 // three deviations of a 24 px blur radius
+  for (const layer of [probe, point]) {
+    const f = byId(doc, `f-${layer.id}-1`)!
+    assert.equal(f.getAttribute('filterUnits'), 'userSpaceOnUse')
+    const [x, y, w, h] = ['x', 'y', 'width', 'height'].map(a => Number(f.getAttribute(a)))
+    const line = layoutText(layer, fonts).lines[0]
+    const inkTop = line.y - (40 * 1854) / 2048
+    const inkBottom = line.y + (40 * 434) / 2048
+    assert.ok(x <= line.x - reach && x + w >= line.x + line.width + reach, `${layer.id} covers the line and its blur`)
+    assert.ok(y <= inkTop, `${layer.id} covers the glyph tops`)
+    assert.ok(y + h >= inkBottom + 12 + reach, `${layer.id} covers the shadow below the glyphs`)
+  }
+})
+
+test('a fill override on a text layer replaces every run color', async () => {
+  const comp: Component = {
+    id: 'c1', name: 'Tag',
+    root: {
+      ...base, ...box(0, 0, 200, 60), id: 'root', name: 'Tag', type: 'group',
+      children: [text('label', [
+        { text: 'Red ', font: LIB, size: 20, color: { type: 'color', color: '#ff0000' } },
+        { text: 'Blue', font: LIB, size: 20, color: { type: 'color', color: '#0000ff' } }
+      ], box(0, 0, 200, 60))]
+    } as Layer & { type: 'group' }
+  }
+  const d = designOf({ ...base, ...box(0, 0, 200, 60), id: 'i1', name: 'Tag', type: 'instance', component: 'c1', overrides: { label: { fill: { type: 'color', color: '#00ff00' } } } } as Layer)
+  d.components.push(comp)
+  const fonts = await fontsOf(d)
+  for (const mode of ['raster', 'export'] as const) {
+    const svg = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode })
+    assert.ok(svg.includes('fill="#00ff00"'), mode)
+    assert.ok(!svg.includes('#ff0000') && !svg.includes('#0000ff'), `${mode}: no run keeps its own color`)
+  }
+})
+
+test('valign middle and bottom place the block in the box, and right align ends lines at the box edge', async () => {
+  const fonts = await fontsOf(designOf(text('x', FOX)))
+  const ascent = (32 * 1854) / 2048
+  const height = 3 * 32 * 1.2
+  const middle = layoutText(text('m', FOX, { valign: 'middle' }), fonts)
+  assert.ok(Math.abs(middle.lines[0].y - ((400 - height) / 2 + ascent)) < 1e-6)
+  const bottom = layoutText(text('b', FOX, { valign: 'bottom' }), fonts)
+  assert.ok(Math.abs(bottom.lines[0].y - (400 - height + ascent)) < 1e-6)
+  assert.ok(Math.abs(bottom.lines[2].y - (400 - 38.4 + ascent)) < 1e-6)
+  const right = layoutText(text('r', FOX, { align: 'right', x: 10 }), fonts)
+  for (const l of right.lines) assert.ok(Math.abs(l.x + l.width - 310) < 1e-6)
+  const last = right.lines[0].spans[right.lines[0].spans.length - 1]
+  assert.ok(Math.abs(last.x + last.width - 310) < 1e-6)
+})
+
+test('a rotated and scaled instance turns about its box and maps the component into it', async () => {
+  const comp: Component = {
+    id: 'c1', name: 'Box',
+    root: { ...base, ...box(10, 20, 100, 60), id: 'root', name: 'Box', type: 'group', children: [rect('in', 'In', box(10, 20, 100, 60))] } as Layer & { type: 'group' }
+  }
+  const d = designOf({ ...base, ...box(100, 100, 400, 120), rotation: 90, scaleX: 2, id: 'i1', name: 'Turned', type: 'instance', component: 'c1', overrides: {} } as Layer)
+  d.components.push(comp)
+  const doc = parse(designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'raster' }))
+  const g = byId(doc, 'l-i1')!
+  assert.equal(g.getAttribute('transform'), 'rotate(90 300 160) translate(300 160) scale(2 1) translate(-300 -160)')
+  assert.equal(children(g, 'g')[0].getAttribute('transform'), 'translate(100 100) scale(4 2) translate(-10 -20)')
+  assert.ok(byId(doc, 'l-i1-in'))
+})
+
+test('hostile path data, font families, colors and blends stay inside their attributes', async () => {
+  const evil = '"/><script>alert(1)</script><x a="'
+  const d = designOf(
+    { ...rect('p1', 'P'), type: 'path', d: evil } as Layer,
+    rect('r1', 'R', { fill: { type: 'color', color: '#fff" onload="alert(1)' }, blend: 'multiply;x:url(y)' as any }),
+    text('t1', [{ text: 'Hi', font: { family: 'Evil" onload="alert(1)', weight: 400, style: 'normal' }, size: 20 }])
+  )
+  const fonts = await fontsOf(d)
+  for (const mode of ['raster', 'export'] as const) {
+    const doc = parse(designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode }))
+    assert.equal(doc.getElementsByTagName('script').length, 0)
+    const all = doc.getElementsByTagName('*')
+    for (let i = 0; i < all.length; i++) assert.equal(all[i].getAttribute('onload'), null, `${mode}: no onload`)
+    assert.equal(byId(doc, 'l-p1')!.getElementsByTagName('path')[0].getAttribute('d'), evil)
+    assert.equal(byId(doc, 'l-r1')!.getElementsByTagName('rect')[0].getAttribute('fill'), '#000000')
+    assert.equal(byId(doc, 'l-r1')!.getAttribute('style'), null)
+    if (mode === 'export') {
+      const span = byId(doc, 'l-t1')!.getElementsByTagName('tspan')[0]
+      assert.equal(span.getAttribute('font-family'), `'Evil" onload="alert(1)'`)
+    }
+  }
+})
+
+test('letter breaks keep graphemes, leading spaces wrap, negative boxes flip, sizes clamp', async () => {
+  const fonts = await fontsOf(designOf(text('x', FOX)))
+  const accented = 'e' + String.fromCharCode(0x301)
+  const g = layoutText(text('g', accented + accented, { width: 1 }), fonts)
+  assert.deepEqual(g.lines.map(lineText), [accented, accented])
+  const lead = layoutText(text('s', ' '.repeat(10) + 'quick', { width: 100 }), fonts)
+  assert.deepEqual(lead.lines.map(lineText), ['', 'quick'])
+  const flipped = layoutText(text('n', FOX, { x: 300, width: -300, y: 400, height: -400 }), fonts)
+  assert.deepEqual(flipped.lines.map(lineText), ['The quick brown fox', 'jumps over the lazy', 'dog'])
+  assert.equal(flipped.lines[0].x, 0)
+  assert.ok(Math.abs(flipped.lines[0].y - (32 * 1854) / 2048) < 1e-6)
+  assert.equal(num(1e308), '1e+308')
+  assert.equal(num(-1e308, 4), '-1e+308')
+  assert.equal(num(Infinity), '0')
+  const tiny = text('z', [{ text: 'Hi', font: LIB, size: -5 }])
+  const d = designOf(tiny)
+  assert.ok(designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' }).includes('font-size="0"'))
 })
