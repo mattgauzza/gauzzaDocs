@@ -13,7 +13,7 @@ import { sharedAssetName } from '../src/shared/design/sha256'
 import { PRESENTATION, STYLE_ONLY, cleanSvg } from '../src/shared/design/svgClean'
 import { inlineCaches, inlineSvg } from '../src/shared/design/svgFragment'
 import { importSvg, layerAsSvg } from '../src/shared/design/svgImport'
-import { layoutText } from '../src/shared/design/text'
+import { type GlyphCosts, layoutText, outlineEstimate, textPaths } from '../src/shared/design/text'
 import type { Component, Design, Layer, TextLayer } from '../src/shared/design/types'
 
 const NS = 'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"'
@@ -1888,6 +1888,46 @@ test('a text estimated past what is left is left out without being built, and sm
   const tail = draw([fill, text('big', words), text('headline', R(40, '@'), 200), ...['r0', 'r1', 'r2', 'r3', 'r4'].map(rect)], photo)
   assert.deepEqual(tail.left, ['big'])
   for (const id of ['headline', 'r0', 'r1', 'r2', 'r3', 'r4']) assert.match(tail.out, new RegExp(`data-name="${id}"`))
+})
+
+test('a glyph drawn at one size is counted at any other, never under, so texts at sizes not drawn yet are left out without building (yB)', async () => {
+  const fonts = await fontsOf(newDesign('instagram'))
+  const at = { x: 0, y: 0, width: 10, height: 10 }
+  const lib = { family: 'Liberation Sans', weight: 400, style: 'normal' as const }
+  const text = (id: string, t: string, size: number): TextLayer => ({
+    ...base, id, name: id, type: 'text', x: 0, y: 0, width: 1000, height: 1000, mode: 'box', align: 'left', valign: 'top',
+    runs: [{ text: t, font: lib, size }]
+  })
+  // what 2,000 '@' write at a size, and what they're estimated at once the same glyph was drawn at another
+  const words = R(2000, '@')
+  const real = (size: number): number => textPaths(text('t', words, size), fonts).reduce((a, p) => a + p.d.length, 0)
+  const estimate = (taught: number, size: number): number => {
+    const costs: GlyphCosts = new WeakMap()
+    textPaths(text('t', words, taught), fonts, undefined, 0, 0, { left: 1e12, costs })
+    const t = text('t', words, size)
+    return outlineEstimate(fonts, t.runs[0], words, 500, costs)
+  }
+  for (const [taught, size] of [[12, 12], [12, 6], [100, 12], [12, 12.17], [12, 24], [12, 100], [12, 200]]) {
+    const ratio = estimate(taught, size) / real(size)
+    assert.ok(ratio >= 1 && ratio < 1.6, `taught at ${taught} px, ${size} px: estimated at ${ratio.toFixed(3)} times what it writes`)
+  }
+  // yB: a photo leaves 2,000 '@' at 12 px a little less than they write; then 18 layers of them at 12 to 12.17 px
+  const outlines = real(12)
+  const asset = `assets/${'a'.repeat(64)}.png`
+  const photo = new Uint8Array(Math.floor(((MAX_RENDER_OUTPUT - outlines / 1.05) * 3) / 4))
+  const fill: Layer = { ...base, id: 'photo', name: 'photo', type: 'image', ...at, asset, fit: 'fill' }
+  const draw = (layers: Layer[]) => {
+    const d = newDesign('instagram')
+    d.artboards[0].layers.push(fill, ...layers)
+    const downgrades: Downgrade[] = []
+    const ms = cpuMs(() => designToSvg(d, d.artboards[0].id, { fonts, assets: { [asset]: photo }, mode: 'raster', downgrades }))
+    return { ms, left: downgrades.map(x => x.layer) }
+  }
+  const one = draw([text('t', words, 12)])
+  assert.deepEqual(one.left, ['t'])
+  const sizes = draw(Array.from({ length: 18 }, (_, i) => text(`t${i}`, words, 12 + i * 0.01)))
+  assert.equal(sizes.left.length, 18)
+  assert.ok(sizes.ms < one.ms * 1.5 + 250, `18 sizes took ${Math.round(sizes.ms)} ms, against ${Math.round(one.ms)} ms for one`)
 })
 
 test('long path data, svg layers and gradients of one length never share a hash bucket: each is found by its layer or a short key (xD)', async () => {

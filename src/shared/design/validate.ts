@@ -61,26 +61,138 @@ export const MAX_UNKNOWN_BYTES = 8 * 1024 * 1024
  */
 export const MAX_SVG_MARKUP = 16 * 1024 * 1024
 export const SVG_LAYERS_FULL = 'This design already holds 16 MB of SVG layers.'
+const SVG_PAST_CAP = 'an SVG layer past 16 MB of SVG in this design (dropped)'
+
+const count = (n: number): string => n.toLocaleString('en-US')
+/**
+ * Why a design is past what reading accepts, in the words reading refuses it with ("This design file is damaged:
+ * <reason>."). The ops and saving check the same limits (pastLimit), so nothing is ever written that can't be read.
+ */
+export const LIMIT = {
+  depth: `groups are nested more than ${MAX_DEPTH} deep`,
+  layers: `it has more than ${count(MAX_LAYERS)} layers`,
+  components: `it has more than ${count(MAX_COMPONENTS)} components`,
+  runs: (layer: string): string => `layer ${layer} has more than ${count(MAX_RUNS)} runs`,
+  layerText: (layer: string): string => `layer ${layer} holds more than ${count(MAX_LAYER_TEXT)} characters`,
+  overrideText: `an override holds more than ${count(MAX_LAYER_TEXT)} characters`,
+  text: `it holds more than ${count(MAX_DESIGN_TEXT)} characters of text`,
+  svg: 'its SVG layers come to over 16 MB',
+  side: `an artboard is over ${MAX_ARTBOARD_SIDE} px per side`
+}
+
+/** What a design takes of each limit reading enforces, measured as reading measures it. */
+interface Usage {
+  depth: number; layers: number; components: number; svg: number; side: number
+  /** the most runs, and characters, in one text layer (and which), the most in one override, and all text */
+  runs: number; runsAt: string; layerText: number; layerTextAt: string; overrideText: number; text: number
+}
+const noUsage = (): Usage => ({
+  depth: 0, layers: 0, components: 0, svg: 0, side: 0, runs: 0, runsAt: '', layerText: 0, layerTextAt: '', overrideText: 0, text: 0
+})
+
+/**
+ * Adds what `roots` (top-level layers) and everything inside their groups take to `u`, walked with a stack. It never
+ * goes past MAX_LAYERS + 1 layers or MAX_DEPTH + 1 levels, so a walk ends however many layers a design holds, however
+ * deep they go, or if a group holds itself: past either limit, the limit is all that matters.
+ */
+function measure(u: Usage, roots: readonly unknown[]): void {
+  const stack: unknown[] = []
+  const depths: number[] = []
+  for (let i = roots.length - 1; i >= 0; i--) {
+    stack.push(roots[i])
+    depths.push(1)
+  }
+  while (stack.length) {
+    const l = stack.pop()
+    const depth = depths.pop()!
+    if (!isObj(l)) continue
+    if (++u.layers > MAX_LAYERS) return
+    if (depth > u.depth) u.depth = depth
+    const id = typeof l.id === 'string' ? l.id.slice(0, 64) : ''
+    if (l.type === 'group') {
+      const kids = l.children
+      if (!Array.isArray(kids) || depth > MAX_DEPTH) continue
+      if (u.layers + stack.length + kids.length > MAX_LAYERS) {
+        u.layers = MAX_LAYERS + 1
+        return
+      }
+      for (let i = kids.length - 1; i >= 0; i--) {
+        stack.push(kids[i])
+        depths.push(depth + 1)
+      }
+    } else if (l.type === 'text' && Array.isArray(l.runs)) {
+      if (l.runs.length > u.runs) [u.runs, u.runsAt] = [l.runs.length, id]
+      if (l.runs.length > MAX_RUNS) continue
+      let chars = 0
+      for (const r of l.runs) if (isObj(r) && typeof r.text === 'string') chars += r.text.length
+      if (chars > u.layerText) [u.layerText, u.layerTextAt] = [chars, id]
+      u.text += chars
+    } else if (l.type === 'instance' && isObj(l.overrides)) {
+      for (const o of Object.values(l.overrides)) {
+        if (!isObj(o) || typeof o.text !== 'string') continue
+        if (o.text.length > u.overrideText) u.overrideText = o.text.length
+        u.text += o.text.length
+      }
+    } else if (l.type === 'svg' && typeof l.svg === 'string') u.svg += l.svg.length
+  }
+}
+
+/** What a design takes of each limit: every component's layers and every artboard's, and the largest artboard side. */
+function usageOf(design: Design): Usage {
+  const u = noUsage()
+  const comps: unknown[] = Array.isArray(design.components) ? design.components : []
+  u.components = comps.length
+  measure(u, comps.map(c => (isObj(c) ? c.root : undefined)))
+  for (const a of Array.isArray(design.artboards) ? (design.artboards as unknown[]) : []) {
+    if (!isObj(a)) continue
+    for (const side of [a.width, a.height]) if (typeof side === 'number' && side > u.side) u.side = side
+    if (Array.isArray(a.layers)) measure(u, a.layers)
+  }
+  return u
+}
+
+/** Each limit: what it measures, how far it may go, and why a design past it is refused. */
+const CHECKS: [keyof Usage, number, (u: Usage) => string][] = [
+  ['depth', MAX_DEPTH, () => LIMIT.depth],
+  ['layers', MAX_LAYERS, () => LIMIT.layers],
+  ['components', MAX_COMPONENTS, () => LIMIT.components],
+  ['runs', MAX_RUNS, u => LIMIT.runs(u.runsAt)],
+  ['layerText', MAX_LAYER_TEXT, u => LIMIT.layerText(u.layerTextAt)],
+  ['overrideText', MAX_LAYER_TEXT, () => LIMIT.overrideText],
+  ['text', MAX_DESIGN_TEXT, () => LIMIT.text],
+  ['svg', MAX_SVG_MARKUP, () => LIMIT.svg],
+  ['side', MAX_ARTBOARD_SIDE, () => LIMIT.side]
+]
+
+/**
+ * The first limit reading enforces that `design` is past, as reading words it (LIMIT), or null when it can be read:
+ * groups nested past 64, more than 100,000 layers or 10,000 components, a text layer past 1,000 runs or 100,000
+ * characters (an override past 100,000), more than 1,000,000 characters of text, over 16 MB of svg markup (`svg` is
+ * then set), or an artboard over 8192 px. Given `before` (the design an op started from), a limit counts only when
+ * `design` takes more of it than `before` did, so an op that doesn't make a design worse (a delete, say) is never
+ * refused for what it already was.
+ */
+export function pastLimit(design: Design, before?: Design): { reason: string; svg: boolean } | null {
+  const now = usageOf(design)
+  let was: Usage | undefined
+  for (const [k, most, why] of CHECKS) {
+    if ((now[k] as number) <= most) continue
+    if (before && (now[k] as number) <= ((was ??= usageOf(before))[k] as number)) continue
+    return { reason: why(now), svg: k === 'svg' }
+  }
+  return null
+}
 
 /** The SVG markup some layers hold, with everything inside their groups, counted as reading counts it. */
 export function svgMarkupIn(layers: readonly unknown[]): number {
-  let total = 0
-  const stack = layers.slice()
-  while (stack.length) {
-    const l = stack.pop()
-    if (!isObj(l)) continue
-    if (l.type === 'svg' && typeof l.svg === 'string') total += l.svg.length
-    else if (l.type === 'group' && Array.isArray(l.children)) for (const c of l.children) stack.push(c)
-  }
-  return total
+  const u = noUsage()
+  measure(u, layers)
+  return u.svg
 }
 
 /** The SVG markup a design's svg layers hold between them, on every artboard and in every component. */
 export function svgMarkupOf(design: Design): number {
-  let total = 0
-  for (const a of Array.isArray(design.artboards) ? design.artboards : []) if (Array.isArray(a?.layers)) total += svgMarkupIn(a.layers)
-  for (const c of Array.isArray(design.components) ? design.components : []) if (c?.root) total += svgMarkupIn([c.root])
-  return total
+  return usageOf(design).svg
 }
 /** Most different notes kept; past it they're counted as "and N more". */
 const MAX_NOTES = 200
@@ -148,8 +260,14 @@ function kept(o: Obj, kind: string, r: Reader): Obj {
   return out
 }
 
-/** Ids as they're read: the first holder of a valid id keeps it; others get a new one made from it. */
+/**
+ * Ids as they're read: the first holder of a valid id keeps it; others get a new one made from it. `raw` maps an id as
+ * the file wrote it to the ids it became, for ids of at most 64 characters: a longer one is never a valid id, so it's
+ * renamed and nothing follows it (and V8 hashes a string over 16,383 characters by its length alone, so long keys of
+ * one length would share one bucket).
+ */
 interface Scope { raw: Map<string, string[]>; ids: Set<string> }
+const MAX_ID = 64
 const newScope = (): Scope => ({ raw: new Map(), ids: new Set() })
 
 class Reader {
@@ -163,6 +281,8 @@ class Reader {
   nextNumber = new Map<string, number>()
   layers = 0
   text = 0
+  /** svg markup read as written (bounding the cleaning work), and kept once cleaned */
+  svgSource = 0
   svgMarkup = 0
   /** what the repaired design.json is estimated to come to: what was read, plus every default written back */
   size: number
@@ -256,7 +376,8 @@ class Reader {
     if (typeof raw === 'string' && ID.test(raw) && !this.taken.has(raw)) id = raw
     else {
       this.note(typeof raw === 'string' && ID.test(raw) ? 'a repeated id (renamed)' : 'an id that was not valid (renamed)')
-      const base = (typeof raw === 'string' ? raw.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 56) : '') || 'id'
+      // cut first, then replace (one character for one, so the same as the other way round, without reading a long id)
+      const base = (typeof raw === 'string' ? raw.slice(0, 56).replace(/[^A-Za-z0-9_-]/g, '_') : '') || 'id'
       id = base
       if (this.taken.has(id) || this.reserved.has(id) || !ID.test(id)) {
         let n = this.nextNumber.get(base) ?? 2
@@ -269,7 +390,7 @@ class Reader {
     this.taken.add(id)
     if (scope) {
       scope.ids.add(id)
-      if (typeof raw === 'string') {
+      if (typeof raw === 'string' && raw.length <= MAX_ID) {
         const list = scope.raw.get(raw)
         if (list) list.push(id)
         else scope.raw.set(raw, [id])
@@ -376,8 +497,12 @@ class Reader {
   }
 }
 
-/** Where a reference in `scope` points now: the id itself when it's still held there, else the one id it became. */
+/**
+ * Where a reference in `scope` points now: the id itself when it's still held there, else the one id it became. A
+ * reference past 64 characters points nowhere (no id is that long, and none is followed from one).
+ */
 function follow(scope: Scope, raw: string): string | undefined {
+  if (raw.length > MAX_ID) return undefined
   if (scope.ids.has(raw)) return raw
   const list = scope.raw.get(raw)
   return list && list.length === 1 ? list[0] : undefined
@@ -506,8 +631,8 @@ function shadow(v: unknown, r: Reader): Obj | undefined {
 /** A layer, checked and repaired; null when it can't be kept (it's dropped, with a note). */
 function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | null {
   if (!isObj(raw)) damaged('a layer is not an object')
-  if (depth > MAX_DEPTH) damaged(`groups are nested more than ${MAX_DEPTH} deep`)
-  if (++r.layers > MAX_LAYERS) damaged(`it has more than ${MAX_LAYERS.toLocaleString('en-US')} layers`)
+  if (depth > MAX_DEPTH) damaged(LIMIT.depth)
+  if (++r.layers > MAX_LAYERS) damaged(LIMIT.layers)
   const type = raw.type
   if (typeof type !== 'string' || !TYPES.has(type)) damaged(`a layer has an unknown type (${shown(type)})`)
   const out = kept(raw, type, r)
@@ -567,7 +692,7 @@ function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | nu
         runs = []
       }
       const list = runs as unknown[]
-      if (list.length > MAX_RUNS) damaged(`${where} has more than ${MAX_RUNS.toLocaleString('en-US')} runs`)
+      if (list.length > MAX_RUNS) damaged(LIMIT.runs(out.id as string))
       let chars = 0
       out.runs = list
         .filter(run => {
@@ -586,8 +711,8 @@ function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | nu
           chars += (text as string).length
           return { ...runStyle(o, r, 'run'), text }
         })
-      if (chars > MAX_LAYER_TEXT) damaged(`${where} holds more than ${MAX_LAYER_TEXT.toLocaleString('en-US')} characters`)
-      if ((r.text += chars) > MAX_DESIGN_TEXT) damaged(`it holds more than ${MAX_DESIGN_TEXT.toLocaleString('en-US')} characters of text`)
+      if (chars > MAX_LAYER_TEXT) damaged(LIMIT.layerText(out.id as string))
+      if ((r.text += chars) > MAX_DESIGN_TEXT) damaged(LIMIT.text)
       out.mode = r.oneOf(raw.mode, ['box', 'point'] as const, 'box', 'text mode')
       out.align = r.oneOf(raw.align, ['left', 'center', 'right', 'justify'] as const, 'left', 'alignment')
       out.valign = r.oneOf(raw.valign, ['top', 'middle', 'bottom'] as const, 'top', 'vertical alignment')
@@ -661,17 +786,27 @@ function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | nu
         r.note('an SVG layer without markup (dropped)')
         return null
       }
-      // the svg layers of one design hold at most 16 MB of markup between them, so reading one cleans at most that
-      if ((r.svgMarkup += raw.svg.length) > MAX_SVG_MARKUP) {
-        r.note('an SVG layer past 16 MB of SVG in this design (dropped)')
+      // reading cleans at most 16 MB of svg markup as written, which bounds the cleaning work
+      if ((r.svgSource += raw.svg.length) > MAX_SVG_MARKUP) {
+        r.note(SVG_PAST_CAP)
         return null
       }
+      let cleaned: string
       try {
-        out.svg = cleanSvg(raw.svg).svg
+        cleaned = cleanSvg(raw.svg).svg
       } catch (e) {
         r.note(`an SVG layer that could not be cleaned (${(e as Error).message.replace(/\.$/, '')}; dropped)`)
         return null
       }
+      // and keeps at most 16 MB once cleaned (what's kept, and what saving and the ops count): cleaning can lengthen
+      // markup (a quote becomes &apos;), and a file kept past that couldn't be saved
+      if (r.svgMarkup + cleaned.length > MAX_SVG_MARKUP) {
+        r.note(SVG_PAST_CAP)
+        return null
+      }
+      r.svgMarkup += cleaned.length
+      if (cleaned.length > raw.svg.length) r.grow(cleaned.length - raw.svg.length)
+      out.svg = cleaned
       break
     }
   }
@@ -833,7 +968,7 @@ export function validateDesign(raw: unknown, notes?: string[], size = 0): Design
   reserve(r, raw)
   const rawComponents = raw.components === undefined ? [] : raw.components
   if (!Array.isArray(rawComponents)) damaged('its components are not a list')
-  if (rawComponents.length > MAX_COMPONENTS) damaged(`it has more than ${MAX_COMPONENTS.toLocaleString('en-US')} components`)
+  if (rawComponents.length > MAX_COMPONENTS) damaged(LIMIT.components)
 
   // components first: their ids are what instances refer to
   const components: Obj[] = []
@@ -885,8 +1020,8 @@ export function validateDesign(raw: unknown, notes?: string[], size = 0): Design
           r.note('override text that was not text (dropped)')
           delete out.text
         } else {
-          if (out.text.length > MAX_LAYER_TEXT) damaged(`an override holds more than ${MAX_LAYER_TEXT.toLocaleString('en-US')} characters`)
-          if ((r.text += out.text.length) > MAX_DESIGN_TEXT) damaged(`it holds more than ${MAX_DESIGN_TEXT.toLocaleString('en-US')} characters of text`)
+          if (out.text.length > MAX_LAYER_TEXT) damaged(LIMIT.overrideText)
+          if ((r.text += out.text.length) > MAX_DESIGN_TEXT) damaged(LIMIT.text)
         }
       }
       optPaint(out, 'fill', r, false)

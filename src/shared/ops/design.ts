@@ -6,7 +6,7 @@ import { cleanSvg } from '../design/svgClean'
 import { importSvg, layerAsSvg } from '../design/svgImport'
 import { cleanText, num as fmt, textReport } from '../design/text'
 import type { Artboard, BlendMode, Component, Design, DesignFile, Layer, Override, Paint, TextRun } from '../design/types'
-import { MAX_SVG_MARKUP, SVG_LAYERS_FULL, svgMarkupIn, svgMarkupOf } from '../design/validate'
+import { MAX_SVG_MARKUP, SVG_LAYERS_FULL, pastLimit, svgMarkupIn, svgMarkupOf } from '../design/validate'
 import type { AgentOp } from '../types'
 import {
   DEFAULT_FONT, type DesignDoc, type GroupLayer, MAX_SIZE, boundsOf, boundsOfLayers, componentOf, contains, coord, endOf, fontOf,
@@ -32,7 +32,9 @@ import { OpError, type OpHandler, type OpServices, str } from './types'
  *   svg { svg, name?, parent?, index?, x?, y? } -> { id, removed, kept }      svg { get: layer | true } -> { svg }
  *   apply { ops }                               -> { results }
  * Every op runs on a copy, so a failure changes nothing; `apply` runs its ops in order on one copy and stops at the
- * first failure with "op <n>: <message>". `summary` says what changed in a few plain words, for the undo step.
+ * first failure with "op <n>: <message>". An op (or a whole batch) that would leave the design past a limit reading
+ * enforces is refused (pastLimit), so a design the ops make can always be saved and opened again. `summary` says what
+ * changed in a few plain words, for the undo step.
  * Pure apart from `services`: the design editor applies these live and core/ops to files on disk.
  */
 export async function applyDesignOp(
@@ -48,6 +50,9 @@ export async function applyDesignOp(
   const result = await runOp(draft, op)
   const summary = describe(draft.changes)
   if (!draft.changes.length) return { result, summary }
+  // never make a design reading would refuse: past any of its limits, the file couldn't be opened once saved
+  const past = pastLimit(draft.design, file.design)
+  if (past) throw new OpError(past.svg ? SVG_LAYERS_FULL : `That would leave a design that can't be opened: ${past.reason}.`)
   return { result, file: { ...file, design: draft.design, assets: draft.assets }, summary }
 }
 

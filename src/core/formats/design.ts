@@ -1,7 +1,7 @@
 // Reading and writing .gdesign files: a zip holding only design.json, assets/<sha256>.<ext> and thumbnail.png.
 import { createHash } from 'node:crypto'
 import type { Design, DesignFile, Layer } from '../../shared/design/types'
-import { MAX_SVG_MARKUP, svgMarkupOf, validateDesign } from '../../shared/design/validate'
+import { pastLimit, validateDesign } from '../../shared/design/validate'
 
 type JSZipT = InstanceType<typeof import('jszip')>
 const loadZip = async (bytes: Uint8Array): Promise<JSZipT> => (await import('jszip')).default.loadAsync(bytes)
@@ -44,6 +44,8 @@ export const SVG_TOO_LARGE_TO_SAVE = 'This design is too large to save (its SVG 
 export const TOO_DEEP_TO_SAVE = 'This design is too deeply nested to save.'
 export const LOOPS_TO_SAVE = "This design can't be saved: part of it contains itself."
 export const ODD_VALUE_TO_SAVE = "This design can't be saved: it holds a value a design file can't store."
+/** A design past a limit reading enforces (`reason` is reading's own words for it, from LIMIT). */
+export const unreadableToSave = (reason: string): string => `This design can't be saved, since it couldn't be opened again: ${reason}.`
 
 /** What made writing design.json fail, as one of the messages above (anything else as it was). */
 function saveFailure(e: unknown): Error {
@@ -53,17 +55,20 @@ function saveFailure(e: unknown): Error {
 }
 
 /**
- * design.json for a design, or a plain error saying why it can't be saved: an asset pointer outside assets/, over
- * 16 MB of SVG layers (reading would drop the layers past it), groups or values nested too deep to write, or a
- * design.json over 64 MB (reading would refuse it).
+ * design.json for a design, or a plain error saying why it can't be saved: past a limit reading enforces (pastLimit,
+ * the same check every op makes: reading would refuse it, or drop SVG layers past 16 MB), an asset pointer outside
+ * assets/, values nested too deep to write, or a design.json over 64 MB (reading would refuse it). Nothing is written
+ * that can't be read.
  */
 function designJson(design: Design): string {
+  // first, and walked without recursion, so groups nested past the limit (or holding themselves) are named as such
+  const past = pastLimit(design)
+  if (past) throw new Error(past.svg ? SVG_TOO_LARGE_TO_SAVE : unreadableToSave(past.reason))
   try {
     checkAssetRefs(design)
   } catch (e) {
     throw e instanceof RangeError ? saveFailure(e) : e
   }
-  if (svgMarkupOf(design) > MAX_SVG_MARKUP) throw new Error(SVG_TOO_LARGE_TO_SAVE)
   let json: string
   try {
     json = JSON.stringify(design)

@@ -259,11 +259,13 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
   return { lines, height, overflow: wrap && height > box.h + EPS }
 }
 
+/** The most one character's glyph outline came to at any size, and the largest scale (size / em) it was drawn at. */
+interface Seen { most: number; scale: number }
 /**
- * The most each character's glyph outline came to wherever it was drawn, by font, then by scale, then by code point. A
- * drawing fills it in as it builds outlines, so a text like one already drawn is costed from it.
+ * What each character's glyph outline came to, by font, then by code point, whatever its size. A drawing fills it in
+ * as it builds outlines, so a text like one already drawn is costed from it at any size.
  */
-export type GlyphCosts = WeakMap<object, Map<number, Map<number, number>>>
+export type GlyphCosts = WeakMap<object, Map<number, Seen>>
 
 /** Characters of outline a caller still allows; building past it throws OutlinesTooLong. */
 export interface OutlineBudget {
@@ -273,29 +275,43 @@ export interface OutlineBudget {
 }
 export class OutlinesTooLong extends Error {}
 
-/** The costs recorded for one font at one scale, made when `make` is set. */
-function costsFor(costs: GlyphCosts | undefined, font: any, k: number, make: boolean): Map<number, number> | undefined {
+/** The costs recorded for one font, made when `make` is set. */
+function costsFor(costs: GlyphCosts | undefined, font: any, make: boolean): Map<number, Seen> | undefined {
   if (!costs || !font || typeof font !== 'object') return undefined
-  let byScale = costs.get(font)
-  if (!byScale) {
-    if (!make) return undefined
-    costs.set(font, (byScale = new Map()))
-  }
-  let byCode = byScale.get(k)
-  if (!byCode && make) byScale.set(k, (byCode = new Map()))
+  let byCode = costs.get(font)
+  if (!byCode && make) costs.set(font, (byCode = new Map()))
   return byCode
 }
 
 /**
- * About how many characters `text` in `run` writes as outlines: each visible character at the most its glyph has come
- * to anywhere in this drawing for the same font at the same scale (from `costs`), or `perGlyph` when it hasn't been
- * drawn yet. A character seen before is never counted for less than it was seen to cost, so a text like one that
- * didn't fit is left out before any of it is built. (A glyph's coordinates write more digits further from the origin,
- * so a text drawn further out than any glyph before it can still come to a little more.)
+ * How much more a glyph can write each time its size doubles. An outline's length grows with the digits its
+ * coordinates take, not with the size itself: Liberation Sans '@', 'a' and '.' (2,000 of them in a 1,000 px box) write
+ * 4 to 6% more at 24 px than at 12 px, about 30% more at 1,000 px than at 12 px, and 48% more at 1,000 px than at 1 px.
+ * 15% a doubling stays above all of that without counting a large headline as many times its body text.
+ */
+const GROWTH_PER_DOUBLING = 0.15
+
+/**
+ * What a glyph seen before is counted at, at scale `k`: the most it came to at any size, or, at a size larger than any
+ * it was drawn at, that grown by GROWTH_PER_DOUBLING for each doubling past it. Never less than it was seen to cost.
+ */
+function seenAt(s: Seen, k: number): number {
+  return k > s.scale && s.scale > 0 ? Math.ceil(s.most * (1 + GROWTH_PER_DOUBLING * Math.log2(k / s.scale))) : s.most
+}
+
+/**
+ * About how many characters `text` in `run` writes as outlines: each visible character at what its glyph came to in
+ * this drawing in the same font at any size (from `costs`, see seenAt), or `perGlyph` when it hasn't been drawn yet. A
+ * character seen before is never counted for less than it was seen to cost, so a text like one that didn't fit, at
+ * its size or another, is left out before any of it is built. (A glyph's coordinates write more digits further from
+ * the origin, so a text drawn further out than any glyph before it can still come to a little more.)
  */
 export function outlineEstimate(fonts: FontSource, run: TextRun, text: string, perGlyph: number, costs?: GlyphCosts): number {
   const font = fonts.get(run.font).font
-  const seen = costsFor(costs, font, scaleOf(font, run), false)
+  const seen = costsFor(costs, font, false)
+  const k = scaleOf(font, run)
+  // one value per code point a text uses, however often it uses it
+  const at = new Map<number, number>()
   let total = 0
   for (let i = 0; i < text.length; i++) {
     let c = text.charCodeAt(i)
@@ -307,7 +323,12 @@ export function outlineEstimate(fonts: FontSource, run: TextRun, text: string, p
         i++
       }
     }
-    total += seen?.get(c) ?? perGlyph
+    let cost = at.get(c)
+    if (cost === undefined) {
+      const s = seen?.get(c)
+      at.set(c, (cost = s ? seenAt(s, k) : perGlyph))
+    }
+    total += cost
   }
   return total
 }
@@ -319,7 +340,7 @@ export function outlineEstimate(fonts: FontSource, run: TextRun, text: string, p
  */
 export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: number, y: number, budget?: OutlineBudget): string {
   const { font, glyphs, positions, k, spacing } = shape(fonts, run, text)
-  const seen = costsFor(budget?.costs, font, k, true)
+  const seen = costsFor(budget?.costs, font, true)
   const out: string[] = []
   let pen = x
   for (let i = 0; i < glyphs.length; i++) {
@@ -343,12 +364,16 @@ export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: numb
       else if (c.command === 'closePath') out.push('Z')
     }
     if (seen && budget) {
-      // one character's glyph (not a ligature): the most it has come to anywhere
+      // one character's glyph (not a ligature): the most it has come to at any size, and the largest size
       const codes = glyphs[i]?.codePoints
       if (Array.isArray(codes) && codes.length === 1 && typeof codes[0] === 'number') {
         const cost = start - budget.left
-        const most = seen.get(codes[0])
-        if (most === undefined || cost > most) seen.set(codes[0], cost)
+        const was = seen.get(codes[0])
+        if (!was) seen.set(codes[0], { most: cost, scale: k })
+        else {
+          if (cost > was.most) was.most = cost
+          if (k > was.scale) was.scale = k
+        }
       }
     }
     pen += advance(glyphs[i], p) * k + spacing

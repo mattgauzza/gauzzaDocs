@@ -644,3 +644,78 @@ test('a save says what stopped it, and refuses over 16 MB of SVG layers so a reo
   four.artboards[0].layers.push(svgLayer(4))
   await assert.rejects(designZipBytes({ design: four, assets: {} }), { message: 'This design is too large to save (its SVG layers come to over 16 MB).' })
 })
+
+test('a save past any limit reading enforces is refused in reading\'s own words, walked without recursion (yA, yS)', async () => {
+  const saving = (reason: string) => ({ message: `This design can't be saved, since it couldn't be opened again: ${reason}.` })
+  const group = (id: string, children: Layer[]): Layer => ({ ...base, id, name: id, type: 'group', children })
+  const text = (id: string, runs: number, chars: number): Layer => ({
+    ...base, id, name: id, type: 'text', mode: 'box', align: 'left', valign: 'top',
+    runs: Array.from({ length: runs }, () => ({ text: 'a'.repeat(chars), font, size: 12 }))
+  })
+  const saved = async (layers: Layer[], more: Partial<Design> = {}) => {
+    const d = newDesign('instagram')
+    return designZipBytes({ design: { ...d, ...more, artboards: [{ ...d.artboards[0], layers }] }, assets: {} })
+  }
+  // groups 65 deep, 20,000 deep, and a group that holds itself
+  let deep: Layer = rect('r', 'R')
+  for (let i = 0; i < 64; i++) deep = group(`g${i}`, [deep])
+  await assert.rejects(saved([deep]), saving('groups are nested more than 64 deep'))
+  for (let i = 64; i < 20_000; i++) deep = group(`g${i}`, [deep])
+  await assert.rejects(saved([deep]), saving('groups are nested more than 64 deep'))
+  const self = group('self', [])
+  ;(self as { children: Layer[] }).children.push(self, self)
+  await assert.rejects(saved([self]), saving('groups are nested more than 64 deep'))
+  // 1,001 runs, 100,001 characters in a layer, 1,000,001 in the design, 100,001 layers, an override of 100,001
+  await assert.rejects(saved([text('t', 1001, 1)]), saving('layer t has more than 1,000 runs'))
+  await assert.rejects(saved([text('t', 1, 100_001)]), saving('layer t holds more than 100,000 characters'))
+  await assert.rejects(saved([...Array.from({ length: 10 }, (_, i) => text(`t${i}`, 1, 100_000)), text('x', 1, 1)]), saving('it holds more than 1,000,000 characters of text'))
+  await assert.rejects(saved(Array.from({ length: 100_001 }, (_, i) => rect(`r${i}`, 'R'))), saving('it has more than 100,000 layers'))
+  const root = group('root', [text('in', 1, 1)]) as Design['components'][number]['root']
+  const inst: Layer = { ...base, id: 'i', name: 'i', type: 'instance', component: 'C', overrides: { in: { text: 'a'.repeat(100_001) } } }
+  await assert.rejects(saved([inst], { components: [{ id: 'C', name: 'C', root }] }), saving('an override holds more than 100,000 characters'))
+  // at each limit it saves, and opens again with nothing to note
+  deep = rect('r', 'R')
+  for (let i = 0; i < 63; i++) deep = group(`g${i}`, [deep])
+  for (const layers of [[deep], [text('t', 1000, 1)], [text('t', 1, 100_000)], Array.from({ length: 10 }, (_, i) => text(`t${i}`, 1, 100_000))]) {
+    assert.equal((await readDesignZip(await saved(layers))).notes, undefined)
+  }
+})
+
+test('svg markup is capped once cleaned, so a file whose markup grows when cleaned opens and then saves (yH)', async () => {
+  // four svg layers just under 16 MB between them as written, each with 100,000 apostrophes that cleaning writes as &apos;
+  const CAP = 16 * 1024 * 1024
+  const each = Math.floor(CAP / 4) - 10
+  const head = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text x="1" y="9">${"'".repeat(100_000)}</text><path d="M0 0`
+  const tail = '" stroke="#000" fill="none"/></svg>'
+  const svg = head + ' L1 1'.repeat(Math.floor((each - head.length - tail.length) / 5)) + tail
+  const raw = rawDesign([...Array.from({ length: 4 }, (_, i) => ({ ...base, id: `s${i}`, name: 's', type: 'svg', svg })), rrect('r')])
+  assert.ok(svg.length * 4 <= CAP)
+  const f = await readDesignZip(await storedZip(JSON.stringify(raw)))
+  assert.deepEqual(f.notes, ['an SVG layer past 16 MB of SVG in this design (dropped)'])
+  const kept = f.design.artboards[0].layers.filter(l => l.type === 'svg')
+  assert.equal(kept.length, 3)
+  assert.ok(kept.reduce((a, l) => a + (l.type === 'svg' ? l.svg.length : 0), 0) <= CAP)
+  const again = await readDesignZip(await designZipBytes(f))
+  assert.equal(again.notes, undefined)
+  assert.equal(again.design.artboards[0].layers.filter(l => l.type === 'svg').length, 3)
+})
+
+test('ids past 64 characters are renamed without being kept as keys, so 3,000 of 20,000 characters read in under a second (yV)', () => {
+  const pad = '!'.repeat(20_000 - 8)
+  const layers = Array.from({ length: 3000 }, (_, i) => rrect(pad + String(i).padStart(8, '0')))
+  // a connector naming one of them by its long id joins nothing (no id is that long, and none is followed from one)
+  layers.push({ ...base, id: 'c', name: 'c', type: 'connector', from: { layer: layers[0].id }, to: { layer: layers[1].id }, route: 'straight', arrow: 'end' })
+  const raw = rawDesign(layers)
+  const notes: string[] = []
+  let d: Design | undefined
+  const ms = cpuMs(() => (d = validateDesign(raw, notes)))
+  assert.ok(ms < 1000, `3,000 ids of 20,000 characters took ${Math.round(ms)} ms`)
+  assert.deepEqual(notes, ['an id that was not valid (renamed) (3000 times)'])
+  const ids = d!.artboards[0].layers.map(l => l.id)
+  assert.equal(new Set(ids).size, 3001)
+  assert.deepEqual(ids.slice(0, 2), [R56('_'), `${R56('_')}-2`])
+  const c = d!.artboards[0].layers[3000]
+  assert.ok(c.type === 'connector')
+  assert.deepEqual([c.from.layer, c.to.layer], ['', ''])
+})
+const R56 = (s: string): string => s.repeat(56)

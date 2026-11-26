@@ -644,6 +644,43 @@ test('svg and duplicate refuse to take the svg layers past 16 MB, so a save alwa
   assert.equal(all({ design: back.design, assets: {} }).filter(l => l.type === 'svg').length, 5)
 })
 
+test("no op leaves a design past a limit reading enforces, so every save opens again; what's already past one can still change (yA)", async () => {
+  const UNOPENABLE = "That would leave a design that can't be opened: "
+  const at = { visible: true, locked: false, opacity: 1, blend: 'normal' as const, x: 0, y: 0, width: 10, height: 10, rotation: 0, scaleX: 1, scaleY: 1 }
+  const textLayer = (id: string, chars: number): Layer => ({
+    ...at, id, name: id, type: 'text', mode: 'box', align: 'left', valign: 'top', runs: [{ text: 'b'.repeat(chars), font: { family: 'Arial', weight: 400, style: 'normal' }, size: 12 }]
+  })
+  const reopens = async (f: DesignFile): Promise<void> => assert.equal((await readDesignZip(await designZipBytes(f))).notes, undefined)
+  const { file, services } = await fresh()
+  // groups nested 64 deep (a rect grouped 63 times) are fine; 65 are refused, as one batch
+  const nest = (n: number): AgentOp => ({ op: 'apply', ops: [{ op: 'add', type: 'rect', props: { name: 'L0' } }, ...Array.from({ length: n }, (_, i) => ({ op: 'group', layers: [`L${i}`], name: `L${i + 1}` }))] })
+  await assert.rejects(applyDesignOp(file, nest(64), services), { message: `${UNOPENABLE}groups are nested more than 64 deep.` })
+  await reopens((await run(file, services, nest(63))).file)
+  // a text of 100,001 characters, and one of 1,001 runs
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'text', props: { text: 'a'.repeat(100_001), width: 500 } }, {}), { message: /^That would leave a design that can't be opened: layer \w+ holds more than 100,000 characters\.$/ })
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'text', props: { width: 500, runs: Array.from({ length: 1001 }, () => ({ text: 'a' })) } }, {}), { message: /^That would leave a design that can't be opened: layer \w+ has more than 1,000 runs\.$/ })
+  await reopens((await run(file, {}, { op: 'add', type: 'text', props: { text: 'a'.repeat(100_000), width: 500 } }, { op: 'add', type: 'text', props: { width: 500, runs: Array.from({ length: 1000 }, () => ({ text: 'a' })) } })).file)
+  // ten texts of 100,000 characters: one more character anywhere is past 1,000,000
+  const full = await fresh()
+  full.file.design.artboards[0].layers.push(...Array.from({ length: 10 }, (_, i) => textLayer(`t${i}`, 100_000)))
+  await assert.rejects(applyDesignOp(full.file, { op: 'add', type: 'text', props: { text: 'b', width: 500 } }, {}), { message: `${UNOPENABLE}it holds more than 1,000,000 characters of text.` })
+  await reopens(full.file)
+  // 99 groups of 1,000 rects (99,099 layers): a copy of one passes 100,000; a copy of a rect doesn't
+  const many = await fresh()
+  const group = (g: number): Layer => ({ ...at, id: `g${g}`, name: `G${g}`, type: 'group', children: Array.from({ length: 1000 }, (_, i) => ({ ...at, id: `r${g}x${i}`, name: 'R', type: 'rect' }) as Layer) })
+  many.file.design.artboards[0].layers.push(...Array.from({ length: 99 }, (_, g) => group(g)))
+  await assert.rejects(applyDesignOp(many.file, { op: 'duplicate', layer: 'g0' }, {}), { message: `${UNOPENABLE}it has more than 100,000 layers.` })
+  const one = await run(many.file, {}, { op: 'duplicate', layer: 'r0x0' })
+  await reopens(one.file)
+  // a design built past a limit some other way can still be changed, as long as the change doesn't take it further
+  const past = await fresh()
+  past.file.design.artboards[0].layers.push(...Array.from({ length: 11 }, (_, i) => textLayer(`t${i}`, 100_000)), { ...at, id: 'box', name: 'Box', type: 'rect' })
+  await run(past.file, {}, { op: 'set', layer: 'box', props: { x: 5 } })
+  const fixed = await run(past.file, {}, { op: 'delete', layer: 't0' })
+  await reopens(fixed.file)
+  await assert.rejects(applyDesignOp(past.file, { op: 'add', type: 'text', props: { text: 'b', width: 500 } }, {}), { message: `${UNOPENABLE}it holds more than 1,000,000 characters of text.` })
+})
+
 test('designOps works on a design payload and refuses others', async () => {
   const { file, services } = await fresh()
   const payload = { kind: 'design', file } as FilePayload
