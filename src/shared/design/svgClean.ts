@@ -51,8 +51,18 @@ export const MAX_VALUE_REFS = 4
 
 /** Why an SVG over 5 MB is refused: reading drops an svg layer for it, so the ops and saving refuse one in these words. */
 export const SVG_TOO_LARGE = 'This SVG is too large (over 5 MB).'
-const TOO_LARGE = SVG_TOO_LARGE
-const TOO_MANY = 'This SVG has too many elements (over 50,000).'
+
+/**
+ * What one cleaning takes on before it refuses: elements (each once, and again with every <use> expanded), painted
+ * elements and the steps of the walk over chains of paintings, UTF-8 bytes and nesting. CLEAN_LIMITS (the default)
+ * is for SVG from outside; exportLimits raises them for a drawing of our own.
+ */
+export interface CleanLimits { elements: number; painted: number; paintSteps: number; bytes: number; depth: number }
+
+const thousands = (n: number): string => n.toLocaleString('en-US')
+const tooMany = (lim: CleanLimits): string => `This SVG has too many elements (over ${thousands(lim.elements)}).`
+const tooSlow = (lim: CleanLimits): string => `This SVG would take too long to draw (over ${thousands(lim.painted)} painted elements).`
+const tooLarge = (lim: CleanLimits): string => `This SVG is too large (over ${thousands(Math.round(lim.bytes / 1048576))} MB).`
 
 const ELEMENTS = new Set([
   'svg', 'g', 'defs', 'title', 'desc', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text',
@@ -549,10 +559,13 @@ function declarePrefixes(s: string): string {
   return m ? s.slice(0, m.index + 4) + add + s.slice(m.index + 4) : s
 }
 
-/** An SVG's size as the 5 MB check measures it: UTF-8 bytes (any string longer than 5 MB in characters is over it). */
-export function utf8Length(s: string): number {
-  if (s.length > MAX_SVG_BYTES) return s.length
-  if (s.length * 3 <= MAX_SVG_BYTES) return s.length
+/**
+ * An SVG's size as a byte limit (5 MB unless given) measures it: UTF-8 bytes. Any string longer than the limit in
+ * characters is over it, and one a third as long is under it, without counting.
+ */
+export function utf8Length(s: string, limit = MAX_SVG_BYTES): number {
+  if (s.length > limit) return s.length
+  if (s.length * 3 <= limit) return s.length
   return new TextEncoder().encode(s).length
 }
 
@@ -577,13 +590,13 @@ export const elementChildren = (el: Element): Element[] => {
 }
 
 /** Counts elements and nesting without recursion, throwing over the limits. */
-function checkSize(root: Element): void {
+function checkSize(root: Element, lim: CleanLimits): void {
   let count = 0
   const stack: [Element, number][] = [[root, 1]]
   while (stack.length) {
     const [el, depth] = stack.pop()!
-    if (++count > MAX_SVG_ELEMENTS) throw new Error(TOO_MANY)
-    if (depth > MAX_NESTING) throw new Error(`This SVG is nested too deeply (over ${MAX_NESTING} levels).`)
+    if (++count > lim.elements) throw new Error(tooMany(lim))
+    if (depth > lim.depth) throw new Error(`This SVG is nested too deeply (over ${lim.depth} levels).`)
     for (const c of elementChildren(el)) stack.push([c, depth + 1])
   }
 }
@@ -895,8 +908,9 @@ const repaintDecl = (d: Decl): boolean =>
  * short, and the walk over such loops is charged its work against MAX_PAINT_STEPS. Reading which definitions each
  * element paints is charged too, against MAX_PAINTS (every one read is at least one painting). Throws as soon as the
  * count passes MAX_PAINTS. (`sizes` is expandedSizes: what a definition holds counts as it stands, uses expanded.)
+ * `lim` raises MAX_PAINTS, MAX_PAINT_STEPS and the element limit for a drawing of our own (exportLimits).
  */
-function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Element, number>): number {
+function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Element, number>, lim: CleanLimits): number {
   const all = allElements(root)
   // style rules that can name a definition or take one from the parent, indexed by an id, class or element of their
   // selector
@@ -925,7 +939,7 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
   // what reading which definitions elements paint has cost: each one read is at least one painting
   let read = 0
   const charge = (n: number) => {
-    if ((read += n) > MAX_PAINTS) throw new Error(TOO_SLOW)
+    if ((read += n) > lim.painted) throw new Error(tooSlow(lim))
   }
 
   // What an element sets itself, by property, over all its sources: the definitions they name, and whether any takes
@@ -1056,8 +1070,8 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
   // Every element walked is one `sizes` already counted (the page once, and each holder's content once, since that is
   // remembered), so this never passes the element limit; it only guards the walk.
   let work = 0
-  const tooMany = (n: number) => {
-    if (n > MAX_SVG_ELEMENTS) throw new Error(TOO_MANY)
+  const overElements = (n: number) => {
+    if (n > lim.elements) throw new Error(tooMany(lim))
   }
   /** Draws `items` once: how many elements that takes, and how many times each definition gets painted. */
   const draw = (items: [Element, Paints][]): { count: number; tally: Map<Element, number> } => {
@@ -1071,7 +1085,7 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
         continue
       }
       count++
-      tooMany(++work)
+      overElements(++work)
       const p = paintsOf(el, parent)
       tallyPaints(el, p, tally)
       for (const c of elementChildren(el)) stack.push([c, p])
@@ -1135,7 +1149,7 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
   }
   let walked = 0
   const chargeWalk = (n: number) => {
-    if ((walked += n) > MAX_PAINT_STEPS) throw new Error(TOO_SLOW)
+    if ((walked += n) > lim.paintSteps) throw new Error(tooSlow(lim))
   }
   /**
    * What painting `def` once paints in turn: its content's definitions, and its own mask or clip path (a clipped clip).
@@ -1156,8 +1170,8 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     return next
   }
 
-  const tooSlow = (n: number) => {
-    if (n > MAX_PAINTS) throw new Error(TOO_SLOW)
+  const overPainted = (n: number) => {
+    if (n > lim.painted) throw new Error(tooSlow(lim))
   }
   /**
    * Everything one painting of `top` paints: its content, and every painting that content asks for in turn, walked
@@ -1182,7 +1196,7 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     open(top, 1)
     for (;;) {
       const f = frames[frames.length - 1]
-      tooSlow(f.total) // every total is painted at least once, so this alone is already too much
+      overPainted(f.total) // every total is painted at least once, so this alone is already too much
       if (f.i < f.next.length) {
         const [def, k] = f.next[f.i++]
         const at = depth.get(def)
@@ -1205,7 +1219,7 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
   let painted = 0
   for (const [def, times] of page.tally) {
     painted += times * (totals.get(def) ?? totalOf(def))
-    tooSlow(painted)
+    overPainted(painted)
   }
   return painted
 }
@@ -1265,9 +1279,10 @@ function dropDeadUses(uses: Element[], ids: Map<string, Element>, notes: Notes):
  * Every reference must name an id that exists in the fragment. Drops <use> elements whose target is missing (or is
  * such a use), then those whose chain of references is deeper than 8 (or loops), then any other href or url(#id) left
  * pointing nowhere; refuses the SVG when it would draw more than 50,000 elements with every <use> expanded, or paint
- * more than 1,000,000 through its markers, patterns, masks and clip paths. Returns both counts.
+ * more than 1,000,000 through its markers, patterns, masks and clip paths (or the limits `lim` raises them to).
+ * Returns both counts.
  */
-function checkReferences(root: Element, notes: Notes): { drawn: number; painted: number } {
+function checkReferences(root: Element, notes: Notes, lim: CleanLimits): { drawn: number; painted: number } {
   let all = allElements(root)
   // one element per id: the first keeps it (as a browser resolves it), later ones lose theirs
   const seenIds = new Set<string>()
@@ -1307,7 +1322,7 @@ function checkReferences(root: Element, notes: Notes): { drawn: number; painted:
     }
     const size = overGraph(all, target, (_el, kids, via) => 1 + kids.reduce((a, v) => a + v, 0) + (via ?? 0))
     drawn = size.get(root) ?? Infinity
-    if (drawn > MAX_SVG_ELEMENTS) throw new Error(TOO_MANY)
+    if (drawn > lim.elements) throw new Error(tooMany(lim))
   }
   dropMissingHrefs(all, ids, notes)
   // url(#id) must name an id that is still here
@@ -1336,7 +1351,7 @@ function checkReferences(root: Element, notes: Notes): { drawn: number; painted:
   }
   // markers, patterns, masks and clip paths paint their content again wherever they're used: counted, against their
   // own budget, once the references that stay are known
-  const painted = all.some(el => REPAINT_KINDS.has(el.localName)) ? paintedCount(root, ids, expandedSizes(root, ids)) : 0
+  const painted = all.some(el => REPAINT_KINDS.has(el.localName)) ? paintedCount(root, ids, expandedSizes(root, ids), lim) : 0
   return { drawn, painted }
 }
 
@@ -1425,33 +1440,53 @@ function write(el: Element, root: boolean, out: string[]): void {
 /**
  * Cleans SVG text into its root element (see cleanSvg), with how many elements it draws (every element once, every
  * <use> expanded) and how many its markers, patterns, masks and clip paths paint (their content, each time it's
- * painted).
+ * painted). `lim` is what it takes on before refusing (CLEAN_LIMITS unless given).
  */
-export function cleanSvgRoot(svg: string): { root: Element; removed: string[]; drawn: number; painted: number } {
+export function cleanSvgRoot(svg: string, lim: CleanLimits = CLEAN_LIMITS): { root: Element; removed: string[]; drawn: number; painted: number } {
   if (typeof svg !== 'string') throw new Error('An SVG must be text.')
-  if (utf8Length(svg) > MAX_SVG_BYTES) throw new Error(TOO_LARGE)
+  if (utf8Length(svg, lim.bytes) > lim.bytes) throw new Error(tooLarge(lim))
   const notes = new Notes()
   const root = parseSvgText(declarePrefixes(stripDoctype(svg, notes)))
   if (root.localName !== 'svg' || root.namespaceURI !== SVG_NS) {
     throw new Error(`This is not an SVG: its root element is <${root.nodeName}>.`)
   }
-  checkSize(root)
+  checkSize(root, lim)
   // only the root is written back, so anything before it goes; a linked style sheet there is worth naming
   for (let n = root.ownerDocument?.firstChild; n; n = n.nextSibling) {
     if (n.nodeType === 7 && (n as ProcessingInstruction).target === 'xml-stylesheet') notes.add('a linked style sheet')
   }
   cleanAttributes(root, notes)
   cleanChildren(root, notes)
-  const { drawn, painted } = checkReferences(root, notes)
+  const { drawn, painted } = checkReferences(root, notes, lim)
   return { root, removed: notes.list(), drawn, painted }
 }
 
 /**
  * SVG from outside, made safe to store, show and share: only allowlisted elements and attributes, references only to
  * the fragment's own ids or embedded images, and `removed` naming each thing that went. Throws over 5 MB, 50,000
- * elements or 1,000,000 painted elements.
+ * elements or 1,000,000 painted elements (or the limits `lim` gives).
  */
-export function cleanSvg(svg: string): { svg: string; removed: string[]; drawn: number; painted: number } {
-  const { root, removed, drawn, painted } = cleanSvgRoot(svg)
+export function cleanSvg(svg: string, lim: CleanLimits = CLEAN_LIMITS): { svg: string; removed: string[]; drawn: number; painted: number } {
+  const { root, removed, drawn, painted } = cleanSvgRoot(svg, lim)
   return { svg: serializeSvg(root), removed, drawn, painted }
+}
+
+/** What SVG from outside may take on: 50,000 elements, 1,000,000 painted, 5 MB and 256 levels. */
+export const CLEAN_LIMITS: CleanLimits = {
+  elements: MAX_SVG_ELEMENTS, painted: MAX_PAINTS, paintSteps: MAX_PAINT_STEPS, bytes: MAX_SVG_BYTES, depth: MAX_NESTING
+}
+
+/**
+ * The limits for cleaning a drawing of our own (an export, or svg --get) that inlines `svgLayers` svg layers. Each svg
+ * layer was held to CLEAN_LIMITS when it came in and is cleaned again on every read, so the drawing may hold that much
+ * again for each one on top of the outside limits: elements, painted elements and paint steps grow by the outside
+ * amount per layer, so the ceiling stays real. Bytes are bounded by the renderer itself (its 128 MB of characters, at
+ * most 3 UTF-8 bytes each), since embedded images alone pass 5 MB, and nesting gets room for the groups and instances
+ * a fragment sits in.
+ */
+export function exportLimits(svgLayers: number): CleanLimits {
+  const k = 1 + Math.max(0, Math.floor(svgLayers) || 0)
+  return {
+    elements: MAX_SVG_ELEMENTS * k, painted: MAX_PAINTS * k, paintSteps: MAX_PAINT_STEPS * k, bytes: 3 * 128 * 1024 * 1024, depth: 2 * MAX_NESTING
+  }
 }

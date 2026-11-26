@@ -181,6 +181,21 @@ function RecentView(props: {
   )
 }
 
+/** A design's card art: the thumbnail its file holds, or the kind's icon when it has none or it's stale. */
+function DesignArt(props: { path: string; time: number }) {
+  const [src, setSrc] = useState<string | null>(null)
+  useEffect(() => {
+    let gone = false
+    api.designThumbnail(props.path).then(
+      url => !gone && setSrc(url),
+      () => !gone && setSrc(null)
+    )
+    return () => void (gone = true)
+  }, [props.path, props.time])
+  if (!src) return <KindIcon kind="design" size={48} />
+  return <img className="file-card-thumb" src={src} alt="" draggable={false} onError={() => setSrc(null)} />
+}
+
 function FileList(props: {
   view: 'list' | 'grid'
   items: { path: string; kind: Kind; time: number }[]
@@ -195,7 +210,7 @@ function FileList(props: {
       <div className="file-grid">
         {props.items.map(it => (
           <button key={it.path} className="file-card" onClick={() => props.onOpen(it.path)} title={it.path}>
-            <div className={`file-card-art ${it.kind}`}><KindIcon kind={it.kind} size={48} /></div>
+            <div className={`file-card-art ${it.kind}`}>{it.kind === 'design' ? <DesignArt path={it.path} time={it.time} /> : <KindIcon kind={it.kind} size={48} />}</div>
             <div className="file-card-meta">
               <KindIcon kind={it.kind} size={18} />
               <span className="grow ellipsis">{baseName(it.path)}</span>

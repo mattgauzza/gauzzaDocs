@@ -1,17 +1,25 @@
 import { Suspense, useEffect, useRef, useState } from 'react'
+import { fontsFor } from '../../../shared/design/fonts'
+import { designToSvg } from '../../../shared/design/render'
+import type { DesignFile } from '../../../shared/design/types'
 import type { Kind } from '../../../shared/kinds'
 import type { FilePayload, Settings } from '../../../shared/types'
 import { slideHtml } from '../../../shared/slides/html'
+import { designNotes } from '../design/notes'
+import { rasterize } from '../design/raster'
 import { EDITORS } from '../editors'
 import { api } from '../lib'
 import { CONTENT_H, MARGIN } from '../doc/pagination'
 
 /**
  * The hidden window that lets agents see a file (`gdocs look`). Main sends the content (the open tab's, unsaved
- * changes included, or the file from disk), this mounts the same editor the app uses, and main captures it one
- * page, slide or screen at a time. Nothing here saves or changes anything.
+ * changes included, or the file from disk), this mounts the same editor the app uses (a design's artboards are drawn
+ * as the design editor draws them), and main captures it one page, slide, artboard or screen at a time. Nothing here
+ * saves or changes anything. PNG export draws here too ('design-raster').
  */
-interface Job { n: number; path: string; kind: Kind; payload: FilePayload; settings: Settings }
+/** A design's artboard as shown: its drawing at the size shown, and whether it's see-through. */
+interface Board { id: string; width: number; height: number; clear: boolean; svg: string }
+interface Job { n: number; path: string; kind: Kind; payload: FilePayload; settings: Settings; boards?: Board[] }
 interface Rect { x: number; y: number; width: number; height: number }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -84,13 +92,27 @@ function slideNotes(): string[] {
   return notes
 }
 
+/**
+ * A design's artboards drawn as the editor draws them (designToSvg, raster mode), each at its own size up to `side` px
+ * on its long side, with the notes for them (text that doesn't fit, layers past the edge).
+ */
+async function drawDesign(f: DesignFile, side: number): Promise<{ boards: Board[]; notes: string[] }> {
+  const fonts = await fontsFor(f.design, f.assets, ref => api.designFontBytes(ref).catch(() => null), await api.designFallbackFont())
+  const boards = f.design.artboards.map(a => {
+    const k = Math.min(1, side / Math.max(a.width, a.height, 1))
+    const size = { width: Math.max(1, Math.round(a.width * k)), height: Math.max(1, Math.round(a.height * k)) }
+    return { id: a.id, ...size, clear: !a.background, svg: designToSvg(f.design, a.id, { fonts, assets: f.assets, mode: 'raster', size }) }
+  })
+  return { boards, notes: designNotes(f.design, fonts) }
+}
+
 export default function Look() {
   const [job, setJob] = useState<Job | null>(null)
   const ready = useRef<(() => void) | null>(null)
   const kind = useRef<Kind>('doc')
 
   useEffect(() => {
-    const offPrepare = window.gd.serve('look-prepare', async (req: Omit<Job, 'n' | 'settings'> & { theme?: string }) => {
+    const offPrepare = window.gd.serve('look-prepare', async (req: Omit<Job, 'n' | 'settings' | 'boards'> & { theme?: string; side?: number }) => {
       const settings = await api.settings()
       const theme = req.theme || settings.theme
       if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
@@ -98,6 +120,16 @@ export default function Look() {
       kind.current = req.kind
       setJob(null)
       await frames()
+      if (req.payload.kind === 'design') {
+        const { boards, notes } = await drawDesign(req.payload.file, req.side ?? 1600)
+        setJob({ ...req, settings, n: Date.now(), boards })
+        await frames()
+        // pictures inside the drawing decode on their own time
+        const images = [...document.querySelectorAll('.look-artboard image')] as unknown as { decode?: () => Promise<void> }[]
+        await Promise.race([Promise.all(images.map(i => i.decode?.().catch(() => {}))), sleep(5000)])
+        await frames()
+        return { unit: 'artboard', total: boards.length, notes }
+      }
       const settled = new Promise<void>(r => (ready.current = r))
       setJob({ ...req, settings, n: Date.now() })
       if (req.kind === 'slides') ready.current?.()
@@ -111,9 +143,9 @@ export default function Look() {
     })
 
     const offShot = window.gd.serve('look-shot', async (req: { index: number }): Promise<Rect> => {
-      if (kind.current === 'slides') {
+      if (kind.current === 'slides' || kind.current === 'design') {
         const unit = document.querySelectorAll<HTMLElement>('.look-unit')[req.index]
-        if (!unit) throw new Error(`There is no slide ${req.index + 1}`)
+        if (!unit) throw new Error(`There is no ${kind.current === 'design' ? 'artboard' : 'slide'} ${req.index + 1}`)
         unit.scrollIntoView({ block: 'start' })
         await frames()
         const r = unit.getBoundingClientRect()
@@ -133,10 +165,27 @@ export default function Look() {
       const r = el.getBoundingClientRect()
       return { x: Math.round(r.left), y: Math.round(r.top), width: el.clientWidth, height: el.clientHeight }
     })
-    return () => (offPrepare(), offShot())
+    // PNG export: a design drawn in raster mode, to PNG bytes at its pixel size
+    const offRaster = window.gd.serve('design-raster', (req: { svg: string; width: number; height: number }) => rasterize(req.svg, req.width, req.height))
+    return () => (offPrepare(), offShot(), offRaster())
   }, [])
 
   if (!job) return <div className="look-host" />
+  if (job.boards) {
+    return (
+      <div className="look-host look-design">
+        {job.boards.map(b => (
+          <div
+            key={b.id}
+            className={`look-unit look-artboard${b.clear ? ' clear' : ''}`}
+            style={{ width: b.width, height: b.height }}
+            // our own renderer's output: every value in it is escaped, and svg layers are drawn as images
+            dangerouslySetInnerHTML={{ __html: b.svg }}
+          />
+        ))}
+      </div>
+    )
+  }
   if (job.payload.kind === 'slides') {
     const deck = job.payload.deck
     return (

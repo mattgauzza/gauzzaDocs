@@ -3,7 +3,7 @@ import { type Box, boxOf, centerOf, fin, layerIndex } from '../design/geometry'
 import { ARTBOARD_TOO_LARGE, MAX_ARTBOARD_SIDE, PRESETS, artboardOf, newId, walk } from '../design/model'
 import { parsePath, pathBounds } from '../design/path'
 import { type Downgrade, designToSvg } from '../design/render'
-import { cleanSvg } from '../design/svgClean'
+import { cleanSvg, exportLimits } from '../design/svgClean'
 import { importSvg, layerAsSvg } from '../design/svgImport'
 import { cleanText, num as fmt, textReport } from '../design/text'
 import type { Artboard, BlendMode, Component, Design, DesignFile, Diagram, ElkGraph, Layer, Override, Paint, TextRun } from '../design/types'
@@ -25,8 +25,10 @@ import { OpError, type OpHandler, type OpServices, str } from './types'
  *                                                 `id  name  type  x,y wxh  "text"  flags`, indented by depth
  *   read { format: "text", allArtboards? }      -> { content }: the same as plain lines (every artboard's with allArtboards)
  *   info                                        -> { artboards, layers }: how many of each
- *   export { format?: "svg", width? }           -> { svg, artboard, width, height, leftOut? }: the artboard as an SVG file
- *                                                 (no fonts embedded); width sizes the root and keeps the view box
+ *   export { format?: "svg"|"png", width?, scale? } -> { svg, artboard, width, height, artboards, svgLayers, leftOut? }:
+ *                                                 the artboard as an SVG file (no fonts embedded); width sizes the root
+ *                                                 and keeps the view box. png: drawn as the editor draws it, sized to
+ *                                                 the PNG's pixels (width or the artboard's, times scale 1 or 2)
  *   add { type, props?, parent?, index? }       -> { ids }
  *   set { layer, props, part?, allArtboards? }  -> { ids }   (`part` writes an instance's override for that inner layer)
  *   delete { layer, allArtboards? }             -> { ids }
@@ -280,19 +282,47 @@ function infoOp(d: Draft): unknown {
   return { artboards: d.design.artboards.length, layers }
 }
 
+/** The most a PNG export can be: 16,384 px per side, and 268,435,456 pixels (16,384 squared) in all. */
+export const MAX_PNG_SIDE = 16384
+export const MAX_PNG_PIXELS = MAX_PNG_SIDE * MAX_PNG_SIDE
+
 /**
- * The artboard as a standalone SVG file, drawn by designToSvg in export mode (fonts are never embedded). `width` sets
- * the root's width and height, keeping its shape and view box. Layers the drawing leaves out are listed in `leftOut`.
+ * A PNG's size in whole pixels: `width` (else the artboard's), keeping the artboard's shape, times `scale`. Past
+ * MAX_PNG_SIDE on a side or MAX_PNG_PIXELS in all it's refused, naming the limit and the size asked for.
+ */
+export function pngSize(boardWidth: number, boardHeight: number, width: number | undefined, scale: number): { width: number; height: number } {
+  const w = (width ?? boardWidth) * scale
+  const h = (width === undefined || !boardWidth ? boardHeight : (boardHeight * width) / boardWidth) * scale
+  const out = { width: Math.max(1, Math.round(w)), height: Math.max(1, Math.round(h)) }
+  if (out.width > MAX_PNG_SIDE || out.height > MAX_PNG_SIDE || out.width * out.height > MAX_PNG_PIXELS) {
+    const n = (v: number) => v.toLocaleString('en-US')
+    throw new OpError(
+      `A PNG can be at most ${n(MAX_PNG_SIDE)} px per side (${n(MAX_PNG_PIXELS)} pixels in all). This one would be ${n(out.width)} x ${n(out.height)} px.`
+    )
+  }
+  return out
+}
+
+/**
+ * The artboard as a standalone SVG, drawn by designToSvg. For svg, in export mode (fonts are never embedded): `width`
+ * sets the root's width and height, keeping its shape and view box. For png, as the editor draws it (raster mode), with
+ * the root sized to the PNG's pixels (pngSize: `width` or the artboard's, times `scale`, 1 or 2) for the app's window
+ * to draw. Layers the drawing leaves out are listed in `leftOut`. `artboards` names every artboard (an export of all of
+ * them asks for each in turn) and `svgLayers` says how many svg layers were inlined (what cleaning allows for them).
  */
 function exportOp(d: Draft, op: AgentOp): unknown {
   const board = boardOf(d, op)
-  if (op.format !== undefined) oneOf('format', op.format, ['svg'] as const)
+  const format = op.format === undefined ? 'svg' : oneOf('format', op.format, ['svg', 'png'] as const)
   const fonts = d.services.fonts
   if (!fonts) throw new OpError('Exporting needs fonts to measure text, and none were given')
   let width = fin(board.width, 0)
   let height = fin(board.height, 0)
   let size: { width: number; height: number } | undefined
-  if (op.width !== undefined) {
+  if (format === 'png') {
+    const scale = op.scale === undefined ? 1 : Number(oneOf('scale', String(op.scale), ['1', '2'] as const))
+    size = pngSize(width, height, op.width === undefined ? undefined : number('width', op.width, 1), scale)
+    ;({ width, height } = size)
+  } else if (op.width !== undefined) {
     // rounded as the drawing writes them, so the reply says exactly what the file holds
     const round = (v: number) => Math.round(v * 100) / 100
     const w = round(number('width', op.width, 1, MAX_SIZE))
@@ -300,8 +330,13 @@ function exportOp(d: Draft, op: AgentOp): unknown {
     ;({ width, height } = size)
   }
   const downgrades: Downgrade[] = []
-  const svg = designToSvg(d.design, board.id, { fonts, assets: d.assets, mode: 'export', downgrades, size })
-  const result: Record<string, unknown> = { svg, artboard: { id: board.id, name: board.name }, width, height }
+  const counts = { svg: 0 }
+  const mode = format === 'png' ? 'raster' : 'export'
+  const svg = designToSvg(d.design, board.id, { fonts, assets: d.assets, mode, downgrades, size, counts })
+  const result: Record<string, unknown> = {
+    svg, artboard: { id: board.id, name: board.name }, width, height,
+    artboards: d.design.artboards.map(a => ({ id: a.id, name: a.name })), svgLayers: counts.svg
+  }
   if (downgrades.length) result.leftOut = downgrades
   return result
 }
@@ -798,7 +833,11 @@ function svgOp(d: Draft, op: AgentOp): unknown {
     const fonts = d.services.fonts
     if (!fonts) throw new OpError('Getting SVG needs fonts to measure text, and none were given')
     const opts = { fonts, assets: d.assets, mode: 'export' as const }
-    if (op.get === true || op.get === '') return { svg: cleanSvg(designToSvg(d.design, board.id, opts)).svg }
+    if (op.get === true || op.get === '') {
+      const counts = { svg: 0 }
+      const whole = designToSvg(d.design, board.id, { ...opts, counts })
+      return { svg: cleanSvg(whole, exportLimits(counts.svg)).svg }
+    }
     return { svg: layerAsSvg(d.design, layerOn(board, op.get), opts) }
   }
   if (typeof op.svg !== 'string' || !op.svg.trim()) throw new OpError('"svg" needs svg (the SVG text to import) or get (a layer)')

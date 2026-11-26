@@ -1,10 +1,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Command } from 'commander'
+import { type ExportOptions, type ExportResult, exportDesign } from '../core/design/export'
 import { kindOf } from '../shared/kinds'
 import { DEFAULT_FONT, list, upTo } from '../shared/ops/designLayers'
 import type { AgentOp } from '../shared/types'
-import { type Ctx, RENDER_NEEDS_APP, appRunning, liveOptions } from './common'
+import { type Ctx, RENDER_NEEDS_APP, call, liveOptions, refuseOpenDesign } from './common'
 
 // gdocs design ...: commands for designs (.gdesign). Each runs one design op (src/shared/ops/design.ts) through
 // ctx.run, so it lands in the open editor as one undo step when the app has the design open, and on disk otherwise.
@@ -79,18 +80,6 @@ function jsonInput(ctx: Ctx, v: string | undefined, what: string): unknown {
     throw new Error(`${what} must be JSON: ${(e as Error).message}`)
   }
 }
-
-/**
- * A name made safe for a file name on any system: no characters Windows refuses (\ / : * ? " < > | and control
- * characters), spaces in their place, no dots or spaces at the end, at most 100 characters.
- */
-const fileNamePart = (name: string): string =>
-  name
-    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .slice(0, 100)
-    .replace(/[\s.]+$/, '')
-    .trim()
 
 function diagramText(r: DiagramResult): string {
   const w = Math.max(0, ...[...Object.keys(r.nodes), ...Object.keys(r.containers)].map(k => k.length))
@@ -366,37 +355,46 @@ export function registerDesignCommands(program: Command, ctx: Ctx) {
     onArtboard(
       d
         .command('export <file>')
-        .description('save an artboard as SVG (works without the app) or PNG (needs the app). Fonts are not embedded in SVG')
+        .description(
+          'save each artboard (or the one --artboard names) as SVG, which works without the app, or PNG, which needs it. ' +
+            'Fonts are not embedded in SVG'
+        )
         .option('--format <format>', 'svg or png', 'svg')
-        .option('--scale <n>', 'png: 1 or 2')
-        .option('--width <px>', 'width of the image, keeping its shape (svg: the size it opens at)')
-        .option('--out <path>', 'where to save it, or "-" to print it (default: beside the design as <name>.svg, or <name> <artboard>.svg with --artboard)')
+        .option('--scale <n>', 'png: 1 or 2, times the size')
+        .option('--width <px>', 'width, keeping the shape (svg: the size it opens at; png: the pixels before --scale)')
+        .option(
+          '--out <path>',
+          'a file, a folder or "-" to print the SVG (default: beside the design as <name>.<ext>, or <name> <artboard>.<ext> ' +
+            'for each of several artboards or with --artboard)'
+        )
     )
   ).action(async (file: string, o) => {
     const format = String(o.format).toLowerCase()
     if (format !== 'svg' && format !== 'png') throw new Error('--format must be svg or png')
     const p = path.resolve(design(file))
     if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
-    // --scale is for png only: svg ignores it
-    if (format === 'png') {
+    const opts: ExportOptions = { format, artboard: o.artboard, width: o.width, out: o.out === undefined || o.out === '-' ? o.out : path.resolve(o.out) }
+    let r: ExportResult
+    if (format === 'svg') r = await exportDesign(p, opts, { run: op => ctx.run(p, op, o) })
+    else {
+      // only the app's window can draw a design to pixels: it draws and writes the PNG files
       if (o.scale !== undefined && !['1', '2'].includes(String(o.scale))) throw new Error('--scale must be 1 or 2')
-      if (!(await appRunning())) throw new Error(RENDER_NEEDS_APP)
-      throw new Error("PNG export isn't available yet.")
+      if (o.offline) await refuseOpenDesign(p)
+      const params = { path: p, ...opts, scale: o.scale, live: !!o.live, focus: o.focus !== false, agent: { name: ctx.agent() } }
+      const got = (await call('designExport', params)) as ExportResult | null
+      if (!got) throw new Error(RENDER_NEEDS_APP)
+      r = got
     }
-    const r = (await ctx.run(p, { op: 'export', format: 'svg', width: o.width, artboard: o.artboard }, o)) as {
-      svg: string; artboard: { id: string; name: string }; leftOut?: { layer: string; name: string; reason: string }[]
+    // stdout is the files alone (or the SVG); what the format can't hold and what the drawing left out go to stderr
+    if (!ctx.json()) {
+      for (const s of r.downgrades) process.stderr.write(`${s}\n`)
+      if (r.leftOut.length) {
+        const where = new Set(r.leftOut.map(l => l.artboard)).size > 1
+        const what = r.leftOut.map(l => `${l.name || l.layer}${where ? ` on ${l.artboard}` : ''} (${l.reason})`)
+        process.stderr.write(`Left out ${upTo(what, 10)}.\n`)
+      }
     }
-    if (o.out === '-') return ctx.out(r, () => r.svg)
-    // beside the design, named after it, and after the artboard when one was asked for (so one never replaces another)
-    const stem = path.basename(p, path.extname(p))
-    const named = o.artboard === undefined ? stem : `${stem} ${fileNamePart(r.artboard.name) || r.artboard.id}`
-    const out = path.resolve(o.out ?? path.join(path.dirname(p), `${named}.svg`))
-    fs.writeFileSync(out, r.svg)
-    const { svg: _svg, ...rest } = r
-    // stdout is the path alone; what the drawing left out goes beside it
-    if (!ctx.json() && r.leftOut?.length) {
-      process.stderr.write(`Left out ${upTo(r.leftOut.map(l => `${l.name || l.layer} (${l.reason})`), 10)}.\n`)
-    }
-    ctx.out({ ...rest, path: out }, () => out)
+    if (r.content !== undefined) return ctx.out(r, () => r.content!)
+    ctx.out(r, () => r.files.join('\n'))
   })
 }

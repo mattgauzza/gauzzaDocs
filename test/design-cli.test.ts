@@ -117,16 +117,41 @@ test('export --format svg --out x.svg writes a file with inkscape:label', () => 
   assert.match(fs.readFileSync(beside, 'utf8'), /width="250" height="250" viewBox="0 0 1000 1000"/)
 })
 
-test('export --artboard with no --out names the file after the artboard and leaves <name>.svg alone', () => {
+test('export names: one file per artboard as <name> <artboard>.svg, --artboard picks one, --out takes a folder', () => {
   const file = newDesign('Campaign', 'instagram')
   ok(['design', 'artboard', 'add', file, '--name', 'Story: v2/final?', '--size', 'story'])
-  const first = ok(['design', 'export', file]).trim()
-  assert.equal(first, path.join(work, 'Campaign.svg'))
-  const before = fs.readFileSync(first, 'utf8')
-  const second = ok(['design', 'export', file, '--artboard', 'Story: v2/final?']).trim()
-  assert.equal(second, path.join(work, 'Campaign Story v2 final.svg'))
-  assert.match(fs.readFileSync(second, 'utf8'), /width="1080" height="1920"/)
-  assert.equal(fs.readFileSync(first, 'utf8'), before, 'the first artboard\'s file is untouched')
+  // several artboards: each one beside the design, named after it
+  const both = ok(['design', 'export', file]).trim().split(/\r?\n/)
+  assert.deepEqual(both, [path.join(work, 'Campaign Instagram post.svg'), path.join(work, 'Campaign Story v2 final.svg')])
+  assert.equal(fs.existsSync(path.join(work, 'Campaign.svg')), false)
+  assert.match(fs.readFileSync(both[1], 'utf8'), /width="1080" height="1920"/)
+  // --artboard: that one only
+  fs.rmSync(both[1])
+  const one = ok(['design', 'export', file, '--artboard', 'Story: v2/final?']).trim()
+  assert.equal(one, both[1])
+  // --out a folder: the same names in it
+  const into = fs.mkdtempSync(path.join(work, 'out-'))
+  assert.deepEqual(ok(['design', 'export', file, '--out', into]).trim().split(/\r?\n/), both.map(b => path.join(into, path.basename(b))))
+  // --out a file or "-" needs one artboard
+  for (const out of ['one.svg', '-']) {
+    const r = gdocs(['design', 'export', file, '--out', out])
+    assert.notEqual(r.code, 0)
+    assert.equal(r.stderr.trim(), 'error: This design has 2 artboards. Pick one with --artboard, or give --out a folder.')
+  }
+  assert.equal(fs.existsSync(path.join(work, 'one.svg')), false)
+  assert.match(ok(['design', 'export', file, '--artboard', 'Instagram post', '--out', '-']), /^<svg [^>]*width="1080" height="1080"/)
+  // one artboard: <name>.svg
+  const solo = newDesign('Solo')
+  assert.equal(ok(['design', 'export', solo]).trim(), path.join(work, 'Solo.svg'))
+})
+
+test('export prints what SVG cannot hold to stderr, and the path alone to stdout', () => {
+  const file = newDesign('Blend')
+  ok(['design', 'add', file, '--type', 'rect', '--name', 'Glow', '--props', '{"blend":"multiply"}'])
+  const r = gdocs(['design', 'export', file])
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(r.stdout.trim(), path.join(work, 'Blend.svg'))
+  assert.match(r.stderr, /Blend modes may be flattened by tools other than browsers and Inkscape\./)
 })
 
 test('reads never wait on or touch a lock another writer holds: svg --get, export and info', () => {

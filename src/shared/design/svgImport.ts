@@ -9,7 +9,7 @@ import { type RenderOptions, layerToSvg } from './render'
 import { sharedAssetName } from './sha256'
 import {
   INKSCAPE_NS, MAX_PAINTS, MAX_SVG_BYTES, MAX_SVG_ELEMENTS, MAX_USE_DEPTH, PRESENTATION, SVG_NS, TOO_SLOW, XLINK_NS, allElements, cleanSvg,
-  cleanSvgRoot, dataUriBytes, expandedSizes, elementChildren, hrefId, idMap, imageInfo, serializeSvg, urlRefs
+  cleanSvgRoot, dataUriBytes, expandedSizes, elementChildren, exportLimits, hrefId, idMap, imageInfo, serializeSvg, urlRefs
 } from './svgClean'
 import { type PaintSpace, type Style, type Viewport, alphaOf, diagonal, len, paintOf, urlId } from './svgPaint'
 import { applyStyles } from './svgFragment'
@@ -867,7 +867,8 @@ export function importSvg(svg: string, name: string, opts: ImportOptions = {}): 
 /**
  * One layer as a standalone, clean SVG in its own coordinates: moved so its box starts at 0,0, with the root sized to
  * the box. It renders in export mode, so svg layers inside a group come out inline (as an image they'd be cleaned
- * away). An `svg` layer gives its own document at the layer's size.
+ * away), and it's cleaned with room for each of them (exportLimits). An `svg` layer gives its own document at the
+ * layer's size.
  */
 export function layerAsSvg(design: Design, layer: Layer, opts: RenderOptions): string {
   const b = boxOf(layer)
@@ -881,8 +882,9 @@ export function layerAsSvg(design: Design, layer: Layer, opts: RenderOptions): s
     return cleanSvg(serializeSvg(root)).svg
   }
   const move = b.x || b.y ? ` transform="translate(${num(-b.x, 3)} ${num(-b.y, 3)})"` : ''
+  const counts = { svg: 0 }
   const doc =
     `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" xmlns:inkscape="${INKSCAPE_NS}" width="${W}" height="${H}" ` +
-    `viewBox="0 0 ${W} ${H}"><g${move}>${layerToSvg(design, layer, { ...opts, mode: 'export' })}</g></svg>`
-  return cleanSvg(doc).svg
+    `viewBox="0 0 ${W} ${H}"><g${move}>${layerToSvg(design, layer, { ...opts, mode: 'export', counts })}</g></svg>`
+  return cleanSvg(doc, exportLimits(counts.svg)).svg
 }

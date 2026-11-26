@@ -201,6 +201,26 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile & { n
 }
 
 /**
+ * The thumbnail a design file holds, for its card on the Home screen. Null when it holds none, when its design.json
+ * says the thumbnail is stale (saved without the app since it was drawn), or when the file can't be read. Only
+ * design.json and thumbnail.png are inflated.
+ */
+export async function readDesignThumbnail(bytes: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    const zip = await openChecked(bytes)
+    const d = zip.files[DESIGN]
+    const t = zip.files[THUMB]
+    if (!d || d.dir || !t || t.dir) return null
+    const budget: Budget = { left: MAX_UNCOMPRESSED }
+    const raw: unknown = JSON.parse(Buffer.from(await readEntry(d, DESIGN, MAX_DESIGN_JSON, budget)).toString('utf8'))
+    if (!raw || typeof raw !== 'object' || (raw as { thumbnailStale?: unknown }).thumbnailStale === true) return null
+    return await readEntry(t, THUMB, MAX_THUMBNAIL, budget)
+  } catch {
+    return null
+  }
+}
+
+/**
  * Writes the file. Assets the design refers to but `f.assets` lacks are copied from `base` (the file as it is on disk),
  * and assets nothing refers to are dropped, so autosave only has to send design.json and new assets. A design that
  * couldn't be opened again exactly as it is (past any limit reading enforces, including the zip's own: 10,000 entries

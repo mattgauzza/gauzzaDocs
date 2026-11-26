@@ -33,8 +33,8 @@ export interface RunOpts { live?: boolean; offline?: boolean; agent?: string; fo
 
 export const OPEN_IN_APP = 'This design is open in gauzzaDocs. Edit it there, or close it first.'
 
-/** What drawing a design to pixels (PNG export, gdocs look, thumbnails) says when the app isn't running. */
-export const RENDER_NEEDS_APP = 'Start gauzzaDocs to render designs. Editing and SVG export work without it.'
+// RENDER_NEEDS_APP: what drawing a design to pixels (PNG export, gdocs look, thumbnails) says when the app isn't running
+export { RENDER_NEEDS_APP } from '../core/design/export'
 
 /**
  * A design open in the app takes every op in its editor: one made on disk would land under the editor's undo history,
@@ -84,6 +84,8 @@ export interface Ctx {
   run: (file: string, op: AgentOp, cmdOpts?: Record<string, unknown>) => Promise<unknown>
   /** Reads a value that may be "-" (standard input) or "@file" (contents of a file). */
   input: (v: string | undefined) => string
+  /** Who is running the command, for the app: --agent, else GDOCS_AGENT, else "Agent". */
+  agent: () => string
 }
 
 /** Options every editing command takes. */

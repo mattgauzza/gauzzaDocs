@@ -7,7 +7,7 @@ import { loadPdf } from './formats/pdf'
 import { loadSheet, sheetBytes } from './formats/sheet'
 import { loadText, textBytes } from './formats/text'
 import { backupSlidesOriginal, loadSlides, slidesBytes } from './formats/slides' // slides
-import { designZipBytes, readDesignZip } from './formats/design'
+import { designZipBytes, readDesignThumbnail, readDesignZip } from './formats/design'
 import { withDesignLock } from './design/lock'
 import { type WriteContext, guardedWrite, writeAtomic } from './history'
 import { newDeck } from '../shared/slides/model' // slides
@@ -37,6 +37,31 @@ async function loadDesign(file: string): Promise<FilePayload & { kind: 'design' 
 export function designPayload(read: Awaited<ReturnType<typeof readDesignZip>>): FilePayload & { kind: 'design' } {
   const { notes, ...file } = read
   return notes?.length ? { kind: 'design', file, notes } : { kind: 'design', file }
+}
+
+/** Designs larger than this show their kind's icon on the Home screen: reading one whole for its thumbnail costs too much. */
+const THUMBNAIL_FILE_LIMIT = 128 * 1024 * 1024
+/** Thumbnails read for the Home screen, by path, kept while the file's size and modified time stay the same. */
+const thumbnails = new Map<string, { size: number; mtime: number; url: string | null }>()
+
+/**
+ * A design's thumbnail for its card on the Home screen, as a PNG data URL: null when it has none, when it's stale (see
+ * readDesignThumbnail), when the file is larger than THUMBNAIL_FILE_LIMIT or can't be read.
+ */
+export async function designThumbnail(file: string): Promise<string | null> {
+  const p = path.resolve(file)
+  if (kindOf(p) !== 'design') return null
+  const st = await fs.promises.stat(p).catch(() => null)
+  if (!st?.isFile() || st.size > THUMBNAIL_FILE_LIMIT) return null
+  const known = thumbnails.get(p)
+  if (known && known.size === st.size && known.mtime === st.mtimeMs) return known.url
+  const png = await fs.promises.readFile(p).then(b => readDesignThumbnail(new Uint8Array(b)), () => null)
+  const url = png ? `data:image/png;base64,${Buffer.from(png).toString('base64')}` : null
+  thumbnails.delete(p)
+  thumbnails.set(p, { size: st.size, mtime: st.mtimeMs, url })
+  // the oldest go first
+  while (thumbnails.size > 200) thumbnails.delete(thumbnails.keys().next().value!)
+  return url
 }
 
 /** The file on disk, for a partial design save to copy its unchanged assets and thumbnail from (none when it's new). */

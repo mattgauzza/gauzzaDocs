@@ -20,7 +20,8 @@ import { onWorkerEvent, stopWorker, warmUp, work } from './work'
 import { stopWatching, watchFolders } from './folders'
 import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
-import { LOOK_MAX, closeLook, look } from './look'
+import { LOOK_MAX, closeLook, look, rasterize } from './look'
+import { exportDesign } from '../core/design/export'
 import { personName } from '../core/person'
 import { mentionsName } from '../shared/mentions'
 import { isReadOp } from '../shared/ops/readOps'
@@ -98,6 +99,11 @@ async function newFilePath(kind: Kind, ext: string | undefined, name: string | u
   await work('createFile', [file, ctx, preset])
   return file
 }
+
+// ---------- the hidden window `gdocs look` and PNG export draw in (see look.ts) ----------
+const lookPreload = path.join(__dirname, '../preload/index.js')
+const loadLook = (w: BrowserWindow) =>
+  process.env.ELECTRON_RENDERER_URL ? w.loadURL(process.env.ELECTRON_RENDERER_URL + '#look') : w.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: 'look' })
 
 // ---------- the CLI bridge ----------
 async function rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -193,9 +199,26 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
           out: params.out as string | undefined
         },
         askWeb,
-        path.join(__dirname, '../preload/index.js'),
-        w => (process.env.ELECTRON_RENDERER_URL ? w.loadURL(process.env.ELECTRON_RENDERER_URL + '#look') : w.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: 'look' }))
+        lookPreload,
+        loadLook
       )
+    }
+    // PNG export of a design: drawn by the op (in the open editor, unsaved changes and all, else from disk), then to
+    // pixels in the hidden look window, and written here. The CLI runs SVG export itself.
+    case 'designExport': {
+      if (!fs.existsSync(file)) throw new Error(`No such file: ${file}`)
+      if (kindOf(file) !== 'design') throw new Error(`${path.basename(file)} isn't a design.`)
+      const opts = {
+        format: String(params.format ?? 'png') as 'svg' | 'png',
+        artboard: params.artboard as string | undefined,
+        scale: params.scale as string | undefined,
+        width: params.width as string | undefined,
+        out: params.out as string | undefined
+      }
+      return exportDesign(file, opts, {
+        run: async op => ((await rpc('op', { ...params, op })) as { result: unknown }).result,
+        rasterize: (svg, width, height) => rasterize(svg, width, height, askWeb, lookPreload, loadLook)
+      })
     }
     case 'close':
       if (!isOpen(file)) return { ok: true, wasOpen: false }
@@ -420,11 +443,20 @@ let forceQuit = false
 /** Renders HTML to PDF bytes in a hidden window (Export → PDF for documents, sheets and printing). */
 async function htmlToPdf(html: string, title: string): Promise<Uint8Array> {
   const w = new BrowserWindow({ show: false, webPreferences: { javascript: false, offscreen: true } })
+  const page = html.startsWith('<!doctype') ? html : wrapHtml(html, title)
+  const url = 'data:text/html;charset=utf-8,' + encodeURIComponent(page)
+  // Chromium won't load a URL over 2 MB (a design with a picture, a document with big images): such a page is read
+  // from a file in temp instead.
+  const tmp = url.length > 2_000_000 ? path.join(os.tmpdir(), `gauzzadocs-print-${process.pid}-${Date.now()}.html`) : null
   try {
-    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html.startsWith('<!doctype') ? html : wrapHtml(html, title)))
+    if (tmp) {
+      await fs.promises.writeFile(tmp, page)
+      await w.loadFile(tmp)
+    } else await w.loadURL(url)
     return await w.webContents.printToPDF({ pageSize: 'Letter', printBackground: true, preferCSSPageSize: true }) // slides: @page sets 16:9
   } finally {
     w.destroy()
+    if (tmp) await fs.promises.rm(tmp, { force: true })
   }
 }
 
@@ -462,6 +494,8 @@ const api: Record<string, (...a: any[]) => unknown> = {
   designLayout: (graph: unknown) => work('designLayout', [graph]),
   /** Every installed font face ({ family, weight, style, postscript }), for a design's font picker. */
   fontFaces: () => work('fontFaces'),
+  /** A design's thumbnail as a PNG data URL for its Home card, or null (none, or stale) for the kind's icon. */
+  designThumbnail: (file: string) => work('designThumbnail', [file]),
   /** ctx: who changed it since the last save ({ authors, summary }); the person when the window does not say. */
   save: (file: string, payload: FilePayload, ctx?: WriteContext) => work<number>('saveFile', [file, payload, ctx ?? person()]),
   /** preset: a new design's size (a PRESETS name or <w>x<h>). */

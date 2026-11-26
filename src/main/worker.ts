@@ -1,5 +1,5 @@
 import { parentPort } from 'node:worker_threads'
-import { createFile, loadFile, saveFile } from '../core/files'
+import { createFile, designThumbnail, loadFile, saveFile } from '../core/files'
 import { fontFaceBytes, listFontFaces, systemFontBytes } from '../core/systemFonts'
 import { fallbackFontBytes } from '../core/design/fallbackFont'
 import { layoutDiagram } from '../core/design/layout'
@@ -33,6 +33,8 @@ const fns: Record<string, Fn> = {
   designFontBytes: ([ref]) => fontFaceBytes(ref),
   designFallbackFont: () => fallbackFontBytes(),
   designLayout: ([graph]) => layoutDiagram(graph),
+  // A design's card on the Home screen: its thumbnail as a data URL, or null for the kind's icon.
+  designThumbnail: ([file]) => designThumbnail(file),
   // The font picker: every face by family, weight, style and PostScript name (where its file is stays here).
   fontFaces: async () => (await listFontFaces()).map(({ family, weight, style, postscript }) => ({ family, weight, style, postscript })),
   // preset: a new design's size (a PRESETS name or <w>x<h>); other kinds ignore it

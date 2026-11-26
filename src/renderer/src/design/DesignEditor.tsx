@@ -2,8 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { type FontSource, fontsFor, newFonts } from '../../../shared/design/fonts'
 import { fin } from '../../../shared/design/geometry'
 import { DEFAULT_DESIGN_PRESET, newDesign, walk } from '../../../shared/design/model'
+import { designPrintHtml } from '../../../shared/design/print'
 import { type Downgrade, designToSvg } from '../../../shared/design/render'
 import type { Artboard, Design, DesignFile, FontRef, Layer } from '../../../shared/design/types'
+import { stem } from '../../../shared/kinds'
 import { applyDesignOp } from '../../../shared/ops/design'
 import type { OpServices } from '../../../shared/ops/types'
 import type { AgentInfo, AgentOp, CommentAnchor, FilePayload } from '../../../shared/types'
@@ -13,7 +15,8 @@ import { stepZoom } from '../shell/zoom'
 import { Canvas, type Drawn, type Sel } from './Canvas'
 import { Layers } from './Layers'
 import { Props } from './Props'
-import { DesignSaves } from './saves'
+import { rasterize, thumbnailSize } from './raster'
+import { DesignSaves, DesignThumbs } from './saves'
 import { type Placed, deltaIn, placeAll } from './selection'
 import './design.css'
 
@@ -120,8 +123,8 @@ export default function DesignEditor(props: EditorProps) {
   const lastMerge = useRef<{ key: string; at: number } | null>(null)
   /** What the file on disk holds: a save sends only the other assets. */
   const saves = useRef(new DesignSaves(loaded?.file.assets ?? {}))
-  /** Changed since it was opened: the thumbnail in the file no longer matches (only export draws thumbnails). */
-  const changed = useRef(false)
+  /** The thumbnail saves carry: drawn anew when the file's doesn't show the design saved. */
+  const thumbs = useRef(new DesignThumbs(loaded?.file))
   const queue = useRef<Promise<unknown>>(Promise.resolve())
   const scroller = useRef<HTMLDivElement>(null)
   const root = useRef<HTMLDivElement>(null)
@@ -172,7 +175,6 @@ export default function DesignEditor(props: EditorProps) {
   // ---------- changes and history ----------
   const setFile = (next: DesignFile) => {
     fileRef.current = next
-    changed.current = true
     setFileState(next)
     propsRef.current.onChange()
   }
@@ -479,8 +481,21 @@ export default function DesignEditor(props: EditorProps) {
   }, [props.active])
 
   // ---------- the handle the shell and agents use ----------
-  /** The design as saved: marked when its thumbnail no longer matches. */
-  const stamped = (): Design => (changed.current ? { ...fileRef.current.design, thumbnailStale: true } : fileRef.current.design)
+  /** The first artboard as a PNG thumbnail, THUMBNAIL_SIDE px on its long side, drawn as the canvas draws it. */
+  const drawThumbnail = async (f: DesignFile): Promise<Uint8Array> => {
+    const fonts = fontsRef.current?.source
+    const a = f.design.artboards[0]
+    if (!fonts || !a) throw new Error('There is nothing to draw a thumbnail with yet.')
+    const size = thumbnailSize(a.width, a.height)
+    return rasterize(designToSvg(f.design, a.id, { fonts, assets: f.assets, mode: 'raster', size }), size.width, size.height)
+  }
+  /** Each artboard on its own page, drawn as the canvas draws it and scaled to fit (File > Print). */
+  const printHtml = (): string => {
+    const fonts = fontsRef.current?.source
+    if (!fonts) return '<p>This design is still loading. Try printing again in a moment.</p>'
+    const f = fileRef.current
+    return designPrintHtml(f.design, { fonts, assets: f.assets }, stem(propsRef.current.path))
+  }
   // (the shell builds its menus once per tab, not per selection, so these act on whatever is selected when run)
   const menus = (): Partial<Record<'Edit' | 'View', MenuItem[]>> => ({
     Edit: [
@@ -496,20 +511,31 @@ export default function DesignEditor(props: EditorProps) {
       { label: 'Fit artboards', run: fit }
     ]
   })
-  const live = useRef({ agentOp, undo, redo, zoomBy, fit, menus, nudge, remove, duplicate, group, ungroup, selectAll, escape, showAnchor, chosen })
-  live.current = { agentOp, undo, redo, zoomBy, fit, menus, nudge, remove, duplicate, group, ungroup, selectAll, escape, showAnchor, chosen }
+  const live = useRef({ agentOp, undo, redo, zoomBy, fit, menus, nudge, remove, duplicate, group, ungroup, selectAll, escape, showAnchor, chosen, printHtml })
+  live.current = { agentOp, undo, redo, zoomBy, fit, menus, nudge, remove, duplicate, group, ungroup, selectAll, escape, showAnchor, chosen, printHtml }
 
   useEffect(() => {
     let gone = false
     const L = () => live.current
     const handle: EditorHandle = {
       language: 'design',
-      // Only the assets the file on disk doesn't hold yet go along: the worker copies the rest from the file.
-      getPayload: (): FilePayload => saves.current.partial({ ...fileRef.current, design: stamped() }),
+      // Only the assets the file on disk doesn't hold yet go along: the worker copies the rest from the file. The first
+      // artboard is drawn as a new thumbnail when the file's is out of date.
+      getPayload: async (): Promise<FilePayload> => {
+        const { file: f, shows } = await thumbs.current.prepare(fileRef.current, drawThumbnail)
+        return thumbs.current.handOut(saves.current.partial(f), shows)
+      },
       // Everything: for a copy somewhere else (save as, a version kept before a restore, gdocs look), and for a save
-      // again when a partial one failed (the file was replaced from outside).
-      peekPayload: (): FilePayload => saves.current.full({ ...fileRef.current, design: stamped() }),
-      saved: p => saves.current.saved(p),
+      // again when a partial one failed (the file was replaced from outside). It never draws a thumbnail.
+      peekPayload: async (): Promise<FilePayload> => {
+        const { file: f, shows } = await thumbs.current.prepare(fileRef.current, null)
+        return thumbs.current.handOut(saves.current.full(f), shows)
+      },
+      saved: p => {
+        saves.current.saved(p)
+        thumbs.current.saved(p)
+      },
+      getPrintHtml: () => L().printHtml(),
       agent: (op, agent) => L().agentOp(op, agent),
       command: id => {
         if (id === 'undo') L().undo()

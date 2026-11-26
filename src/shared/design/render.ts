@@ -30,6 +30,8 @@ export interface RenderOptions {
   downgrades?: Downgrade[]
   /** The size the document says it is (its width and height), when not the artboard's. The view box stays the artboard. */
   size?: { width: number; height: number }
+  /** Set to how many svg layers the drawing inlined (export mode), for the limits cleaning it allows (exportLimits). */
+  counts?: { svg: number }
 }
 
 /**
@@ -841,6 +843,7 @@ export function designToSvg(design: Design, artboardId: string, opts: RenderOpti
   const bg = background(ctx, board, W, H)
   const scope: Scope = { prefix: '', overrides: [], top: true, ends: { layers: board.layers }, comps: [] }
   const body = board.layers.map(l => renderLayer(ctx, l, scope)).join('')
+  if (opts.counts) opts.counts.svg = ctx.svgs
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
     `xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" ${shown} viewBox="0 0 ${W} ${H}">` +
@@ -865,6 +868,7 @@ export function layerToSvg(design: Design, layer: Layer, opts: RenderOptions): s
   }
   const ctx = newCtx(design, opts)
   const out = renderLayer(ctx, layer, { prefix: '', overrides: [], top, ends: { layers: board.layers }, comps: [] })
+  if (opts.counts) opts.counts.svg = ctx.svgs
   if (!out || !ctx.defs.length) return out
   const at = out.indexOf('>') + 1
   return out.slice(0, at) + `<defs>${ctx.defs.join('')}</defs>` + out.slice(at)

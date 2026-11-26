@@ -42,8 +42,10 @@ Paints are `"#rrggbb"`, `"style:<name>"` (a color style), `"none"` or a paint ob
 - `read { format?: "text", allArtboards? }` -> `{ artboard, artboards, layers, styles, components }` with one line per
   layer (`id  name  type  x,y wxh  "text"  flags`, indented by depth), or `{ content }` as plain lines with format "text"
 - `info` -> `{ artboards, layers }`
-- `export { format?: "svg", width? }` -> `{ svg, artboard, width, height, leftOut? }`: the artboard as an SVG file, fonts
-  not embedded; `width` sizes the root and keeps the view box
+- `export { format?: "svg" | "png", width?, scale? }` -> `{ svg, artboard, width, height, artboards, svgLayers, leftOut? }`:
+  the artboard as an SVG file, fonts not embedded; `width` sizes the root and keeps the view box. With "png" it's drawn
+  as the editor draws it, sized to the PNG's pixels (`width` or the artboard's, times `scale` 1 or 2, at most 16,384 px
+  a side), for the app to turn into a PNG (`gdocs design export --format png` does that)
 - `add { type, props?, parent?, index? }` -> `{ ids }`. Types: rect, ellipse, line, path, text, image, group, instance,
   connector. Props on every layer: name, x, y, width (w), height (h), rotation, scaleX, scaleY, opacity, blend, visible,
   locked, fill, stroke, strokeWidth, dash, shadow `{ x, y, blur, color }`, blur, timing `{ start?, end? }`. Then by type:

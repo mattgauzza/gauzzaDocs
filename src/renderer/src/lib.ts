@@ -121,6 +121,8 @@ export const api = {
   designLayout: (graph: ElkGraph) => window.gd.call<ElkGraph>('designLayout', graph),
   /** Every installed font face by family, weight, style and PostScript name (the font picker). */
   fontFaces: () => window.gd.call<FontRef[]>('fontFaces'),
+  /** A design's thumbnail as a PNG data URL for its Home card, or null (none, or stale) to show the kind's icon. */
+  designThumbnail: (path: string) => window.gd.call<string | null>('designThumbnail', path),
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
   openDefaultApps: () => window.gd.call('openDefaultApps'),

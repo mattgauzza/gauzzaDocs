@@ -15,7 +15,7 @@ import * as plugins from '../core/plugins'
 import { checkPlugin, scaffold } from '../../scripts/plugin-check.mjs'
 import { type Kind, kindOf, languageOf } from '../shared/kinds'
 import type { AgentOp } from '../shared/types'
-import { type Ctx, call, liveOptions, runOp } from './common'
+import { type Ctx, RENDER_NEEDS_APP, call, liveOptions, runOp } from './common'
 import { registerCommentCommands } from './comments'
 import { registerSubscribeCommands } from './subscribe'
 import { registerProjectCommands } from './projects'
@@ -58,6 +58,7 @@ const ctx: Ctx = {
   json,
   out,
   input,
+  agent: () => program.opts().agent || process.env.GDOCS_AGENT || 'Agent',
   run: async (file, op, o = {}) => {
     const r = await runOp(file, op, { live: !!o.live, offline: !!o.offline, focus: o.focus !== false, agent: program.opts().agent })
     if (!json() && process.stderr.isTTY) process.stderr.write(r.live ? '(live in gauzzaDocs)\n' : '')
@@ -123,11 +124,13 @@ program
 program
   .command('look <file>')
   .alias('see')
-  .description('see the file as the app shows it: saves screenshots (one per slide, or per screen of a doc, sheet, PDF or code) as PNGs for you to open')
-  .option('--from <n>', 'first slide or screen to show', '1')
+  .description(
+    'see the file as the app shows it: saves screenshots (one per slide or design artboard, or per screen of a doc, sheet, PDF or code) as PNGs for you to open'
+  )
+  .option('--from <n>', 'first slide, artboard or screen to show', '1')
   .option('--count <n>', 'how many to show', '3')
-  .option('--all', 'every slide or screen (up to 30)')
-  .option('--width <px>', 'window width (default 1200, slides 1280)')
+  .option('--all', 'every slide, artboard or screen (up to 30)')
+  .option('--width <px>', 'window width (default 1200, slides 1280; designs show each artboard at up to 1600 px)')
   .option('--height <px>', 'window height (default 1400, slides 720)')
   .option('--theme <theme>', 'light or dark (default: the app theme)')
   .option('--out <dir>', 'folder for the images (default: a gauzzadocs-look folder in temp)')
@@ -146,7 +149,10 @@ program
       out: o.out,
       agent: { name: program.opts().agent || process.env.GDOCS_AGENT || 'Agent' }
     })) as { unit: string; total: number; images: { n: number; file: string; width: number; height: number }[]; notes?: string[] } | null
-    if (!r) throw new Error('gdocs look needs gauzzaDocs running, since it pictures the file the way the app shows it. Start the app and try again.')
+    if (!r) {
+      if (kindOf(p) === 'design') throw new Error(RENDER_NEEDS_APP)
+      throw new Error('gdocs look needs gauzzaDocs running, since it pictures the file the way the app shows it. Start the app and try again.')
+    }
     out(r, () => {
       const last = r.images.at(-1)?.n || 0
       const more = last < r.total ? `\n${r.total - last} more: gdocs look ${file} --from ${last + 1}` : ''

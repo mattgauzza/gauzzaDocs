@@ -209,12 +209,14 @@ gdocs design svg post.gdesign --name Logo @logo.svg --x 900 --y 40
 
 Check the result with gdocs look: \`gdocs look post.gdesign\` shows the artboards the way the app draws them. Open the
 images and fix text that runs out of its box, layers that overlap by mistake and anything past the edge, then look
-again. It needs the app running. \`gdocs design export post.gdesign --out post.svg\` saves an artboard as SVG.
+again. It needs the app running. \`gdocs design export post.gdesign\` saves each artboard as SVG beside the design
+(\`--artboard <name>\` for one, \`--out <folder>\` to put them somewhere else). With \`--format png --scale 2\` it saves
+PNGs instead, which also needs the app running.
 
 ## Seeing the document
 
-\`gdocs look <file>\` saves screenshots of the file the way the app shows it and prints their paths: one per slide,
-or one per screen of a document, sheet, PDF or code file. Open them with your image tool (Read in Claude Code,
+\`gdocs look <file>\` saves screenshots of the file the way the app shows it and prints their paths: one per slide or
+design artboard, or one per screen of a document, sheet, PDF or code file. Open them with your image tool (Read in Claude Code,
 view_image in Codex) to check how it reads and looks: headings, spacing, tables, slide layout, anything cut off or
 crowded. Do it after big or visual changes and before you tell the person a document is done, not after every small
 edit. \`--from 4 --count 2\` picks screens, \`--all\` takes up to 30. It needs the app running, and for an open file

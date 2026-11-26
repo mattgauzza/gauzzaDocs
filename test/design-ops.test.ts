@@ -919,7 +919,15 @@ test('info counts artboards and layers; export gives the artboard as SVG, sized 
   assert.deepEqual([odd.width, odd.height], [333.33, 187.5])
   assert.match(odd.svg, /^<svg [^>]* width="333.33" height="187.5" viewBox="0 0 1600 900">/)
   assert.equal((odd.svg.match(/ width="333.33"/g) ?? []).length, 1, 'only the root takes the size')
-  await assert.rejects(applyDesignOp(f, { op: 'export', format: 'png' }, services), { message: 'format must be svg' })
+  await assert.rejects(applyDesignOp(f, { op: 'export', format: 'jpg' }, services), { message: 'format must be svg or png' })
+  // png: drawn as the editor draws it (text as outlines), at its pixel size over the artboard's view box
+  const png = (await applyDesignOp(f, { op: 'export', format: 'png', scale: 2 }, services)).result as { svg: string; width: number; height: number }
+  assert.deepEqual([png.width, png.height], [2160, 2160])
+  assert.match(png.svg, /^<svg [^>]* width="2160" height="2160" viewBox="0 0 1080 1080">/)
+  assert.doesNotMatch(png.svg, /<text[\s>]/)
+  const sized = (await applyDesignOp(f, { op: 'export', format: 'png', artboard: 'Wide', width: '333.4' }, services)).result as { width: number; height: number }
+  assert.deepEqual([sized.width, sized.height], [333, 188], 'whole pixels')
+  await assert.rejects(applyDesignOp(f, { op: 'export', format: 'png', scale: 3 }, services), { message: 'scale must be 1 or 2' })
   await assert.rejects(applyDesignOp(f, { op: 'export', width: 0 }, services), { message: 'width must be 1 or more' })
   await assert.rejects(applyDesignOp(f, { op: 'export' }), /needs fonts/)
 })
