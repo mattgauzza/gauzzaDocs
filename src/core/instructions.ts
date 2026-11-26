@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { extOf } from '../shared/kinds'
+import { type WriteContext, guardedWrite, writeAtomic } from './history'
 import { HOME, norm, samePath } from './paths'
 
 /**
@@ -91,12 +92,17 @@ export function getDocInstructions(file: string): string {
   return k ? store[k] : ''
 }
 
-export function setDocInstructions(file: string, text: string) {
+/** HTML and Markdown files are rewritten through the recorder (a version is kept); other kinds use the store. Resolves with the file's new mtime, or 0 for the store. */
+export async function setDocInstructions(file: string, text: string, ctx: WriteContext = { authors: [{ name: 'Agent', by: 'agent' }] }): Promise<number> {
   const p = norm(file)
   if (inFile(p)) {
-    const cur = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : ''
-    fs.writeFileSync(p, withInstructions(p, cur, text))
-    return
+    const st = await guardedWrite(p, ctx, async () => {
+      const cur = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : ''
+      const bytes = Buffer.from(withInstructions(p, cur, text))
+      await writeAtomic(p, bytes)
+      return bytes
+    })
+    return st.mtime
   }
   const store = readStore()
   const k = storeKey(store, p)
@@ -104,6 +110,7 @@ export function setDocInstructions(file: string, text: string) {
   if (text.trim()) store[p] = text.trim()
   fs.mkdirSync(HOME, { recursive: true })
   fs.writeFileSync(STORE, JSON.stringify(store, null, 2))
+  return 0
 }
 
 /** Keeps store-held instructions with a file when the app renames it. */

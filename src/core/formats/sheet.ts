@@ -26,13 +26,17 @@ export async function loadSheet(file: string): Promise<{ kind: 'sheet'; workbook
   return { kind: 'sheet', workbook: await readXlsx(file) }
 }
 
-export async function saveSheet(file: string, workbook: Workbook): Promise<void> {
+/** The bytes of a spreadsheet file: CSV/TSV text, or an xlsx workbook built in memory. Never touches the disk. */
+export async function sheetBytes(file: string, workbook: Workbook): Promise<Uint8Array> {
   const ext = extOf(file)
-  if (ext === 'csv' || ext === 'tsv') {
-    fs.writeFileSync(file, sheetToCsv(workbook.sheets[0] || { name: 'Sheet1', cells: {} }, ext === 'tsv' ? '\t' : ','))
-    return
-  }
-  await writeXlsx(file, workbook)
+  if (ext === 'csv' || ext === 'tsv') return Buffer.from(sheetToCsv(workbook.sheets[0] || { name: 'Sheet1', cells: {} }, ext === 'tsv' ? '\t' : ','))
+  return xlsxBytes(workbook)
+}
+
+/** Saves through saveFile, so every write is atomic and keeps a version. */
+export async function saveSheet(file: string, workbook: Workbook): Promise<void> {
+  const { saveFile } = await import('../files')
+  await saveFile(file, { kind: 'sheet', workbook })
 }
 
 const excel = async () => ((await import('exceljs')) as unknown as { default: typeof import('exceljs') }).default ?? (await import('exceljs'))
@@ -115,7 +119,7 @@ async function readXlsx(file: string): Promise<Workbook> {
   return { sheets: sheets.length ? sheets : [{ name: 'Sheet1', cells: {} }] }
 }
 
-async function writeXlsx(file: string, workbook: Workbook) {
+async function xlsxBytes(workbook: Workbook): Promise<Uint8Array> {
   const ExcelJS = await excel()
   const wb = new ExcelJS.Workbook()
   wb.creator = 'gauzzaDocs'
@@ -151,7 +155,7 @@ async function writeXlsx(file: string, workbook: Workbook) {
     const hidden = wb.addWorksheet(CHARTS_SHEET, { state: 'veryHidden' })
     hidden.getCell('A1').value = JSON.stringify(charts)
   }
-  await wb.xlsx.writeFile(file)
+  return new Uint8Array(await wb.xlsx.writeBuffer())
 }
 
 // ---------------- conditional formatting <-> Excel rules ----------------

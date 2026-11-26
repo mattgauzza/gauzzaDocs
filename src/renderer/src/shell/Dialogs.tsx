@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { InstalledPlugin, Settings } from '../../../shared/types'
-import { type Market, type MarketPlugin, api } from '../lib'
+import { type HistoryStats, type Market, type MarketPlugin, api } from '../lib'
+import { mb, sizeText } from './historyView'
 import { Icon } from './icons'
 import { DONATE } from '../../../shared/links'
 
@@ -26,10 +27,11 @@ export function Modal(props: { title: string; onClose(): void; children: React.R
   )
 }
 
-export function Confirm(props: { title: string; text: string; buttons: { label: string; primary?: boolean; run(): void }[]; onClose(): void }) {
+/** A question with buttons. `danger` marks a button that destroys something: drawn red, and never focused first. */
+export function Confirm(props: { title: string; text: string; buttons: { label: string; primary?: boolean; danger?: boolean; run(): void }[]; onClose(): void }) {
   return (
     <Modal title={props.title} onClose={props.onClose} footer={props.buttons.map(b => (
-      <button key={b.label} className={b.primary ? 'btn primary' : 'btn'} onClick={b.run} autoFocus={b.primary}>{b.label}</button>
+      <button key={b.label} className={b.danger ? 'btn danger' : b.primary ? 'btn primary' : 'btn'} onClick={b.run} autoFocus={b.primary && !b.danger}>{b.label}</button>
     ))}>
       <p>{props.text}</p>
     </Modal>
@@ -175,10 +177,27 @@ export function PluginsDialog({ onClose, onReload }: { onClose(): void; onReload
 export function SettingsDialog({ settings, onClose, onSave }: { settings: Settings; onClose(): void; onSave(s: Partial<Settings>): void }) {
   const [s, setS] = useState(settings)
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS({ ...s, [k]: v })
+  // Version history: the patterns are edited one per line, the cap in MB. Each is saved only when changed here, so
+  // someone who never touches them keeps getting the app's defaults (new secret file patterns, for one).
+  const initialExclude = (settings.historyExclude || []).join('\n')
+  const [exclude, setExclude] = useState(initialExclude)
+  const [stats, setStats] = useState<HistoryStats | null>(null)
+  useEffect(() => void api.historyStats().then(setStats, () => {}), [])
+  const save = () => {
+    const { historyExclude: _exclude, historyCapMB: _cap, ...patch } = s
+    const out: Partial<Settings> = patch
+    if (exclude !== initialExclude) out.historyExclude = exclude.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    if (s.historyCapMB !== settings.historyCapMB) {
+      const cap = Math.round(Number(s.historyCapMB))
+      out.historyCapMB = cap > 0 ? cap : 1024
+    }
+    onSave(out)
+    onClose()
+  }
   return (
     <Modal title="Settings" onClose={onClose} footer={<>
       <button className="btn" onClick={onClose}>Cancel</button>
-      <button className="btn primary" onClick={() => (onSave(s), onClose())}>Save</button>
+      <button className="btn primary" onClick={save}>Save</button>
     </>}>
       <div className="form">
         <label>New files go in<input value={s.docsDir} onChange={e => set('docsDir', e.target.value)} /></label>
@@ -203,6 +222,22 @@ export function SettingsDialog({ settings, onClose, onSave }: { settings: Settin
           <button type="button" className="btn sm" onClick={() => api.openDefaultApps()}>Make gauzzaDocs the default</button>
         </div>
         <label>Plugin library (marketplace.json URL or a local folder)<input value={s.registry} onChange={e => set('registry', e.target.value)} /></label>
+      </div>
+      <h3>Version history</h3>
+      <div className="form hv-settings">
+        <p className="small muted">
+          {stats ? `Using ${sizeText(stats.bytes)} of ${mb(stats.capBytes)}.` : 'Working out the size...'}
+          {stats?.overCapBytes ? ` ${sizeText(stats.overCapBytes)} over the limit: what is left is named versions, originals and anything from the last 7 days, which are always kept.` : ''}
+        </p>
+        {stats?.paused && <p className="small error">Version history paused: {stats.paused}</p>}
+        <label>Space history may use (MB)
+          <input type="number" min={1} value={s.historyCapMB ?? 1024} onChange={e => set('historyCapMB', e.target.value === '' ? undefined : Number(e.target.value))} />
+        </label>
+        <label>Never keep history for files that match (one pattern per line, * matches anything)
+          <textarea className="hv-patterns" rows={5} spellCheck={false} value={exclude} onChange={e => setExclude(e.target.value)} />
+        </label>
+        <p className="small muted">Files under .ssh, .aws, .gnupg and .azure folders never keep history either.</p>
+        <p className="small muted">History is stored unencrypted in {stats?.dir || 'the gauzzaDocs folder in your home folder'}.</p>
       </div>
     </Modal>
   )
@@ -315,7 +350,7 @@ export function ShortcutsDialog({ onClose }: { onClose(): void }) {
     ['Ctrl+N', 'New document'], ['Ctrl+O', 'Open a file'], ['Ctrl+S', 'Save'], ['Ctrl+Shift+S', 'Save as'], ['Ctrl+P', 'Print'],
     ['Ctrl+W', 'Close tab'], ['Ctrl+Tab', 'Next tab'], ['Ctrl+Shift+Tab', 'Previous tab'], ['Ctrl+F', 'Find'], ['Ctrl+H', 'Find and replace'],
     ['Ctrl+Z / Ctrl+Y', 'Undo / redo'], ['Ctrl+B / I / U', 'Bold / italic / underline'], ['Ctrl+K', 'Insert link'],
-    ['Ctrl+Alt+1..3', 'Heading 1-3'], ['Ctrl+Shift+F', 'Format document (plugins)'], ['Ctrl+/', 'Keyboard shortcuts']
+    ['Ctrl+Alt+1..3', 'Heading 1-3'], ['Ctrl+Shift+F', 'Format document (plugins)'], ['Ctrl+Alt+Shift+H', 'Version history'], ['Ctrl+/', 'Keyboard shortcuts']
   ]
   return (
     <Modal title="Keyboard shortcuts" onClose={onClose}>

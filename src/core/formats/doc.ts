@@ -218,7 +218,8 @@ export async function docBytes(file: string, html: string): Promise<Buffer> {
 /** Where the untouched original of a Word file is kept before the first save that could lose something. */
 export const backupPath = (file: string) => path.join(path.dirname(file), `${stem(file)}.original.docx`)
 
-export async function saveDoc(file: string, html: string) {
+/** Keeps the untouched Word file beside it, once, when it holds things this editor would drop. Runs before the first save. */
+export async function backupDocOriginal(file: string) {
   if (extOf(file) === 'docx' && fs.existsSync(file) && !fs.existsSync(backupPath(file))) {
     // Only when the file on disk holds something this editor drops; once saved here it no longer does, so this runs once.
     try {
@@ -226,5 +227,10 @@ export async function saveDoc(file: string, html: string) {
       if (reasons.length) fs.copyFileSync(file, backupPath(file))
     } catch { /* not a readable docx: nothing worth backing up as Word */ }
   }
-  fs.writeFileSync(file, await docBytes(file, html))
+}
+
+/** Saves through saveFile, so every write is atomic and keeps a version. */
+export async function saveDoc(file: string, html: string) {
+  const { saveFile } = await import('../files')
+  await saveFile(file, { kind: 'doc', html })
 }

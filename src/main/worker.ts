@@ -6,21 +6,29 @@ import { runOffline } from '../core/ops'
 import * as plugins from '../core/plugins'
 import * as projects from '../core/projects'
 import { detectAgents, installSkills, refreshInstalledSkills, removeSkills } from '../core/agentSkills'
+import { checkOutside, onHistoryPaused, recoverDroppedObjects } from '../core/history'
+import { setDocInstructions } from '../core/instructions'
+import { historyJobs } from './historyJobs'
 
 /**
  * All file work runs here, on its own thread, never on the main process thread. Windows shows "not responding" as
  * soon as the main thread stalls (it runs the window's message loop), and loading a format library for the first
  * time, converting a big Word file, indexing a 2 GB log or installing a plugin can each take seconds.
  * Main sends { id, fn, args } and gets back { id, result } or { id, error }; long jobs may also post { id, progress }.
+ * Things main should hear about unasked are posted as { event, ...data } (see onWorkerEvent in work.ts).
+ * This thread is also the app's only version history writer (see historyJobs.ts).
  */
 type Fn = (args: any[], progress: (p: unknown) => void) => unknown
 
 const fns: Record<string, Fn> = {
-  loadFile: ([file]) => loadFile(file),
-  saveFile: ([file, payload]) => saveFile(file, payload),
+  // An outside change (another program wrote the file) is kept as a version before the file is shown.
+  loadFile: async ([file]) => (await checkOutside(file), loadFile(file)),
+  // ctx: who made the change ({ authors, summary }), for the version this save keeps.
+  saveFile: ([file, payload, ctx]) => saveFile(file, payload, ctx),
   systemFont: ([name]) => systemFontBytes(name),
-  createFile: ([file]) => createFile(file),
-  runOffline: ([file, op]) => runOffline(file, op),
+  createFile: ([file, ctx]) => createFile(file, ctx),
+  setDocInstructions: ([file, text, ctx]) => setDocInstructions(file, text, ctx),
+  runOffline: ([file, op, ctx]) => runOffline(file, op, ctx),
   largeIndex: async ([file], progress) => {
     const i = await indexFile(file, f => progress(f))
     return { lines: i.lines, size: i.size, crlf: i.crlf }
@@ -47,8 +55,17 @@ const fns: Record<string, Fn> = {
   projectsTouch: ([dir]) => projects.touchProject(dir),
   projectFor: ([file]) => projects.projectFor(file) || null,
   listFolder: ([dir]) => projects.listFolder(dir),
-  searchFolder: ([root, q, opts]) => projects.searchFolder(root, q, opts)
+  searchFolder: ([root, q, opts]) => projects.searchFolder(root, q, opts),
+  // Version history: list, compare, restore, name, forget, move, outside checks, work history, cleanup.
+  ...historyJobs
 }
+
+// A history failure never fails a save; main shows "Version history paused: <reason>" once.
+onHistoryPaused(reason => parentPort!.postMessage({ event: 'history-paused', reason }))
+
+// Objects a fold moved aside and could not put back (the app quit in between, or Windows refused) go back now, so the
+// versions that use them can be read again without waiting for the next cleanup.
+setTimeout(() => void recoverDroppedObjects().catch(() => {}), 500)
 
 parentPort!.on('message', async (msg: { id: number; fn: string; args: unknown[] }) => {
   const progress = (p: unknown) => parentPort!.postMessage({ id: msg.id, progress: p })

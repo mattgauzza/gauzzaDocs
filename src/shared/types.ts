@@ -193,6 +193,32 @@ export interface Settings {
   textWrap: boolean
   fontSize: number
   spellcheck?: boolean // check spelling in documents and prose files (default on)
+  historyExclude?: string[] // file name patterns (* wildcard) that are never versioned
+  historyCapMB?: number // size cap for stored version history
+}
+
+export interface Author { name: string; by: 'person' | 'agent' | 'outside' }
+
+export interface HistoryVersion {
+  n: number
+  firstAt: number
+  at: number
+  hash: string
+  size: number
+  mtime: number
+  authors: Author[]
+  summary: string
+  name?: string
+  baseline?: boolean
+  beforeRestore?: boolean
+  restoredFrom?: number
+}
+
+export interface HistoryIndex {
+  path: string
+  versions: HistoryVersion[]
+  /** Set by cleanup when it first sees the file absent from a reachable drive; cleared when it is back. */
+  missingSince?: number
 }
 
 export interface PluginManifest {

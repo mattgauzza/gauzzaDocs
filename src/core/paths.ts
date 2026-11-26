@@ -13,6 +13,9 @@ const RECENT_FILE = path.join(HOME, 'recent.json')
 
 export const DEFAULT_REGISTRY = 'https://raw.githubusercontent.com/mattgauzza/gauzzaDocs/main/plugins/marketplace.json'
 
+/** Secret files that are never versioned (name patterns, * wildcard). */
+export const DEFAULT_EXCLUDE = ['.env', '.env.*', '*.pem', '*.key', '*.pfx', '*.p12', '*.kdbx', 'id_rsa*', 'id_ed25519*']
+
 export const DEFAULT_SETTINGS: Settings = {
   docsDir: path.join(os.homedir(), 'Documents', 'gauzzaDocs'),
   newDocFormat: 'html',
@@ -21,7 +24,9 @@ export const DEFAULT_SETTINGS: Settings = {
   registry: DEFAULT_REGISTRY,
   textWrap: false,
   fontSize: 14,
-  spellcheck: true
+  spellcheck: true,
+  historyExclude: DEFAULT_EXCLUDE,
+  historyCapMB: 1024
 }
 
 const readJson = <T>(file: string, fallback: T): T => {
@@ -37,10 +42,11 @@ const writeJson = (file: string, data: unknown) => {
 }
 
 export const getSettings = (): Settings => ({ ...DEFAULT_SETTINGS, ...readJson<Partial<Settings>>(SETTINGS_FILE, {}) })
+/** Saves only what was set (the file plus this patch), so a setting nobody changed keeps following the app's default. */
 export function setSettings(patch: Partial<Settings>): Settings {
-  const next = { ...getSettings(), ...patch }
-  writeJson(SETTINGS_FILE, next)
-  return next
+  const saved = { ...readJson<Partial<Settings>>(SETTINGS_FILE, {}), ...patch }
+  writeJson(SETTINGS_FILE, saved)
+  return { ...DEFAULT_SETTINGS, ...saved }
 }
 
 export const norm = (p: string) => path.resolve(p)

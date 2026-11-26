@@ -3,6 +3,8 @@ import path from 'node:path'
 import type { Command } from 'commander'
 import { runOffline } from '../core/ops'
 import { readServer } from '../core/paths'
+import { describeOps } from '../shared/history/describe'
+import { kindOf } from '../shared/kinds'
 import type { AgentOp } from '../shared/types'
 
 /** Talks to the running app over the live-edit bridge. Returns null when the app is not running. */
@@ -47,7 +49,9 @@ export async function runOp(file: string, op: AgentOp, opts: RunOpts = {}): Prom
     if (r) return r
     if (opts.live) throw new Error('gauzzaDocs is not running. Start the app, or drop --live to edit the file on disk.')
   }
-  return { result: await runOffline(p, op), live: false }
+  // The version this edit keeps is credited to the agent, with the same wording the app uses.
+  const by = opts.agent || process.env.GDOCS_AGENT || 'Agent'
+  return { result: await runOffline(p, op, { authors: [{ name: by, by: 'agent' }], summary: describeOps([op.op], kindOf(p)) }), live: false }
 }
 
 export interface Ctx {

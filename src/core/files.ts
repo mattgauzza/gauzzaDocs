@@ -2,11 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { kindOf } from '../shared/kinds'
 import type { FilePayload, OpenFile } from '../shared/types'
-import { loadDoc, saveDoc } from './formats/doc'
-import { loadPdf, savePdf } from './formats/pdf'
-import { loadSheet, saveSheet } from './formats/sheet'
-import { loadText, saveText } from './formats/text'
-import { loadSlides, saveSlides } from './formats/slides' // slides
+import { backupDocOriginal, docBytes, loadDoc } from './formats/doc'
+import { loadPdf } from './formats/pdf'
+import { loadSheet, sheetBytes } from './formats/sheet'
+import { loadText, textBytes } from './formats/text'
+import { backupSlidesOriginal, loadSlides, slidesBytes } from './formats/slides' // slides
+import { type WriteContext, guardedWrite, writeAtomic } from './history'
 import { newDeck } from '../shared/slides/model' // slides
 import { LARGE_BYTES } from './large'
 import { extOf } from '../shared/kinds'
@@ -25,33 +26,52 @@ export async function loadFile(file: string, opts: { full?: boolean } = {}): Pro
   return { path: p, kind, payload, mtime: stat.mtimeMs }
 }
 
-/** Writes a payload in the format the file name asks for. Returns the new modification time. */
-export async function saveFile(file: string, payload: FilePayload): Promise<number> {
-  const p = path.resolve(file)
-  fs.mkdirSync(path.dirname(p), { recursive: true })
-  const tmp = `${p}.gd-${process.pid}.tmp`
-  // Write beside the file, then swap in, so a crash mid-save never leaves half a file.
-  if (payload.kind === 'large') throw new Error('Large files are edited in place, not saved whole')
-  const target = payload.kind === 'pdf' || payload.kind === 'text' ? tmp : p
-  if (payload.kind === 'doc') await saveDoc(p, payload.html)
-  else if (payload.kind === 'sheet') await saveSheet(p, payload.workbook)
-  else if (payload.kind === 'slides') await saveSlides(p, payload.deck)
-  else if (payload.kind === 'pdf') savePdf(target, payload.bytes)
-  else saveText(target, payload.text, payload.eol)
-  if (target === tmp) fs.renameSync(tmp, p)
-  return fs.statSync(p).mtimeMs
+/** The bytes a payload becomes on disk for this file name. Builds in memory; never writes. */
+export async function payloadBytes(file: string, payload: FilePayload): Promise<Uint8Array> {
+  switch (payload.kind) {
+    case 'doc':
+      return docBytes(file, payload.html)
+    case 'sheet':
+      return sheetBytes(file, payload.workbook)
+    case 'slides':
+      return slidesBytes(file, payload.deck)
+    case 'pdf':
+      return payload.bytes
+    case 'text':
+      return textBytes(payload.text, payload.eol)
+    default:
+      throw new Error('Large files are edited in place, not saved whole')
+  }
 }
 
-/** A brand-new empty file of the given kind. */
-export async function createFile(file: string) {
+const AGENT: WriteContext = { authors: [{ name: 'Agent', by: 'agent' }] }
+
+/** Writes a payload in the format the file name asks for: built in memory, swapped in atomically, kept as a version. Returns the new modification time. */
+export async function saveFile(file: string, payload: FilePayload, ctx: WriteContext = AGENT): Promise<number> {
+  const p = path.resolve(file)
+  if (payload.kind === 'large') throw new Error('Large files are edited in place, not saved whole')
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  const st = await guardedWrite(p, ctx, async () => {
+    // The one-time copy of the original Word/PowerPoint file, before the first save that could lose something.
+    if (payload.kind === 'doc') await backupDocOriginal(p)
+    else if (payload.kind === 'slides') await backupSlidesOriginal(p)
+    const bytes = await payloadBytes(p, payload)
+    await writeAtomic(p, bytes)
+    return bytes
+  })
+  return st.mtime
+}
+
+/** A brand-new empty file of the given kind. `ctx` says who created it (its first version's authors). */
+export async function createFile(file: string, ctx?: WriteContext) {
   const kind = kindOf(file)
-  if (kind === 'doc') await saveFile(file, { kind, html: '<p></p>' })
-  else if (kind === 'sheet') await saveFile(file, { kind, workbook: { sheets: [{ name: 'Sheet1', cells: {} }] } })
-  else if (kind === 'slides') await saveFile(file, { kind, deck: newDeck() })
+  if (kind === 'doc') await saveFile(file, { kind, html: '<p></p>' }, ctx)
+  else if (kind === 'sheet') await saveFile(file, { kind, workbook: { sheets: [{ name: 'Sheet1', cells: {} }] } }, ctx)
+  else if (kind === 'slides') await saveFile(file, { kind, deck: newDeck() }, ctx)
   else if (kind === 'pdf') {
     const { PDFDocument } = await import('pdf-lib')
     const doc = await PDFDocument.create()
     doc.addPage([612, 792])
-    await saveFile(file, { kind, bytes: await doc.save() })
-  } else fs.writeFileSync(file, '')
+    await saveFile(file, { kind, bytes: await doc.save() }, ctx)
+  } else await saveFile(file, { kind: 'text', text: '', eol: '\n' }, ctx)
 }

@@ -2,11 +2,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { BrowserWindow, type WebContents, app, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
-import { instructionsFor, renameInstructions, setDocInstructions, setGlobal } from '../core/instructions'
+import { inFile, instructionsFor, renameInstructions, setDocInstructions, setGlobal } from '../core/instructions'
+import type { HistoryEventType, WriteContext } from '../core/history'
 import {
   HOME, PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
 } from '../core/paths'
 import { wrapHtml } from '../shared/convert'
+import { describeOps } from '../shared/history/describe'
 import { type Kind, OPEN_FILTERS, extOf, kindOf, stem } from '../shared/kinds'
 import type { AgentInfo, AgentOp, FilePayload, OpenFile } from '../shared/types'
 import * as comments from '../core/comments'
@@ -14,7 +16,7 @@ import { type Bridge, type Listener, startBridge } from './server'
 import { AgentRunner, writeLaunchers } from './agents'
 import * as subs from '../core/subscriptions'
 import { attachContextMenu, setupSpelling } from './contextMenu'
-import { stopWorker, warmUp, work } from './work'
+import { onWorkerEvent, stopWorker, warmUp, work } from './work'
 import { stopWatching, watchFolders } from './folders'
 import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
@@ -86,12 +88,13 @@ async function openInWindow(file: string, opts: { focus?: boolean } = {}) {
   return p
 }
 
-async function newFilePath(kind: Kind, ext?: string, name?: string, dir?: string) {
+/** `ctx` says who created it: its first version is theirs. */
+async function newFilePath(kind: Kind, ext: string | undefined, name: string | undefined, dir: string | undefined, ctx: WriteContext) {
   const s = getSettings()
   const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
   const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
   const file = freeName(dir || s.docsDir, base, e)
-  await work('createFile', [file])
+  await work('createFile', [file, ctx])
   return file
 }
 
@@ -107,7 +110,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'open':
       return { path: await openInWindow(file, { focus: params.focus !== false }) }
     case 'new': {
-      const created = await newFilePath(String(params.kind || 'doc') as Kind, params.ext as string, params.name as string)
+      const created = await newFilePath(String(params.kind || 'doc') as Kind, params.ext as string, params.name as string, undefined, asAgent(agent))
       if (params.open !== false) await openInWindow(created)
       return { path: created }
     }
@@ -136,6 +139,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       const sub = subs.subscribe(file, { agent: params.agent_kind as subs.AgentKind, name: params.name as string, role: params.role as subs.Role, brief: params.brief as string })
       if (params.start) runner?.wake(sub.id)
       agentsChanged()
+      logHistory(sub.path, 'subscribed', agent.name, `added ${sub.name} as ${sub.role}`)
       return sub
     }
     case 'unsubscribe': {
@@ -144,6 +148,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       runner?.stop(sub.id)
       subs.unsubscribe(sub.id)
       agentsChanged()
+      logHistory(sub.path, 'unsubscribed', agent.name, `removed ${sub.name}`)
       return { ok: true, removed: sub.name }
     }
     case 'participants':
@@ -193,6 +198,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'op': {
       const op = params.op as AgentOp
       if (!op?.op) throw new Error('missing op')
+      const edits = !READ_ONLY_OPS.has(op.op) && op.op !== 'save' && !op.dryRun // what goes in the work history
       // --live: open it, or bring its tab to the front, so the person can watch the edit happen.
       // (Just opened counts as open: the window's tab list can arrive a moment after the editor is ready.)
       let opened = false
@@ -202,14 +208,31 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         opened = !!(await openInWindow(file, { focus: false }))
       if (opened || isOpen(file)) {
         const result = await askWindow('agent', { path: file, op, agent })
+        if (edits) logHistory(file, 'agent-op', agent.name, op.op)
         return { result, live: true }
       }
       if (op.op === 'save') return { result: { ok: true, note: 'not open; nothing to save' }, live: false }
-      const offline = await work('runOffline', [file, op])
+      // The version this edit keeps is credited to the agent.
+      const offline = await work('runOffline', [file, op, { ...asAgent(agent), summary: describeOps([op.op], kindOf(file)) }])
       // Other agents hear about edits made on disk too (live edits are diffed by the window instead).
       if (!READ_ONLY_OPS.has(op.op)) bridge?.emit({ type: 'edit', by: 'agent', author: agent.name, path: file, summary: `${op.op} (on disk)` })
+      if (edits) logHistory(file, 'agent-op', agent.name, op.op)
       return { result: offline, live: false }
     }
+    // ---------- version history (the CLI reads and writes it directly; these need the app) ----------
+    case 'historyRestore': {
+      // An open file is restored through its tab, which keeps unsaved edits as a version and then reloads.
+      const n = Number(String(params.n ?? '').replace(/^v/i, ''))
+      if (!Number.isInteger(n) || n < 1) throw new Error(`Not a version number: ${params.n}`)
+      const opts = { discardCurrent: !!params.discardCurrent, authors: asAgent(agent).authors }
+      if (win && isOpen(file)) return { version: await askWindow('history-restore', { path: file, n, ...opts }), live: true }
+      return { version: await work('historyRestore', [file, n, opts]), live: false }
+    }
+    case 'historyName':
+      return work('historyName', [file, params.n, String(params.name ?? ''), agent.name])
+    case 'historyForget':
+      await work('historyForget', [file])
+      return { ok: true }
     default:
       throw new Error(`Unknown method "${method}"`)
   }
@@ -231,10 +254,15 @@ function agentsChanged() {
   runner?.publish()
 }
 
-/** Tells the window (to redraw the comment panel) and every listening agent that a thread changed. */
+/** Tells the window (to redraw the comment panel) and every listening agent that a thread changed, and logs it. */
 function commentsChanged(file: string, event: Record<string, unknown>) {
   win?.webContents.send('comments-changed', path.resolve(file))
   bridge?.emit({ ...event, type: String(event.type), path: path.resolve(file) })
+  const by = String(event.author || '')
+  const thread = event.thread as comments.Thread | undefined
+  if (event.type === 'comment' && thread) logHistory(file, 'comment', by, `commented: ${clip(thread.text)}`)
+  else if (event.type === 'reply' && event.reply) logHistory(file, 'reply', by, `replied: ${clip((event.reply as comments.Reply).text)}`)
+  else if (event.type === 'resolved' && thread) logHistory(file, 'resolved', by, `${event.resolved ? 'resolved' : 'reopened'} a comment: ${clip(thread.text)}`)
 }
 const userName = personName
 
@@ -242,6 +270,102 @@ const userName = personName
 function flashIfAsked(text: string) {
   if (win && !win.isDestroyed() && !win.isFocused() && mentionsName(text, userName())) win.flashFrame(true)
 }
+
+// ---------- version history and work history (kept by the worker; see src/core/history) ----------
+/** What the window saves, restores and creates is the person's. */
+const person = (): WriteContext => ({ authors: [{ name: userName(), by: 'person' }] })
+const asAgent = (agent: AgentInfo): WriteContext => ({ authors: [{ name: agent.name, by: 'agent' }] })
+const clip = (s: string, n = 80) => {
+  const t = String(s || '').replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n - 3)}...` : t
+}
+
+/**
+ * A work history event. Main hears about these first; the worker, the app's one history writer, keeps them. Once
+ * kept, the window hears 'history-changed' so an open version history panel shows it.
+ */
+function logHistory(file: string, type: HistoryEventType, by: string, summary: string, at = Date.now()) {
+  const p = path.resolve(file)
+  work('historyEvent', [p, { at, type, by, summary }]).then(() => sendToWindow('history-changed', p), () => {})
+}
+
+/** Tells the window something, unless it is gone (closing during quit): a late history job must not throw then. */
+function sendToWindow(channel: string, ...args: unknown[]) {
+  try {
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(channel, ...args)
+  } catch {
+    /* the window went away meanwhile */
+  }
+}
+
+/** A rename in the app takes the version history of the file (or of every file in the folder) with it, credited to the person. Never fails the rename. */
+const carryHistory = (from: string, to: string) => void work('historyMove', [path.resolve(from), path.resolve(to), userName()]).catch(() => {})
+
+/**
+ * folders.ts reports each changed file of a folder that settled, all in one go. The window refreshes each folder once,
+ * and the worker gets every changed path in one batch: it looks for outside changes in the ones it keeps history for
+ * (main does no per-file work here, so a big checkout into a watched folder cannot stall the window).
+ */
+const changedDirs = new Map<string, [string, string]>()
+const changedFiles = new Set<string>()
+function folderChanged(root: string, dir: string, file: string) {
+  if (!changedDirs.size && !changedFiles.size) {
+    setImmediate(() => {
+      // Taken and cleared first: if sending throws, later changes still get their own flush.
+      const dirs = [...changedDirs.values()]
+      const files = [...changedFiles]
+      changedDirs.clear()
+      changedFiles.clear()
+      for (const [r, d] of dirs) sendToWindow('folder-changed', r, d)
+      if (files.length) work('historyCheckChanged', [files]).catch(() => {})
+    })
+  }
+  changedDirs.set(`${root}|${dir}`.toLowerCase(), [root, dir])
+  changedFiles.add(file)
+}
+
+// Agents connected with `gdocs listen` come and go: `listen --once` reconnects after every comment it handles. Only
+// arriving and leaving for good belong in the work history, so a departure is logged after a grace period.
+const LISTEN_GRACE_MS = 2 * 60_000
+let listening = new Map<string, Listener>()
+const leaving = new Map<string, { timer: NodeJS.Timeout; log: () => void }>()
+const listenKey = (l: Listener) => `${l.agent.toLowerCase()}|${path.resolve(l.path!).toLowerCase()}`
+function listenersChanged(list: Listener[]) {
+  const now = new Map(list.filter(l => l.path).map(l => [listenKey(l), l]))
+  for (const [k, l] of now) {
+    if (listening.has(k)) continue
+    const away = leaving.get(k)
+    if (away) {
+      clearTimeout(away.timer) // back within the grace period: the same visit
+      leaving.delete(k)
+    } else logHistory(l.path!, 'connected', l.agent, 'started listening')
+  }
+  for (const [k, l] of listening) {
+    if (now.has(k) || leaving.has(k)) continue
+    const at = Date.now()
+    const log = () => {
+      leaving.delete(k)
+      logHistory(l.path!, 'disconnected', l.agent, 'stopped listening', at)
+    }
+    leaving.set(k, { timer: setTimeout(log, LISTEN_GRACE_MS), log })
+  }
+  listening = now
+  win?.webContents.send('listeners', allListeners())
+}
+
+/** "Version history paused: <reason>": the window hears it once per session, however often the worker reports it. */
+let historyPaused: string | null = null
+let historyPausedShown = false
+function showHistoryPaused() {
+  if (!historyPaused || historyPausedShown || !win || win.webContents.isLoading()) return
+  historyPausedShown = true
+  win.webContents.send('history-paused', historyPaused)
+}
+onWorkerEvent((name, data) => {
+  if (name !== 'history-paused' || historyPaused) return
+  historyPaused = String((data as { reason?: unknown })?.reason || 'unknown error')
+  showHistoryPaused()
+})
 
 // ---------- window ----------
 function createWindow() {
@@ -261,6 +385,8 @@ function createWindow() {
   })
   win.once('ready-to-show', () => win?.show())
   win.on('focus', () => win?.flashFrame(false))
+  // A history failure reported before the window could hear it (a moment for its listeners to be set up).
+  win.webContents.on('did-finish-load', () => setTimeout(showHistoryPaused, 1000))
   win.on('closed', () => {
     win = null
     tabs = []
@@ -310,6 +436,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
     if (kindOf(p) === 'pdf') {
       const st = fs.statSync(p)
       addRecent(p)
+      work('historyCheck', [p]).catch(() => {}) // the worker's loadFile does this for every other kind
       return { path: p, kind: 'pdf', payload: { kind: 'pdf', bytes: new Uint8Array(0), url: fileUrl(p, st.mtimeMs) }, mtime: st.mtimeMs }
     }
     const f = await work<OpenFile>('loadFile', [p])
@@ -324,8 +451,37 @@ const api: Record<string, (...a: any[]) => unknown> = {
   largeForget: (file: string) => work('largeForget', [file]),
   /** An installed font's file for a PDF font name (PDF text edits keep the PDF's own font when it's installed). */
   systemFont: (name: string) => work('systemFont', [name]),
-  save: (file: string, payload: FilePayload) => work<number>('saveFile', [file, payload]),
-  newFile: (kind: Kind, ext?: string, dir?: string) => newFilePath(kind, ext, undefined, dir),
+  /** ctx: who changed it since the last save ({ authors, summary }); the person when the window does not say. */
+  save: (file: string, payload: FilePayload, ctx?: WriteContext) => work<number>('saveFile', [file, payload, ctx ?? person()]),
+  newFile: (kind: Kind, ext?: string, dir?: string) => newFilePath(kind, ext, undefined, dir, person()),
+  /** The person's name: comments and versions credit it, and agents @mention it to ask them something. */
+  userName: () => userName(),
+  // ---------- version history (worker jobs; see historyJobs.ts) ----------
+  historyList: (file: string) => work('historyList', [file]),
+  historyLog: (file: string) => work('historyLog', [file]),
+  historyDiff: (file: string, a: number, b?: number) => work('historyDiff', [file, a, b]),
+  /** opts: { unsavedPayload?, unsavedAuthors?, discardCurrent?, authors? }; authors (who asks) default to the person; unsavedAuthors (who made the unsaved edits) to authors. */
+  historyRestore: (
+    file: string,
+    n: number,
+    opts: { unsavedPayload?: FilePayload; unsavedAuthors?: WriteContext['authors']; discardCurrent?: boolean; authors?: WriteContext['authors'] } = {}
+  ) =>
+    work('historyRestore', [file, n, { ...opts, authors: opts.authors?.length ? opts.authors : person().authors }]),
+  historyName: (file: string, n: number, name: string) => work('historyName', [file, n, name, userName()]),
+  historyForget: (file: string) => work('historyForget', [file]),
+  historyMove: (from: string, to: string) => work('historyMove', [from, to, userName()]),
+  historyCheck: (file: string) => work('historyCheck', [file]),
+  historyEvent: (file: string, event: { type: HistoryEventType; by: string; summary: string; at?: number }) => work('historyEvent', [file, event]),
+  historyCleanup: () => work('historyCleanup'),
+  /** { bytes, capBytes, overCapBytes?, paused?, dir } (paused: the reason history stopped recording this session; dir: where it is kept). */
+  historyStats: async () => ({
+    ...(await work<Record<string, unknown>>('historyStats')),
+    ...(historyPaused ? { paused: historyPaused } : {}),
+    dir: path.join(HOME, 'history')
+  }),
+  historyFlush: () => work('historyFlush'),
+  /** Writes version n to a new file in the docs folder and returns its path (Open as a copy). */
+  historyOpenCopy: (file: string, n: number) => work<string>('historyOpenCopy', [file, n]),
   // ---------- projects: folders on the home screen and in the explorer (listing and search run on the worker) ----------
   projectsList: () => work('projectsList'),
   projectsAdd: (dir: string, name?: string) => work('projectsAdd', [dir, name]),
@@ -351,6 +507,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
     renameRecent(p, to)
     renameInstructions(p, to)
     comments.renameComments(p, to)
+    carryHistory(p, to)
     return to
   },
   /** To the Recycle Bin (or the OS trash), never a hard delete. */
@@ -358,7 +515,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
   /** Files gauzzaDocs does not edit (images, zips, ...) open in their usual app. */
   openWithSystem: (p: string) => shell.openPath(p),
   /** The window says which project folders it is showing; only those are watched. */
-  watchFolders: (roots: string[]) => watchFolders(roots, (root, dir) => win?.webContents.send('folder-changed', root, dir)),
+  watchFolders: (roots: string[]) => watchFolders(roots, folderChanged),
   openDialog: async () => {
     const r = await dialog.showOpenDialog(win!, { properties: ['openFile', 'multiSelections'], filters: OPEN_FILTERS })
     return r.canceled ? [] : r.filePaths
@@ -380,8 +537,9 @@ const api: Record<string, (...a: any[]) => unknown> = {
       filters: [{ name: format.toUpperCase(), extensions: [format] }]
     })
     if (r.canceled || !r.filePath) return null
-    if (format === 'pdf' && payload.kind !== 'pdf') fs.writeFileSync(r.filePath, await htmlToPdf(html || '', stem(file)))
-    else await work('saveFile', [r.filePath, payload])
+    // A save like any other: exporting over an existing file keeps a version of it, credited to the person.
+    if (format === 'pdf' && payload.kind !== 'pdf') await work('saveFile', [r.filePath, { kind: 'pdf', bytes: await htmlToPdf(html || '', stem(file)) }, person()])
+    else await work('saveFile', [r.filePath, payload, person()])
     return r.filePath
   },
   print: async (html: string, title: string) => {
@@ -401,14 +559,20 @@ const api: Record<string, (...a: any[]) => unknown> = {
     renameInstructions(file, to)
     subs.renameSubscriptions(file, to)
     comments.renameComments(file, to)
+    carryHistory(file, to)
     return to
   },
   instructions: (file?: string) => instructionsFor(file),
-  /** file null = the global instructions. Per-file ones in HTML/Markdown are written into the file itself. */
-  setInstructions: (file: string | null, text: string) => {
+  /**
+   * file null = the global instructions. Per-file ones in HTML/Markdown are written into the file itself: a save, so
+   * the worker does it and keeps a version credited to the person. Resolves with the file's mtime, so the open tab
+   * does not take this for someone else's edit.
+   */
+  setInstructions: async (file: string | null, text: string) => {
     if (!file) return setGlobal(text), 0
-    setDocInstructions(file, text)
-    return fs.statSync(file).mtimeMs // so the open tab does not take this for someone else's edit
+    if (inFile(file)) return work<number>('setDocInstructions', [file, text, person()])
+    await setDocInstructions(file, text)
+    return fs.statSync(file).mtimeMs
   },
   recent: () => getRecent(),
   removeRecent: (file: string) => removeRecent(file),
@@ -456,8 +620,6 @@ const api: Record<string, (...a: any[]) => unknown> = {
   pluginsRemove: (id: string) => work('pluginsRemove', [id]),
   pluginsSetEnabled: (id: string, on: boolean) => work('pluginsSetEnabled', [id, on]),
   // Comments made in the window are the person's.
-  /** The person's name: their comments are signed with it and agents @mention it to ask them something. */
-  userName: () => userName(),
   commentsList: (file: string, all?: boolean) => comments.list(file, { all }),
   commentAdd: (file: string, c: { text: string; quote?: string; anchor?: comments.Thread['anchor'] }) => {
     const t = comments.add(file, { ...c, author: userName(), by: 'user' })
@@ -488,6 +650,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
     const sub = subs.subscribe(file, s)
     if (s.start) runner?.wake(sub.id)
     agentsChanged()
+    logHistory(sub.path, 'subscribed', userName(), `added ${sub.name} as ${sub.role}`)
     return sub
   },
   agentUpdate: (id: string, patch: { brief?: string; role?: subs.Role; paused?: boolean }) => {
@@ -497,9 +660,11 @@ const api: Record<string, (...a: any[]) => unknown> = {
     return sub
   },
   agentRemove: (id: string) => {
+    const sub = subs.listSubscriptions().find(x => x.id === id)
     runner?.stop(id)
     subs.unsubscribe(id)
     agentsChanged()
+    if (sub) logHistory(sub.path, 'unsubscribed', userName(), `removed ${sub.name}`)
   },
   agentWake: (id: string, note?: string) => {
     const s = subs.listSubscriptions().find(x => x.id === id)
@@ -637,6 +802,10 @@ else {
     })
     fs.mkdirSync(getSettings().docsDir, { recursive: true })
     warmUp()
+    // Version history retention and size cap: at start (once the first file has had time to open) and once a day.
+    const cleanHistory = () => void work('historyCleanup').catch(() => {})
+    setTimeout(cleanHistory, 30_000)
+    setInterval(cleanHistory, 24 * 60 * 60_000)
     if (app.isPackaged) registerWithWindows(process.execPath).catch(() => {}) // Open with + the Default apps page
     if (app.isPackaged) work('agentsRefresh', [app.getVersion()]).catch(() => {}) // keep installed skills current
     setupSpelling(getSettings().spellcheck !== false)
@@ -647,17 +816,38 @@ else {
     } catch { /* agents fall back to the gdocs on PATH */ }
     runner = new AgentRunner({
       binDir,
-      notify: states => win?.webContents.send('agents-state', states)
+      notify: states => win?.webContents.send('agents-state', states),
+      // Every turn a subscribed agent takes (asked for by the person, by `gdocs wake`, or by something on the doc).
+      onRunStart: sub => logHistory(sub.path, 'woken', sub.name, 'woke up and took a turn')
     })
-    bridge = await startBridge(rpc, () => win?.webContents.send('listeners', allListeners()), ev => runner?.onEvent(ev as subs.DocEvent))
+    bridge = await startBridge(rpc, listenersChanged, ev => runner?.onEvent(ev as subs.DocEvent))
     installCli()
     createWindow()
     watchForUpdates(() => win)
     const initial = [...filesFromArgv(process.argv), ...pendingOpen.splice(0)]
     if (initial.length) win!.webContents.once('did-finish-load', () => setTimeout(() => initial.forEach(f => openInWindow(f).catch(() => {})), 300))
   })
-  app.on('before-quit', () => {
+  // Queued history writes get up to 5 seconds to finish before the worker stops (a slow disk must not hold up quitting).
+  let historyFlushed = false
+  let flushing = false
+  app.on('before-quit', e => {
     forceQuit = true
+    if (!historyFlushed) {
+      e.preventDefault()
+      if (flushing) return
+      flushing = true
+      for (const away of [...leaving.values()]) {
+        clearTimeout(away.timer)
+        away.log() // agents that left during the grace period
+      }
+      Promise.race([work('historyFlush'), new Promise(r => setTimeout(r, 5_000))])
+        .catch(() => {})
+        .finally(() => {
+          historyFlushed = true
+          app.quit()
+        })
+      return
+    }
     closeLook()
     runner?.shutdown()
     stopWorker()
