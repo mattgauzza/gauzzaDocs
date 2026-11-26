@@ -405,7 +405,7 @@ mark.cmt {
   vertical-align: -0.08em;
   background: var(--who);
   border-radius: 1px;
-  animation: blink 1.06s steps(1, end) .9s 6;
+  animation: blink 1.06s steps(1, end) .9s infinite;
 }
 
 .flag {
