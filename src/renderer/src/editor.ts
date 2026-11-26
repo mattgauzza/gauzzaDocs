@@ -1,4 +1,4 @@
-import type { AgentInfo, AgentOp, FilePayload, Settings } from '../../shared/types'
+import type { AgentInfo, AgentOp, CommentAnchor, FilePayload, Settings } from '../../shared/types'
 
 /**
  * Contract between the app shell (tabs, title bar, menus, autosave, agent routing, plugins) and the four editors
@@ -41,6 +41,13 @@ export interface EditorHandle {
   setText?(text: string): void // one undoable change
   getSelection?(): string
   replaceSelection?(text: string): void
+  /**
+   * Where a new comment points and the words its quote shows, when the editor's selection isn't text (a design's
+   * selected layer and its name). null when nothing is selected: the comment is on the whole file.
+   */
+  commentAnchor?(): { anchor: CommentAnchor; quote: string } | null
+  /** Shows what a comment points at: clicking a design comment selects its layer. */
+  showAnchor?(anchor: CommentAnchor): void
   /** Language id for plugins (text editor: from the extension; doc: 'html'; sheet: 'csv'). */
   language?: string
   /** Shared commands: 'undo' | 'redo' | 'find' | 'replace' | 'selectAll' | 'cut' | 'copy' | 'paste'. */

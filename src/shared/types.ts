@@ -182,6 +182,20 @@ export interface AgentInfo {
   color?: string
 }
 
+/**
+ * Where a comment points, when the editor knows: a line, a cell, a page, or a design's artboard and layer (x and y,
+ * a point on the artboard). Comments in core/comments.ts and the window's mirror in renderer/lib.ts both use this.
+ */
+export interface CommentAnchor {
+  line?: number
+  cell?: string
+  page?: number
+  artboard?: string
+  layer?: string
+  x?: number
+  y?: number
+}
+
 export interface RecentFile {
   path: string
   kind: Kind

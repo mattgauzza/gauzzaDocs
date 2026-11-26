@@ -460,6 +460,8 @@ const api: Record<string, (...a: any[]) => unknown> = {
   designFallbackFont: () => work('designFallbackFont'),
   /** A diagram's graph laid out by ELK. */
   designLayout: (graph: unknown) => work('designLayout', [graph]),
+  /** Every installed font face ({ family, weight, style, postscript }), for a design's font picker. */
+  fontFaces: () => work('fontFaces'),
   /** ctx: who changed it since the last save ({ authors, summary }); the person when the window does not say. */
   save: (file: string, payload: FilePayload, ctx?: WriteContext) => work<number>('saveFile', [file, payload, ctx ?? person()]),
   /** preset: a new design's size (a PRESETS name or <w>x<h>). */

@@ -1,6 +1,6 @@
 import { parentPort } from 'node:worker_threads'
 import { createFile, loadFile, saveFile } from '../core/files'
-import { fontFaceBytes, systemFontBytes } from '../core/systemFonts'
+import { fontFaceBytes, listFontFaces, systemFontBytes } from '../core/systemFonts'
 import { fallbackFontBytes } from '../core/design/fallbackFont'
 import { layoutDiagram } from '../core/design/layout'
 import { findInFile, forgetIndex, indexFile, readLines } from '../core/large'
@@ -33,6 +33,8 @@ const fns: Record<string, Fn> = {
   designFontBytes: ([ref]) => fontFaceBytes(ref),
   designFallbackFont: () => fallbackFontBytes(),
   designLayout: ([graph]) => layoutDiagram(graph),
+  // The font picker: every face by family, weight, style and PostScript name (where its file is stays here).
+  fontFaces: async () => (await listFontFaces()).map(({ family, weight, style, postscript }) => ({ family, weight, style, postscript })),
   // preset: a new design's size (a PRESETS name or <w>x<h>); other kinds ignore it
   createFile: ([file, ctx, preset]) => createFile(file, ctx, preset),
   setDocInstructions: ([file, text, ctx]) => setDocInstructions(file, text, ctx),

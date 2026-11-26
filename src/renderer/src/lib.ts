@@ -1,4 +1,4 @@
-import type { Author, HistoryVersion, InstalledPlugin, OpenFile, RecentFile, Settings, FilePayload } from '../../shared/types'
+import type { Author, CommentAnchor, HistoryVersion, InstalledPlugin, OpenFile, RecentFile, Settings, FilePayload } from '../../shared/types'
 import type { Kind } from '../../shared/kinds'
 import type { Hunk } from '../../shared/diff'
 import type { ElkGraph, FontRef } from '../../shared/design/types'
@@ -7,7 +7,7 @@ import type { ElkGraph, FontRef } from '../../shared/design/types'
 export interface Reply { id: string; author: string; by: 'user' | 'agent'; text: string; created: number }
 export interface Thread extends Reply {
   quote?: string
-  anchor?: { line?: number; cell?: string; page?: number }
+  anchor?: CommentAnchor
   resolved?: boolean
   replies: Reply[]
 }
@@ -119,6 +119,8 @@ export const api = {
   designFallbackFont: () => window.gd.call<Uint8Array>('designFallbackFont'),
   /** A diagram's graph laid out by ELK, for the design ops' `services.layout`. */
   designLayout: (graph: ElkGraph) => window.gd.call<ElkGraph>('designLayout', graph),
+  /** Every installed font face by family, weight, style and PostScript name (the font picker). */
+  fontFaces: () => window.gd.call<FontRef[]>('fontFaces'),
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
   openDefaultApps: () => window.gd.call('openDefaultApps'),

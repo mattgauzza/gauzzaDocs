@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { CommentAnchor } from '../../../shared/types'
 import { type Listener, type Thread, api, when } from '../lib'
 import { Icon } from './icons'
 import { usePanelSize } from './resize'
@@ -39,9 +40,12 @@ export function CommentsPanel(props: {
   path: string
   listeners: Listener[]
   draftQuote: string // the selection when "Add comment" was used
+  draftAnchor?: CommentAnchor // where it points, when the editor said (a design's selected layer)
   draftText?: string // text to start the new comment with (e.g. "@agent: ")
   onClose(): void
   onCount(n: number): void
+  /** A thread was clicked: the editor shows what it points at (a design selects its layer). */
+  onPick?(t: Thread): void
   focusDraft: number // bumped to focus the new-comment box
   focusThread?: { id: string; n: number } // bumped to scroll to and flash one thread
 }) {
@@ -50,6 +54,8 @@ export function CommentsPanel(props: {
   const [showResolved, setShowResolved] = useState(false)
   const [draft, setDraft] = useState('')
   const [quote, setQuote] = useState(props.draftQuote)
+  // goes with the quote: dropping the quote comments on the whole file
+  const [anchor, setAnchor] = useState(props.draftAnchor)
   const box = useRef<HTMLTextAreaElement>(null)
   const fresh = useRef(new Set<string>()) // threads/replies that just arrived from an agent, highlighted briefly
   const needs = useNeedsYou(props.path) // threads where an agent asked the person something
@@ -70,6 +76,7 @@ export function CommentsPanel(props: {
   }, [props.path])
   useEffect(() => {
     setQuote(props.draftQuote)
+    setAnchor(props.draftAnchor)
     if (props.draftText) setDraft(props.draftText)
     if (props.focusDraft)
       setTimeout(() => {
@@ -99,9 +106,10 @@ export function CommentsPanel(props: {
   const listening = props.listeners.filter(l => !l.path || l.path.toLowerCase() === props.path.toLowerCase())
   const add = async () => {
     if (!draft.trim()) return
-    await api.commentAdd(props.path, { text: draft, quote: quote || undefined })
+    await api.commentAdd(props.path, { text: draft, quote: quote || undefined, anchor: quote ? anchor : undefined })
     setDraft('')
     setQuote('')
+    setAnchor(undefined)
     load()
   }
   // Newest first, with the threads that need the person on top.
@@ -161,7 +169,7 @@ export function CommentsPanel(props: {
       <div className="cm-list" ref={listRef}>
         {!shown.length && <p className="muted small cm-empty">No comments yet. Select something and press Ctrl+Alt+M, or write above.</p>}
         {shown.map(t => (
-          <ThreadCard key={t.id} t={t} path={props.path} fresh={fresh.current} needsYou={needs.has(t.id)} onChange={load} />
+          <ThreadCard key={t.id} t={t} path={props.path} fresh={fresh.current} needsYou={needs.has(t.id)} onChange={load} onPick={props.onPick} />
         ))}
       </div>
     </aside>
@@ -176,7 +184,7 @@ function Avatar({ name, by }: { name: string; by: 'user' | 'agent' }) {
   )
 }
 
-function ThreadCard({ t, path, fresh, needsYou, onChange }: { t: Thread; path: string; fresh: Set<string>; needsYou: boolean; onChange(): void }) {
+function ThreadCard({ t, path, fresh, needsYou, onChange, onPick }: { t: Thread; path: string; fresh: Set<string>; needsYou: boolean; onChange(): void; onPick?(t: Thread): void }) {
   const [reply, setReply] = useState('')
   const [open, setOpen] = useState(false)
   const send = async () => {
@@ -191,7 +199,7 @@ function ThreadCard({ t, path, fresh, needsYou, onChange }: { t: Thread; path: s
     return true
   }
   return (
-    <div data-thread={t.id} style={t.by === 'agent' ? { ['--agent' as string]: agentColor(t.author), borderLeft: `3px solid ${agentColor(t.author)}` } : undefined} className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}${needsYou ? ' needs-you' : ''}`} onClick={() => (setOpen(true), markSeen(path, t))}>
+    <div data-thread={t.id} style={t.by === 'agent' ? { ['--agent' as string]: agentColor(t.author), borderLeft: `3px solid ${agentColor(t.author)}` } : undefined} className={`cm-thread${t.resolved ? ' resolved' : ''}${isFresh(t.id) ? ' fresh' : ''}${needsYou ? ' needs-you' : ''}`} onClick={() => (setOpen(true), markSeen(path, t), onPick?.(t))}>
       <div className="cm-head">
         <Avatar name={t.author} by={t.by} />
         <div className="grow">

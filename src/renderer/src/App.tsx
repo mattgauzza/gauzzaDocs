@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type Kind, baseName, extOf, kindOf, lossy, stem } from '../../shared/kinds'
-import type { AgentInfo, AgentOp, Author, FilePayload, HistoryVersion, Settings } from '../../shared/types'
+import type { AgentInfo, AgentOp, Author, CommentAnchor, FilePayload, HistoryVersion, Settings } from '../../shared/types'
 import type { EditorHandle, EditorProps, MenuItem, MenuName } from './editor'
 import { type Listener, api, dirOf } from './lib'
 import { DONATE, EMPIRICAL_VOICE, REPO, SUBMIT_PLUGIN } from '../../shared/links'
@@ -139,6 +139,7 @@ export default function App() {
   const [commentsOpen, setCommentsOpen] = useState(false)
   const [commentCount, setCommentCount] = useState(0)
   const [draftQuote, setDraftQuote] = useState('')
+  const [draftAnchor, setDraftAnchor] = useState<CommentAnchor | undefined>()
   const [focusDraft, setFocusDraft] = useState(0)
   // Threads where an agent @mentioned the person and is waiting on them, for every open tab.
   useNeedsYouVersion()
@@ -163,7 +164,11 @@ export default function App() {
   const listensTo = (file: string) => listenersRef.current.filter(l => !l.path || l.path.toLowerCase() === file.toLowerCase())
   const addComment = () => {
     const t = tabsRef.current.find(x => x.id === activeRef.current)
-    const sel = t ? handles.current.get(t.id)?.getSelection?.() || '' : ''
+    const h = t ? handles.current.get(t.id) : undefined
+    // a design comments on its selected layer (quoted by name); text editors quote the selected text
+    const at = h?.commentAnchor?.() ?? null
+    const sel = at ? at.quote : h?.getSelection?.() || ''
+    setDraftAnchor(at?.anchor)
     setDraftQuote(sel.trim())
     setDraftText('')
     setCommentsOpen(true)
@@ -1166,8 +1171,9 @@ export default function App() {
           })}
         </div>
         {cur && commentsOpen && active !== HOME && (
-          <CommentsPanel key={cur.path} path={cur.path} listeners={listeners} draftQuote={draftQuote} draftText={draftText} focusDraft={focusDraft}
-            focusThread={focusedThread} onClose={() => setCommentsOpen(false)} onCount={setCommentCount} />
+          <CommentsPanel key={cur.path} path={cur.path} listeners={listeners} draftQuote={draftQuote} draftAnchor={draftAnchor} draftText={draftText} focusDraft={focusDraft}
+            focusThread={focusedThread} onClose={() => setCommentsOpen(false)} onCount={setCommentCount}
+            onPick={t => t.anchor && handles.current.get(cur.id)?.showAnchor?.(t.anchor)} />
         )}
         {cur && historyOpen && active !== HOME && (
           <HistoryPanel key={cur.path} path={cur.path} dirty={cur.dirty} refreshKey={cur.mtime} onClose={() => setHistoryOpen(false)}

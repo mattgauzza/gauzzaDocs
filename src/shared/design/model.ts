@@ -15,6 +15,9 @@ export const PRESETS: Record<string, { width: number; height: number; transparen
   letter: { width: 816, height: 1056, label: 'Letter page' }
 }
 
+/** A design's size when none is asked for. */
+export const DEFAULT_DESIGN_PRESET = 'instagram'
+
 const rand = (): string => Math.random().toString(36).slice(2, 10).padEnd(8, '0')
 
 /** Eight base36 characters. Pass the ids already in use and the result is guaranteed not to collide with them. */

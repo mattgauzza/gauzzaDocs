@@ -11,7 +11,7 @@ import { designZipBytes, readDesignZip } from './formats/design'
 import { withDesignLock } from './design/lock'
 import { type WriteContext, guardedWrite, writeAtomic } from './history'
 import { newDeck } from '../shared/slides/model' // slides
-import { newDesign } from '../shared/design/model'
+import { DEFAULT_DESIGN_PRESET, newDesign } from '../shared/design/model'
 import { LARGE_BYTES } from './large'
 import { extOf } from '../shared/kinds'
 
@@ -93,8 +93,7 @@ export async function saveFile(file: string, payload: FilePayload, ctx: WriteCon
   return st.mtime
 }
 
-/** A design's size when none is asked for. */
-export const DEFAULT_DESIGN_PRESET = 'instagram'
+export { DEFAULT_DESIGN_PRESET }
 
 /**
  * A brand-new empty file of the given kind. `ctx` says who created it (its first version's authors). `preset` is a

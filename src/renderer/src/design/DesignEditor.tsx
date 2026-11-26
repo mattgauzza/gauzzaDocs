@@ -1,28 +1,39 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { type FontSource, fontsFor, newFonts } from '../../../shared/design/fonts'
-import { newDesign, walk } from '../../../shared/design/model'
+import { fin } from '../../../shared/design/geometry'
+import { DEFAULT_DESIGN_PRESET, newDesign, walk } from '../../../shared/design/model'
 import { type Downgrade, designToSvg } from '../../../shared/design/render'
-import type { Design, DesignFile, FontRef } from '../../../shared/design/types'
+import type { Artboard, Design, DesignFile, FontRef, Layer } from '../../../shared/design/types'
 import { applyDesignOp } from '../../../shared/ops/design'
 import type { OpServices } from '../../../shared/ops/types'
-import type { AgentInfo, AgentOp, FilePayload } from '../../../shared/types'
+import type { AgentInfo, AgentOp, CommentAnchor, FilePayload } from '../../../shared/types'
 import type { EditorHandle, EditorProps, MenuItem, StatusItem } from '../editor'
 import { api } from '../lib'
 import { stepZoom } from '../shell/zoom'
+import { Canvas, type Drawn, type Sel } from './Canvas'
+import { Layers } from './Layers'
+import { Props } from './Props'
 import { DesignSaves } from './saves'
+import { type Placed, deltaIn, placeAll } from './selection'
 import './design.css'
 
 /**
- * The design editor (.gdesign), first version: every artboard side by side on a neutral canvas, drawn by the one
- * renderer (designToSvg, raster mode) as inline SVG, with zoom (Ctrl+scroll, the toolbar or View) and scrolling. Agent
- * ops (shared/ops/design.ts) apply here exactly as on disk, one at a time, each one undo step named for the agent
- * ("Claude: added 3 layers"). Undo keeps 100 designs. Fonts are measured with the installed faces the worker finds,
- * and diagrams are laid out by the worker too (ELK can't run in this window).
+ * The design editor (.gdesign): every artboard side by side on a neutral canvas, drawn by the one renderer
+ * (designToSvg, raster mode) as inline SVG, with zoom (Ctrl+scroll, the toolbar or View), the layers panel on the left
+ * and the selected layer's properties on the right. Everything that changes the design, the person's clicks and drags
+ * as much as an agent's ops, goes through applyDesignOp (shared/ops/design.ts) exactly as on disk, one at a time, each
+ * one undo step: an agent's named for it ("Claude: added 3 layers"), the person's for what it did ("set fill on Logo").
+ * Undo keeps 100 designs. Fonts are measured with the installed faces the worker finds, and diagrams are laid out by the
+ * worker too (ELK can't run in this window). Layers an agent touches flash in its color.
  */
 
 /** Zoom levels, as a share of the design's own pixels. */
 const ZOOMS = [0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 3, 4]
 const MAX_UNDO = 100
+/** Changes of one kind (a run of arrow nudges, a color being picked) closer together than this are one undo step. */
+const MERGE_MS = 1000
+/** How far Ctrl+D puts a copy from its layer. */
+const COPY_OFFSET = 10
 /** Screen pixels around and between artboards, and the height of a name above one. */
 const PAD = 48
 const GAP = 48
@@ -44,6 +55,7 @@ const Glyph = ({ d }: { d: string }) => (
 )
 
 const plural = (n: number, one: string) => `${n.toLocaleString('en-US')} ${one}${n === 1 ? '' : 's'}`
+const r2 = (v: number) => Math.round(v * 100) / 100
 
 /** Every layer on every artboard, groups' children included. */
 function layerTotal(design: Design): number {
@@ -65,11 +77,32 @@ function fitZoom(design: Design, width: number, height: number): number {
 
 const fontKey = (r: FontRef) => `${r.family.toLowerCase()}|${r.weight}|${r.style}|${r.postscript ?? ''}`
 
+/** The layers and artboards an op's result names ({ ids }, { id }, an apply's results), to flash. */
+function touched(result: unknown): string[] {
+  const out = new Set<string>()
+  const go = (v: unknown, depth: number): void => {
+    if (!v || typeof v !== 'object' || depth > 3) return
+    if (Array.isArray(v)) return v.forEach(x => go(x, depth + 1))
+    const o = v as Record<string, unknown>
+    if (Array.isArray(o.ids)) for (const id of o.ids) if (typeof id === 'string') out.add(id)
+    if (typeof o.id === 'string') out.add(o.id)
+    if (Array.isArray(o.results)) go(o.results, depth + 1)
+  }
+  go(result, 0)
+  return [...out]
+}
+
+/** Whether a key went to a place the person types in. */
+const typing = (t: EventTarget | null): boolean => {
+  const el = t as HTMLElement | null
+  return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName || ''))
+}
+
 export default function DesignEditor(props: EditorProps) {
   const propsRef = useRef(props)
   propsRef.current = props
   const loaded = props.payload.kind === 'design' ? props.payload : null
-  const [file, setFileState] = useState<DesignFile>(() => loaded?.file ?? { design: newDesign('instagram'), assets: {} })
+  const [file, setFileState] = useState<DesignFile>(() => loaded?.file ?? { design: newDesign(DEFAULT_DESIGN_PRESET), assets: {} })
   const fileRef = useRef(file)
   const [fonts, setFonts] = useState<FontSource | null>(null)
   /** The fonts the drawing and the ops measure with, and the design they were loaded for. */
@@ -83,12 +116,30 @@ export default function DesignEditor(props: EditorProps) {
   const [notesOpen, setNotesOpen] = useState(false)
   const past = useRef<Step[]>([])
   const future = useRef<Step[]>([])
+  /** The last change that a following one of the same kind may join (see MERGE_MS). */
+  const lastMerge = useRef<{ key: string; at: number } | null>(null)
   /** What the file on disk holds: a save sends only the other assets. */
   const saves = useRef(new DesignSaves(loaded?.file.assets ?? {}))
   /** Changed since it was opened: the thumbnail in the file no longer matches (only export draws thumbnails). */
   const changed = useRef(false)
   const queue = useRef<Promise<unknown>>(Promise.resolve())
   const scroller = useRef<HTMLDivElement>(null)
+  const root = useRef<HTMLDivElement>(null)
+  const [sel, setSelState] = useState<Sel>(() => ({ board: file.design.artboards[0]?.id ?? '', ids: [], scope: null }))
+  const selRef = useRef(sel)
+  const select = (s: Sel) => {
+    selRef.current = s
+    setSelState(s)
+  }
+  const [flash, setFlash] = useState<{ ids: string[]; n: number } | null>(null)
+  const [reveal, setReveal] = useState(0)
+  const [msg, setMsg] = useState('')
+  const msgTimer = useRef(0)
+  const say = (m: string) => {
+    setMsg(m)
+    window.clearTimeout(msgTimer.current)
+    msgTimer.current = window.setTimeout(() => setMsg(''), 4000)
+  }
 
   // ---------- fonts (installed faces and the fallback come from the worker; bytes fetched once per face) ----------
   const fallback = useRef<Promise<Uint8Array> | null>(null)
@@ -123,21 +174,31 @@ export default function DesignEditor(props: EditorProps) {
     setFileState(next)
     propsRef.current.onChange()
   }
-  const commit = (next: DesignFile, label: string) => {
-    past.current.push({ file: fileRef.current, label })
-    if (past.current.length > MAX_UNDO) past.current.shift()
+  /** One undo step; `merge` joins it to the step before when that was the same kind of change a moment ago. */
+  const commit = (next: DesignFile, label: string, merge?: string) => {
+    const now = Date.now()
+    const last = lastMerge.current
+    const top = past.current.at(-1)
+    if (merge && top && last?.key === merge && now - last.at < MERGE_MS) top.label = label
+    else {
+      past.current.push({ file: fileRef.current, label })
+      if (past.current.length > MAX_UNDO) past.current.shift()
+    }
+    lastMerge.current = merge ? { key: merge, at: now } : null
     future.current = []
     setFile(next)
   }
   const undo = () => {
     const step = past.current.pop()
     if (!step) return
+    lastMerge.current = null
     future.current.push({ file: fileRef.current, label: step.label })
     setFile(step.file)
   }
   const redo = () => {
     const step = future.current.pop()
     if (!step) return
+    lastMerge.current = null
     past.current.push({ file: fileRef.current, label: step.label })
     setFile(step.file)
   }
@@ -146,14 +207,30 @@ export default function DesignEditor(props: EditorProps) {
     const built = fontsRef.current?.built
     if (built && newFonts(built, file.design)) void loadFonts(file).catch(() => {})
   }, [file])
+  // What's selected and gone (an agent deleted it, an undo) drops out of the selection.
+  useEffect(() => {
+    const s = selRef.current
+    const board = file.design.artboards.find(a => a.id === s.board) ?? file.design.artboards[0]
+    if (!board) return
+    const have = new Set<string>()
+    walk(board.layers, l => have.add(l.id))
+    const ids = s.ids.filter(id => have.has(id))
+    const scope = s.scope && have.has(s.scope) ? s.scope : null
+    if (board.id !== s.board || ids.length !== s.ids.length || scope !== s.scope) select({ board: board.id, ids, scope })
+  }, [file])
+  useEffect(() => {
+    if (!flash) return
+    const t = window.setTimeout(() => setFlash(null), 1800)
+    return () => window.clearTimeout(t)
+  }, [flash])
 
-  // ---------- agent ops: one at a time, each one undo step ----------
+  // ---------- ops: the person's and agents', one at a time, each one undo step ----------
   /**
    * Works an op out on the design as it is, then applies the result in one step. An op that brings in a font not loaded
    * yet (a new text family, an svg import) is worked out again once it's loaded, so its text is measured in it. If the
-   * person undid or redid while an op waited (layout, fonts), it's worked out again on what's there now.
+   * design changed while an op waited (layout, fonts), it's worked out again on what's there now.
    */
-  const applyAgentOp = async (op: AgentOp, agent: AgentInfo): Promise<unknown> => {
+  const applyOp = async (op: AgentOp, name: (summary: string) => string, merge?: string) => {
     if (failedRef.current) throw new Error(failedRef.current)
     for (let tries = 0; ; tries++) {
       const before = fileRef.current
@@ -174,14 +251,127 @@ export default function DesignEditor(props: EditorProps) {
         if (tries < 3) continue
         throw new Error('The design kept changing while this ran. Try again.')
       }
-      if (r.file) commit(r.file, `${agent?.name || 'Agent'}: ${r.summary}`)
-      return r.result
+      if (r.file) commit(r.file, name(r.summary), merge)
+      return r
     }
   }
-  const agentOp = (op: AgentOp, agent: AgentInfo): Promise<unknown> => {
-    const run = queue.current.then(() => applyAgentOp(op, agent))
+  const enqueue = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const run = queue.current.then(fn)
     queue.current = run.catch(() => {})
     return run
+  }
+  const agentOp = (op: AgentOp, agent: AgentInfo): Promise<unknown> =>
+    enqueue(async () => {
+      const r = await applyOp(op, s => `${agent?.name || 'Agent'}: ${s}`)
+      if (r.file) {
+        const ids = touched(r.result)
+        if (ids.length) setFlash({ ids, n: Date.now() })
+      }
+      return r.result
+    })
+  /**
+   * The person's ops on one artboard, as one undo step named for what they did; several go as one apply. A refusal shows
+   * as a message. Resolves with the result, or null when nothing changed.
+   */
+  const userOps = (board: string, ops: AgentOp[], merge?: string): Promise<unknown> => {
+    if (!ops.length) return Promise.resolve(null)
+    const op: AgentOp = ops.length === 1 ? { ...ops[0], artboard: board } : { op: 'apply', artboard: board, ops }
+    return enqueue(() => applyOp(op, s => s, merge)).then(
+      r => r.result,
+      e => {
+        say((e as Error)?.message || String(e))
+        return null
+      }
+    )
+  }
+
+  // ---------- the selection and what it can do ----------
+  const boardOf = (id: string): Artboard | undefined => fileRef.current.design.artboards.find(a => a.id === id)
+  /** The selected layers that can be acted on: any inside a selected group goes with it. */
+  const tops = (): { board: string; layers: Placed[] } => {
+    const s = selRef.current
+    const b = boardOf(s.board)
+    if (!b) return { board: s.board, layers: [] }
+    const placed = new Map(placeAll(b.layers, b).map(p => [p.layer.id, p]))
+    const layers = s.ids.map(id => placed.get(id)).filter((p): p is Placed => !!p && !p.ancestors.some(a => s.ids.includes(a.id)))
+    return { board: s.board, layers }
+  }
+  const idsIn = (r: unknown): string[] => touched(r).filter(id => id !== selRef.current.board)
+  const nudge = (dx: number, dy: number) => {
+    const { board, layers } = tops()
+    const ops: AgentOp[] = []
+    for (const p of layers.filter(x => !x.locked)) {
+      // along the screen, in the layer's own parent space (a group may be turned)
+      const [x, y] = deltaIn(p.outer, [0, 0], [dx, dy])
+      const props: Record<string, number> = {}
+      if (r2(x)) props.x = r2(fin(p.layer.x, 0) + x)
+      if (r2(y)) props.y = r2(fin(p.layer.y, 0) + y)
+      if (Object.keys(props).length) ops.push({ op: 'set', layer: p.layer.id, props })
+    }
+    void userOps(board, ops, `nudge:${layers.map(p => p.layer.id).join(',')}`)
+  }
+  const remove = () => {
+    const { board, layers } = tops()
+    void userOps(board, layers.map(p => ({ op: 'delete', layer: p.layer.id })))
+  }
+  const duplicate = async () => {
+    const { board, layers } = tops()
+    const r = await userOps(board, layers.map(p => ({ op: 'duplicate', layer: p.layer.id, dx: COPY_OFFSET, dy: COPY_OFFSET })))
+    if (r) select({ ...selRef.current, board, ids: idsIn(r) })
+  }
+  const group = async () => {
+    const { board, layers } = tops()
+    if (!layers.length) return
+    const r = await userOps(board, [{ op: 'group', layers: layers.map(p => p.layer.id) }])
+    if (r) select({ ...selRef.current, board, ids: idsIn(r) })
+  }
+  const ungroup = async () => {
+    const { board, layers } = tops()
+    const groups = layers.filter(p => p.layer.type === 'group')
+    const r = await userOps(board, groups.map(p => ({ op: 'ungroup', layer: p.layer.id })))
+    if (r) select({ ...selRef.current, board, ids: idsIn(r) })
+  }
+  const selectAll = () => {
+    const s = selRef.current
+    const b = boardOf(s.board)
+    if (!b) return
+    const ids = placeAll(b.layers, b)
+      .filter(p => (s.scope ? p.ancestors.at(-1)?.id === s.scope : !p.ancestors.length) && !p.hidden && !p.locked)
+      .map(p => p.layer.id)
+    select({ ...s, ids })
+  }
+  /** Escape: out of the group entered (selecting it), else nothing selected. */
+  const escape = () => {
+    const s = selRef.current
+    if (!s.scope) return select({ ...s, ids: [] })
+    const b = boardOf(s.board)
+    const up = b ? placeAll(b.layers, b).find(p => p.layer.id === s.scope)?.ancestors.at(-1)?.id ?? null : null
+    select({ board: s.board, ids: [s.scope], scope: up })
+  }
+  /** The selected layers on the current artboard, as they are now. */
+  const chosen = (): Layer[] => {
+    const s = selRef.current
+    const b = boardOf(s.board)
+    const out: Layer[] = []
+    if (b) walk(b.layers, l => s.ids.includes(l.id) && out.push(l))
+    return out
+  }
+  /** Selects what a comment points at, and shows it. */
+  const showAnchor = (a: CommentAnchor) => {
+    const boards = fileRef.current.design.artboards
+    let board = boards.find(b => b.id === a.artboard)
+    let found: Placed | undefined
+    for (const b of board ? [board, ...boards.filter(x => x !== board)] : boards) {
+      found = a.layer ? placeAll(b.layers, b).find(p => p.layer.id === a.layer) : undefined
+      if (found) {
+        board = b
+        break
+      }
+    }
+    if (a.layer && !found) say('The layer this comment is on was deleted.')
+    if (!board) return
+    select({ board: board.id, ids: found ? [found.layer.id] : [], scope: found?.ancestors.at(-1)?.id ?? null })
+    setReveal(n => n + 1)
   }
 
   // ---------- zoom ----------
@@ -212,7 +402,7 @@ export default function DesignEditor(props: EditorProps) {
   const drawn = useMemo(() => {
     if (!fonts) return null
     const downgrades: Downgrade[] = []
-    const boards = file.design.artboards.map(a => {
+    const boards: Drawn[] = file.design.artboards.map(a => {
       try {
         return { a, svg: designToSvg(file.design, a.id, { fonts, assets: file.assets, mode: 'raster', downgrades }) }
       } catch (e) {
@@ -245,21 +435,38 @@ export default function DesignEditor(props: EditorProps) {
     ]
   }, [file, zoom, drawn])
 
-  // ---------- keyboard: undo and redo while this tab is in front ----------
+  // ---------- keyboard while this tab is in front ----------
   useEffect(() => {
     if (!props.active) return
     const k = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey) return
-      const t = e.target as HTMLElement | null
-      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''))) return
+      if (typing(e.target)) return
+      const L = live.current
+      const mod = e.ctrlKey || e.metaKey
       const key = e.key.toLowerCase()
-      if (key === 'z' && !e.shiftKey) {
-        e.preventDefault()
-        live.current.undo()
-      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
-        e.preventDefault()
-        live.current.redo()
+      // the editor's own keys only while focus is in it (not in the explorer or a dialog)
+      const here = !document.activeElement || document.activeElement === document.body || !!root.current?.contains(document.activeElement)
+      let run: (() => void) | null = null
+      if (mod && !e.altKey) {
+        if (key === 'z' && !e.shiftKey) run = L.undo
+        else if (key === 'y' || (key === 'z' && e.shiftKey)) run = L.redo
+        else if (here && key === 'g') run = e.shiftKey ? L.ungroup : L.group
+        else if (here && key === 'd' && !e.shiftKey) run = L.duplicate
+        else if (here && key === 'a' && !e.shiftKey) run = L.selectAll
+      } else if (here && !mod && !e.altKey) {
+        // with nothing selected these keys keep doing what they do (the arrows scroll the canvas)
+        const s = selRef.current
+        const step = e.shiftKey ? 10 : 1
+        if (key === 'escape') run = s.ids.length || s.scope ? L.escape : null
+        else if (!s.ids.length) run = null
+        else if (key === 'delete' || key === 'backspace') run = L.remove
+        else if (key === 'arrowleft') run = () => L.nudge(-step, 0)
+        else if (key === 'arrowright') run = () => L.nudge(step, 0)
+        else if (key === 'arrowup') run = () => L.nudge(0, -step)
+        else if (key === 'arrowdown') run = () => L.nudge(0, step)
       }
+      if (!run) return
+      e.preventDefault()
+      run()
     }
     window.addEventListener('keydown', k)
     return () => window.removeEventListener('keydown', k)
@@ -268,15 +475,23 @@ export default function DesignEditor(props: EditorProps) {
   // ---------- the handle the shell and agents use ----------
   /** The design as saved: marked when its thumbnail no longer matches. */
   const stamped = (): Design => (changed.current ? { ...fileRef.current.design, thumbnailStale: true } : fileRef.current.design)
-  const menus = (): Partial<Record<'View', MenuItem[]>> => ({
+  // (the shell builds its menus once per tab, not per selection, so these act on whatever is selected when run)
+  const menus = (): Partial<Record<'Edit' | 'View', MenuItem[]>> => ({
+    Edit: [
+      { label: 'Duplicate', shortcut: 'Ctrl+D', run: () => void live.current.duplicate() },
+      { label: 'Delete', shortcut: 'Del', run: () => live.current.remove() },
+      { label: '', sep: true },
+      { label: 'Group', shortcut: 'Ctrl+G', run: () => void live.current.group() },
+      { label: 'Ungroup', shortcut: 'Ctrl+Shift+G', run: () => void live.current.ungroup() }
+    ],
     View: [
       { label: 'Zoom in', run: () => zoomBy(1) },
       { label: 'Zoom out', run: () => zoomBy(-1) },
       { label: 'Fit artboards', run: fit }
     ]
   })
-  const live = useRef({ agentOp, undo, redo, zoomBy, fit, menus })
-  live.current = { agentOp, undo, redo, zoomBy, fit, menus }
+  const live = useRef({ agentOp, undo, redo, zoomBy, fit, menus, nudge, remove, duplicate, group, ungroup, selectAll, escape, showAnchor, chosen })
+  live.current = { agentOp, undo, redo, zoomBy, fit, menus, nudge, remove, duplicate, group, ungroup, selectAll, escape, showAnchor, chosen }
 
   useEffect(() => {
     let gone = false
@@ -293,11 +508,18 @@ export default function DesignEditor(props: EditorProps) {
       command: id => {
         if (id === 'undo') L().undo()
         else if (id === 'redo') L().redo()
+        else if (id === 'selectAll') L().selectAll()
       },
       menus: () => L().menus(),
       zoomBy: dir => L().zoomBy(dir),
       focus: () => scroller.current?.focus({ preventScroll: true }),
-      status: () => statusRef.current
+      status: () => statusRef.current,
+      // a comment on the first selected layer, quoted by its name
+      commentAnchor: () => {
+        const l = L().chosen()[0]
+        return l ? { anchor: { artboard: selRef.current.board, layer: l.id }, quote: l.name } : null
+      },
+      showAnchor: a => L().showAnchor(a)
     }
     // Ready for agents (and for gdocs look to picture it) once the fonts are in; a failure is reported to each op.
     loadFonts(fileRef.current)
@@ -318,8 +540,14 @@ export default function DesignEditor(props: EditorProps) {
   const z = zoom ?? 1
   const canUndo = past.current.length > 0
   const canRedo = future.current.length > 0
+  const board = file.design.artboards.find(a => a.id === sel.board) ?? file.design.artboards[0]
+  const picked = board ? (() => {
+    const out: Layer[] = []
+    walk(board.layers, l => sel.ids.includes(l.id) && out.push(l))
+    return out
+  })() : []
   return (
-    <div className="de-editor">
+    <div className="de-editor" ref={root}>
       <div className="toolbar de-toolbar">
         <button className="tb" disabled={!canUndo} title={canUndo ? `Undo ${past.current.at(-1)!.label} (Ctrl+Z)` : 'Undo (Ctrl+Z)'} onClick={undo}>
           <Glyph d={P.undo} />
@@ -362,36 +590,55 @@ export default function DesignEditor(props: EditorProps) {
           )}
         </div>
       )}
-      <div className="de-canvas" ref={scroller} tabIndex={-1}>
-        {failed ? (
-          <div className="editor-placeholder">{failed}</div>
-        ) : !drawn ? (
-          <div className="editor-placeholder">Loading fonts</div>
-        ) : (
-          <div className="de-row" style={{ padding: PAD, gap: GAP, visibility: zoom === null ? 'hidden' : undefined }}>
-            {drawn.boards.map(({ a, svg, error }) => (
-              <figure key={a.id} className="de-board-wrap" style={{ width: a.width * z }}>
-                <figcaption className="de-board-name" title={`${a.name}  ${a.width} x ${a.height}`}>
-                  {a.name} <span className="muted">{a.width} x {a.height}</span>
-                </figcaption>
-                {error ? (
-                  <div className="de-board de-board-error" style={{ width: a.width * z, height: a.height * z }}>
-                    {error}
-                  </div>
-                ) : (
-                  <div
-                    className={`de-board${a.background ? '' : ' clear'}`}
-                    data-artboard={a.id}
-                    style={{ width: a.width * z, height: a.height * z }}
-                    // our own renderer's output: every value in it is escaped, and svg layers are drawn as images
-                    dangerouslySetInnerHTML={{ __html: svg }}
-                  />
-                )}
-              </figure>
-            ))}
-          </div>
+      <div className="de-body">
+        {board && (
+          <Layers
+            design={file.design}
+            board={board}
+            sel={sel}
+            onSelect={select}
+            onBoard={id => select({ board: id, ids: [], scope: null })}
+            onSet={(ids, p) => void userOps(board.id, ids.map(id => ({ op: 'set', layer: id, props: p })))}
+            onMove={(id, parent, index) => void userOps(board.id, [{ op: 'move', layer: id, to: { parent, index } }])}
+          />
         )}
+        <div className="de-canvas" ref={scroller} tabIndex={-1}>
+          {failed ? (
+            <div className="editor-placeholder">{failed}</div>
+          ) : !drawn || !fonts ? (
+            <div className="editor-placeholder">Loading fonts</div>
+          ) : (
+            <Canvas
+              file={file}
+              fonts={fonts}
+              boards={drawn.boards}
+              zoom={z}
+              ready={zoom !== null}
+              pad={PAD}
+              gap={GAP}
+              sel={sel}
+              flash={flash}
+              reveal={reveal}
+              active={props.active}
+              scroller={scroller}
+              onSelect={select}
+              onOps={userOps}
+            />
+          )}
+        </div>
+        <Props
+          design={file.design}
+          layers={picked}
+          onSet={(ids, p, liveChange) =>
+            board && void userOps(board.id, ids.map(id => ({ op: 'set', layer: id, props: p })), liveChange ? `props:${ids.join(',')}:${Object.keys(p).join(',')}` : undefined)
+          }
+        />
       </div>
+      {msg && (
+        <div className="toast" role="status">
+          {msg}
+        </div>
+      )}
     </div>
   )
 }
