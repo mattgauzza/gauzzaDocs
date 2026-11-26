@@ -165,11 +165,15 @@ async function buildFaces(): Promise<FontFace[]> {
   return out
 }
 
+/** How many times the installed faces were asked for: tests check that work which never measures text doesn't ask. */
+export const fontListing = { calls: 0 }
+
 /**
  * Every installed face, built once and cached. The first call scans and parses every font file (a few seconds), so call
  * it only from the worker thread or the CLI, never from the main process or the window.
  */
 export function listFontFaces(): Promise<FontFace[]> {
+  fontListing.calls++
   faces ??= buildFaces()
   return faces
 }

@@ -26,6 +26,7 @@ import { Participants } from './shell/Participants'
 import { SelectionBubble } from './shell/SelectionBubble'
 import { Icon, KindIcon, Logo } from './shell/icons'
 import { designSizeItems } from './design/presets'
+import { savePayload } from './shell/savePayload'
 import { MenuBar, MenuList } from './shell/Menus'
 import { type EditorAccess, type LoadedPlugins, fits, loadPlugins } from './shell/plugins'
 
@@ -431,8 +432,8 @@ export default function App() {
     const flight = new Promise<void>(r => (done = r))
     inFlight.current.set(id, flight)
     try {
-      const payload = await h.getPayload()
-      const mtime = await api.save(t.path, payload, ctxOf(t, taken))
+      // a design's partial save that fails is made again in full (see savePayload)
+      const { payload, mtime } = await savePayload(h, p => api.save(t.path, p, ctxOf(t, taken)))
       h.saved?.(payload)
       patch(id, { saving: false, dirty: (changeSeq.current.get(id) || 0) !== seq, mtime, saved: Date.now(), external: false })
       window.gd.changed(t.path, { type: 'saved' })

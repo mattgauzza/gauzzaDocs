@@ -22,6 +22,8 @@ const { flushHistory } = await import('../src/core/history/index')
 const { designZipBytes, readDesignZip } = await import('../src/core/formats/design')
 const { newDesign } = await import('../src/shared/design/model')
 const { kindOf } = await import('../src/shared/kinds')
+const { applyDesignOp } = await import('../src/shared/ops/design')
+type DesignFile = import('../src/shared/design/types').DesignFile
 
 const agent = { authors: [{ name: 'Claude', by: 'agent' as const }] }
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -134,6 +136,59 @@ test('a partial save sends only new assets: the rest come from the file on disk'
   await saveFile(file, { kind: 'design', file: { design: f.payload.file.design, assets: {} }, partial: true }, agent)
   const back = await readDesignZip(fs.readFileSync(file))
   assert.deepEqual(back.assets[asset], f.payload.file.assets[asset])
+})
+
+test('a partial save that fails because the file was replaced from outside is made again in full', async () => {
+  const { DesignSaves } = await import('../src/renderer/src/design/saves')
+  const { savePayload } = await import('../src/renderer/src/shell/savePayload')
+  const file = p('swap.gdesign')
+  await createFile(file, agent, 'instagram')
+  await runOffline(file, { op: 'add', type: 'image', props: { data: `data:image/png;base64,${PNG_1x1}` } }, agent)
+  const opened = await loadFile(file)
+  if (opened.payload.kind !== 'design') throw new Error('not a design')
+  const [asset] = Object.keys(opened.payload.file.assets)
+  const saves = new DesignSaves(opened.payload.file.assets)
+  // a sync tool puts a different, valid design there, without the image
+  fs.writeFileSync(file, await designZipBytes({ design: newDesign('logo'), assets: {} }))
+  // the person keeps editing what they have open, then it saves
+  const edited = (await applyDesignOp(opened.payload.file, { op: 'add', type: 'rect', props: { name: 'Mine' } })).file!
+  const editor = { getPayload: () => saves.partial(edited), peekPayload: () => saves.full(edited) }
+  await assert.rejects(saveFile(file, saves.partial(edited), agent), /Asset assets\/[0-9a-f]{64}\.png is missing\./)
+  const r = await savePayload(editor, payload => saveFile(file, payload, agent))
+  saves.saved(r.payload)
+  assert.equal(r.payload.kind === 'design' && r.payload.partial, undefined, 'the save that landed sent everything')
+  const back = await readDesignZip(fs.readFileSync(file))
+  assert.deepEqual(back.assets[asset], opened.payload.file.assets[asset])
+  assert.deepEqual(back.design.artboards[0].layers.map(l => l.name), ['Image 1', 'Mine'], 'the editor kept its design')
+  assert.deepEqual(saves.disk(), Object.keys(back.assets).sort(), 'the editor knows what the file holds now')
+  // so the next save is partial again, with nothing to send
+  const next = await savePayload(editor, payload => saveFile(file, payload, agent))
+  assert.ok(next.payload.kind === 'design' && next.payload.partial)
+  assert.deepEqual(next.payload.kind === 'design' && Object.keys(next.payload.file.assets), [])
+  assert.deepEqual((await readDesignZip(fs.readFileSync(file))).assets[asset], opened.payload.file.assets[asset])
+})
+
+test('offline read, move and delete on a design with text never list the installed fonts; measuring text does', async () => {
+  const { fontListing } = await import('../src/core/systemFonts')
+  const { fontsFor } = await import('../src/shared/design/fonts')
+  const liberation = new Uint8Array(fs.readFileSync('node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf'))
+  // the text goes in in memory: adding it offline measures it, which lists the fonts
+  let f: DesignFile = { design: newDesign('instagram'), assets: {} }
+  const fonts = await fontsFor(f.design, {}, async () => liberation, liberation)
+  for (const op of [{ op: 'add', type: 'text', props: { name: 'Title', text: 'Hello' } }, { op: 'add', type: 'rect', props: { name: 'Box' } }]) {
+    f = (await applyDesignOp(f, op, { fonts })).file!
+  }
+  const file = p('text.gdesign')
+  fs.writeFileSync(file, await designZipBytes(f))
+  const before = fontListing.calls
+  assert.match((await layersOf(file)).join('\n'), /Title {2}text/)
+  await runOffline(file, { op: 'move', layer: 'Title', to: 'front' }, agent)
+  await runOffline(file, { op: 'delete', layer: 'Box' }, agent)
+  assert.equal(fontListing.calls, before, 'nothing asked for the installed fonts')
+  assert.deepEqual((await layersOf(file)).map(l => l.split('  ')[1]), ['Title'])
+  // an op that measures text still gets the installed fonts
+  await runOffline(file, { op: 'set', layer: 'Title', props: { text: 'Hello again' } }, agent)
+  assert.ok(fontListing.calls > before, 'set text asked for the installed fonts')
 })
 
 test('versionText of a design lists its layers', async () => {

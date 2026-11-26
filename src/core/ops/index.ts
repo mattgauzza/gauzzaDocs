@@ -4,7 +4,7 @@ import type { Kind } from '../../shared/kinds'
 import { textOps } from '../../shared/ops/text'
 import { designOps } from '../../shared/ops/design'
 import type { OpHandler, OpResult, OpServices } from '../../shared/ops/types'
-import { fontsFor, newFonts } from '../../shared/design/fonts'
+import { type FontSource, fontsFor, newFonts } from '../../shared/design/fonts'
 import type { AgentOp, FilePayload } from '../../shared/types'
 import { kindOf } from '../../shared/kinds'
 import { designPayload, loadFile, saveFile } from '../files'
@@ -63,23 +63,58 @@ async function servicesFor(payload: FilePayload & { kind: 'design' }): Promise<O
 }
 
 /**
+ * The fallback font and the design's packed fonts only, so nothing scans the installed ones; `touched` hears every
+ * use. An op that never touches it never measures or draws text.
+ */
+async function watchedFonts(payload: FilePayload & { kind: 'design' }, touched: () => void): Promise<FontSource> {
+  const { design, assets } = payload.file
+  const src = await fontsFor(design, assets, async () => null, await fallbackFontBytes())
+  return {
+    get: ref => (touched(), src.get(ref)),
+    get fallback() {
+      touched()
+      return src.fallback
+    }
+  }
+}
+
+/**
+ * Works an op out on a design on disk. The installed fonts cost a scan of every font file the first time (seconds), and
+ * only an op that measures or draws text needs them: `read` gets no fonts (its flags come from the file), and any other
+ * op is first worked out with the fallback font watched. If it used a font, or failed after using one, it's worked out
+ * again with the installed fonts, and once more when that brings in a font the file didn't use, so its text is measured
+ * in it.
+ */
+async function applyOffline(payload: FilePayload & { kind: 'design' }, op: AgentOp, p: string): Promise<OpResult> {
+  if (op.op === 'read') return designOps(payload, op, { path: p, services: { layout: layoutDiagram } })
+  let used = false
+  try {
+    const r = await designOps(payload, op, { path: p, services: { fonts: await watchedFonts(payload, () => (used = true)), layout: layoutDiagram } })
+    if (!used) return r
+  } catch (e) {
+    if (!used) throw e
+  }
+  let services = await servicesFor(payload)
+  let r: OpResult = await designOps(payload, op, { path: p, services })
+  if (r.payload?.kind === 'design' && newFonts(payload.file.design, r.payload.file.design)) {
+    services = { ...services, fonts: (await servicesFor(r.payload)).fonts }
+    r = await designOps(payload, op, { path: p, services })
+  }
+  return r
+}
+
+/**
  * An op on a design that isn't open in the app. Everything but `read` holds the file's lock from loading to saving, so
  * two writers take turns instead of losing an op, and the save stops with "Changed by someone else; reload to see it"
- * when the file's size or modified time moved since it was loaded (a writer that doesn't take the lock). An op that
- * brings in a font the file didn't use runs again with that font loaded, so its text is measured in it. The save keeps
- * the old thumbnail and marks it stale: only the app draws thumbnails.
+ * when the file's size or modified time moved since it was loaded (a writer that doesn't take the lock). Fonts as
+ * applyOffline says. The save keeps the old thumbnail and marks it stale: only the app draws thumbnails.
  */
 async function runDesignOffline(file: string, op: AgentOp, ctx?: WriteContext): Promise<unknown> {
   const p = path.resolve(file)
   const go = async (): Promise<unknown> => {
     const loaded = await readStamped(p)
     const payload = designPayload(await readDesignZip(loaded.bytes))
-    let services = await servicesFor(payload)
-    let r: OpResult = await designOps(payload, op, { path: p, services })
-    if (r.payload?.kind === 'design' && newFonts(payload.file.design, r.payload.file.design)) {
-      services = { ...services, fonts: (await servicesFor(r.payload)).fonts }
-      r = await designOps(payload, op, { path: p, services })
-    }
+    const r = await applyOffline(payload, op, p)
     if (!r.payload || r.payload.kind !== 'design' || op.dryRun) return r.result
     await offlineHooks.beforeSave?.(p)
     const now = await fs.promises.stat(p)

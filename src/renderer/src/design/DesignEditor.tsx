@@ -3,13 +3,13 @@ import { type FontSource, fontsFor, newFonts } from '../../../shared/design/font
 import { newDesign, walk } from '../../../shared/design/model'
 import { type Downgrade, designToSvg } from '../../../shared/design/render'
 import type { Design, DesignFile, FontRef } from '../../../shared/design/types'
-import { assetRefs } from '../../../shared/design/validate'
 import { applyDesignOp } from '../../../shared/ops/design'
 import type { OpServices } from '../../../shared/ops/types'
 import type { AgentInfo, AgentOp, FilePayload } from '../../../shared/types'
 import type { EditorHandle, EditorProps, MenuItem, StatusItem } from '../editor'
 import { api } from '../lib'
 import { stepZoom } from '../shell/zoom'
+import { DesignSaves } from './saves'
 import './design.css'
 
 /**
@@ -83,8 +83,8 @@ export default function DesignEditor(props: EditorProps) {
   const [notesOpen, setNotesOpen] = useState(false)
   const past = useRef<Step[]>([])
   const future = useRef<Step[]>([])
-  /** Assets the file on disk holds: a save sends only the others. */
-  const onDisk = useRef(new Set(Object.keys(loaded?.file.assets ?? {})))
+  /** What the file on disk holds: a save sends only the other assets. */
+  const saves = useRef(new DesignSaves(loaded?.file.assets ?? {}))
   /** Changed since it was opened: the thumbnail in the file no longer matches (only export draws thumbnails). */
   const changed = useRef(false)
   const queue = useRef<Promise<unknown>>(Promise.resolve())
@@ -284,18 +284,11 @@ export default function DesignEditor(props: EditorProps) {
     const handle: EditorHandle = {
       language: 'design',
       // Only the assets the file on disk doesn't hold yet go along: the worker copies the rest from the file.
-      getPayload: (): FilePayload => {
-        const f = fileRef.current
-        const fresh: Record<string, Uint8Array> = {}
-        for (const name of assetRefs(f.design)) if (!onDisk.current.has(name) && f.assets[name]) fresh[name] = f.assets[name]
-        return { kind: 'design', file: { design: stamped(), assets: fresh }, partial: true }
-      },
-      // Everything, for a copy somewhere else (save as, a version kept before a restore, gdocs look).
-      peekPayload: (): FilePayload => ({ kind: 'design', file: { ...fileRef.current, design: stamped() } }),
-      // A save writes exactly the assets its design refers to.
-      saved: p => {
-        if (p.kind === 'design') onDisk.current = assetRefs(p.file.design)
-      },
+      getPayload: (): FilePayload => saves.current.partial({ ...fileRef.current, design: stamped() }),
+      // Everything: for a copy somewhere else (save as, a version kept before a restore, gdocs look), and for a save
+      // again when a partial one failed (the file was replaced from outside).
+      peekPayload: (): FilePayload => saves.current.full({ ...fileRef.current, design: stamped() }),
+      saved: p => saves.current.saved(p),
       agent: (op, agent) => L().agentOp(op, agent),
       command: id => {
         if (id === 'undo') L().undo()
