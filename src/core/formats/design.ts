@@ -1,14 +1,16 @@
 // Reading and writing .gdesign files: a zip holding only design.json, assets/<sha256>.<ext> and thumbnail.png.
 import { createHash } from 'node:crypto'
 import type { Design, DesignFile, Layer } from '../../shared/design/types'
-import { pastLimit, validateDesign } from '../../shared/design/validate'
+import {
+  MAX_DESIGN_JSON, MAX_ENTRIES, MAX_UNCOMPRESSED, TOO_LARGE_UNCOMPRESSED, TOO_MANY_ENTRIES, assetRefs, pastLimit, pastZipLimit, validateDesign
+} from '../../shared/design/validate'
 
 type JSZipT = InstanceType<typeof import('jszip')>
 const loadZip = async (bytes: Uint8Array): Promise<JSZipT> => (await import('jszip')).default.loadAsync(bytes)
 const newZip = async (): Promise<JSZipT> => new (await import('jszip')).default()
 
-export const MAX_ENTRIES = 10_000
-export const MAX_UNCOMPRESSED = 1024 * 1024 * 1024
+// the zip's limits live with the rest in validate.ts, so the ops and saving check exactly what reading checks
+export { MAX_ENTRIES, MAX_UNCOMPRESSED }
 const ASSET_RE = /^assets\/[0-9a-f]{64}\.[a-z0-9]+$/
 const DESIGN ='design.json'
 const THUMB = 'thumbnail.png'
@@ -24,7 +26,7 @@ export function assetName(bytes: Uint8Array, ext: string): string {
 async function openChecked(bytes: Uint8Array): Promise<JSZipT> {
   const zip = await loadZip(bytes)
   const entries = Object.values(zip.files)
-  if (entries.length > MAX_ENTRIES) throw new Error(`This design has too many entries (more than ${MAX_ENTRIES})`)
+  if (entries.length > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
   let total = 0
   for (const e of entries) {
     if (e.dir) continue
@@ -32,12 +34,11 @@ async function openChecked(bytes: Uint8Array): Promise<JSZipT> {
     if (typeof size !== 'number' || Number.isNaN(size)) throw new Error("This design file can't be read.")
     // JSZip reads the 32-bit field as a signed number, so a huge declared size shows up negative.
     total += size < 0 ? size + 2 ** 32 : size
-    if (total > MAX_UNCOMPRESSED) throw new Error('This design is too large to open (over 1 GB uncompressed)')
+    if (total > MAX_UNCOMPRESSED) throw new Error(TOO_LARGE_UNCOMPRESSED)
   }
   return zip
 }
 
-const MAX_DESIGN_JSON = 64 * 1024 * 1024
 /** Why a save was refused, in plain words. */
 export const TOO_LARGE_TO_SAVE = 'This design is too large to save (its design.json would be over 64 MB).'
 export const SVG_TOO_LARGE_TO_SAVE = 'This design is too large to save (its SVG layers come to over 16 MB).'
@@ -63,7 +64,7 @@ function saveFailure(e: unknown): Error {
 function designJson(design: Design): string {
   // first, and walked without recursion, so groups nested past the limit (or holding themselves) are named as such
   const past = pastLimit(design)
-  if (past) throw new Error(past.svg ? SVG_TOO_LARGE_TO_SAVE : unreadableToSave(past.reason))
+  if (past) throw new Error(past.svg ? SVG_TOO_LARGE_TO_SAVE : past.message ?? unreadableToSave(past.reason))
   try {
     checkAssetRefs(design)
   } catch (e) {
@@ -114,7 +115,7 @@ function readEntry(entry: Entry, label: string, limit: number, budget: Budget): 
         if (done) return
         size += chunk.length
         budget.left -= chunk.length
-        if (budget.left < 0) return fail(new Error('This design is too large to open (over 1 GB uncompressed)'))
+        if (budget.left < 0) return fail(new Error(TOO_LARGE_UNCOMPRESSED))
         if (size > limit) return fail(new Error(`This design is too large to open (${label} is over ${Math.round(limit / 1048576)} MB)`))
         chunks.push(chunk)
       })
@@ -166,14 +167,6 @@ function checkAssetRefs(design: Design): void {
   }
 }
 
-/** Asset paths the design refers to. */
-function referencedAssets(design: Design): Set<string> {
-  const refs = new Set<string>()
-  eachLayer(design, l => layerAssets(l).forEach(a => refs.add(a)))
-  for (const s of design.styles.text) if (s.run.font.asset) refs.add(s.run.font.asset)
-  return refs
-}
-
 /**
  * Reads a .gdesign. design.json goes through validateDesign before anything else sees it, so the design that comes
  * back holds only what the schema allows (see validate.ts); `notes` lists, in plain words, what was repaired or
@@ -210,30 +203,35 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile & { n
 /**
  * Writes the file. Assets the design refers to but `f.assets` lacks are copied from `base` (the file as it is on disk),
  * and assets nothing refers to are dropped, so autosave only has to send design.json and new assets. A design that
- * couldn't be opened again as it is (a design.json over 64 MB, or over 16 MB of SVG layers) is refused rather than
- * written, and every refusal says what caused it.
+ * couldn't be opened again exactly as it is (past any limit reading enforces, including the zip's own: 10,000 entries
+ * and 1 GB uncompressed) is refused rather than written, and every refusal says what caused it.
  */
 export async function designZipBytes(f: DesignFile, base?: Uint8Array): Promise<Uint8Array> {
   const json = designJson(f.design)
-  const zip = await newZip()
-  zip.file(DESIGN, json, { compression: 'DEFLATE' })
-  const refs = referencedAssets(f.design)
+  const refs = assetRefs(f.design)
   const baseZip = base ? await openChecked(base) : null
   const budget: Budget = { left: MAX_UNCOMPRESSED }
+  const assets: Record<string, Uint8Array> = {}
   for (const name of refs) {
-    let data: Uint8Array | undefined = f.assets[name]
+    let data: Uint8Array | undefined = Object.prototype.hasOwnProperty.call(f.assets, name) ? f.assets[name] : undefined
     if (!data) {
       const e = baseZip?.files[name]
       if (e && !e.dir) data = await readEntry(e, name, MAX_UNCOMPRESSED, budget)
     }
     if (!data) throw new Error(`Asset ${name} is missing.`)
-    zip.file(name, data, { compression: 'STORE' })
+    assets[name] = data
   }
   let thumb = f.thumbnail
   if (!thumb && baseZip) {
     const t = baseZip.files[THUMB]
     if (t && !t.dir) thumb = await readEntry(t, THUMB, MAX_THUMBNAIL, budget)
   }
+  // the zip as it would be written, checked as reading checks it before anything is written
+  const past = pastZipLimit(f.design, { assets, thumbnail: thumb?.byteLength }, { json: Buffer.byteLength(json, 'utf8') })
+  if (past) throw new Error(past.message ?? past.reason)
+  const zip = await newZip()
+  zip.file(DESIGN, json, { compression: 'DEFLATE' })
+  for (const name of refs) zip.file(name, assets[name], { compression: 'STORE' })
   if (thumb) zip.file(THUMB, thumb, { compression: 'DEFLATE' })
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
 }

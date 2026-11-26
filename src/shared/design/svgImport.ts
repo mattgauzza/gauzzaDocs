@@ -16,6 +16,7 @@ import { applyStyles } from './svgFragment'
 import { splitDeclarations } from './svgStyle'
 import { cleanText, layoutText, num } from './text'
 import type { BlendMode, Design, Layer, Paint, TextLayer, TextRun } from './types'
+import { MAX_NAME } from './validate'
 
 // SVG import: the cleaned SVG as one group of native layers, so a person can recolor and reshape it layer by layer.
 // Shapes become paths with every transform baked in, gradients become gradient paints, clip paths clipped groups and
@@ -140,8 +141,9 @@ function styleOf(el: Element, parent: Style): Style {
 
 // Naming and layer basics
 
+/** A layer's name from the element's label, data-name or id, cut to the 1,000 characters a name may hold. */
 const labelOf = (el: Element): string | null =>
-  [el.getAttributeNS(INKSCAPE_NS, 'label'), el.getAttribute('data-name'), el.getAttribute('id')].map(v => (v ?? '').trim()).find(Boolean) ?? null
+  [el.getAttributeNS(INKSCAPE_NS, 'label'), el.getAttribute('data-name'), el.getAttribute('id')].map(v => (v ?? '').trim()).find(Boolean)?.slice(0, MAX_NAME) ?? null
 
 function nameOf(el: Element, kind: string, ctx: Ctx): string {
   const label = labelOf(el)

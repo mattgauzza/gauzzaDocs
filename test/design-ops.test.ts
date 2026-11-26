@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { test } from 'node:test'
-import { designZipBytes, readDesignZip } from '../src/core/formats/design'
+import { assetName, designZipBytes, readDesignZip } from '../src/core/formats/design'
 import { fontsFor, type FontSource } from '../src/shared/design/fonts'
 import { newDesign, walk } from '../src/shared/design/model'
 import { designToSvg } from '../src/shared/design/render'
@@ -691,4 +691,154 @@ test('designOps works on a design payload and refuses others', async () => {
   const read = await designOps(payload, { op: 'read' }, { path: 'x.gdesign' })
   assert.equal(read.payload, undefined)
   await assert.rejects(async () => designOps({ kind: 'text', text: '' }, { op: 'read' }, { path: 'x.txt' }), /not a design/)
+})
+
+// Ruling 23: the zip's own limits, values reading would repair, and batches checked as they go
+
+const ENTRIES = 'This design has too many entries (more than 10,000).'
+const UNCOMPRESSED = 'This design is too large to open (over 1 GB uncompressed).'
+const at23 = { visible: true, locked: false, opacity: 1, blend: 'normal' as const, x: 0, y: 0, width: 10, height: 10, rotation: 0, scaleX: 1, scaleY: 1 }
+const b64 = (b: Uint8Array): string => Buffer.from(b).toString('base64')
+
+/** A PNG header of its own for each `seed` (its size differs), and `extra` bytes after it. */
+function pngOf(seed: number, extra = 0): Uint8Array {
+  const b = new Uint8Array(33 + extra)
+  b.set(pngHeader(1 + (seed % 1000), 1 + Math.floor(seed / 1000)))
+  return b
+}
+
+/** A fresh design holding `n` image layers, each pointing to an asset of its own. */
+async function withImages(n: number) {
+  const { file, services } = await fresh()
+  for (let i = 0; i < n; i++) {
+    const bytes = pngOf(i)
+    const asset = assetName(bytes, 'png')
+    file.assets[asset] = bytes
+    file.design.artboards[0].layers.push({ ...at23, id: `i${i}`, name: 'I', type: 'image', asset })
+  }
+  return { file, services }
+}
+
+test('add image and svg refuse to take the zip past 10,000 entries, so a save always opens again (Ruling 23)', async () => {
+  // 9,997 assets, design.json, the assets/ folder and a thumbnail come to 10,000 entries: one more image is refused
+  const full = await withImages(9997)
+  const extra = `data:image/png;base64,${b64(pngOf(20_000))}`
+  await assert.rejects(applyDesignOp(full.file, { op: 'add', type: 'image', props: { data: extra } }, full.services), { message: ENTRIES })
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="5" height="5" href="${extra}"/></svg>`
+  await assert.rejects(applyDesignOp(full.file, { op: 'svg', svg }, full.services), { message: ENTRIES })
+  await assert.rejects(applyDesignOp(full.file, { op: 'apply', ops: [{ op: 'add', type: 'rect' }, { op: 'add', type: 'image', props: { data: extra } }] }, full.services), {
+    message: ENTRIES
+  })
+  // an image the design already holds adds no entry, and nor does a copy or a rect
+  const same = `data:image/png;base64,${b64(pngOf(0))}`
+  await run(full.file, full.services, { op: 'add', type: 'image', props: { data: same } }, { op: 'duplicate', layer: 'i1' }, { op: 'add', type: 'rect' })
+  // with one asset fewer the image goes in, and the design saves and opens again with every asset
+  const room = await withImages(9996)
+  const added = await run(room.file, room.services, { op: 'add', type: 'image', props: { data: extra } })
+  const back = await readDesignZip(await designZipBytes(added.file))
+  assert.equal(back.notes, undefined)
+  assert.equal(Object.keys(back.assets).length, 9997)
+})
+
+test('a change that would take the zip past 1 GB uncompressed is refused at the op and at the save (Ruling 23)', async () => {
+  const { file, services } = await fresh()
+  // two assets 150 KB short of 1 GB between them (only their sizes: nothing that large is made)
+  const half = (1024 * 1024 * 1024 - 150 * 1024) / 2
+  for (const i of [0, 1]) {
+    const asset = `assets/${String(i).repeat(64)}.png`
+    file.assets[asset] = { byteLength: half, length: half } as unknown as Uint8Array
+    file.design.artboards[0].layers.push({ ...at23, id: `big${i}`, name: `Big ${i}`, type: 'image', asset })
+  }
+  // a path of 100 KB fits; a copy of it, or an image of 200 KB, would pass 1 GB
+  const d = 'M0 0' + ' L1 1'.repeat(20_000)
+  const one = await run(file, services, { op: 'add', type: 'path', props: { name: 'Long', d } })
+  await assert.rejects(applyDesignOp(one.file, { op: 'duplicate', layer: 'Long' }, services), { message: UNCOMPRESSED })
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(pngOf(1, 200 * 1024)) } }, services), { message: UNCOMPRESSED })
+  // what makes nothing larger still goes in
+  await run(one.file, services, { op: 'set', layer: 'Long', props: { x: 5 } }, { op: 'delete', layer: 'Big 0' })
+  // and a save past 1 GB is refused before anything is written
+  const over = structuredClone(one.file.design)
+  over.artboards[0].layers.push({ ...byName(one.file, 'Long'), id: 'copy' })
+  await assert.rejects(designZipBytes({ ...one.file, design: over }), { message: UNCOMPRESSED })
+})
+
+test('no op or save keeps an svg layer over 5 MB, which reading would drop (Ruling 23)', async () => {
+  const TOO_LARGE = 'This SVG is too large (over 5 MB).'
+  const { file, services } = await fresh()
+  // 2,700,000 two-byte characters: under 5 MB as characters, over it as UTF-8, which is what reading measures
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!--${'é'.repeat(2_700_000)}--><rect width="1" height="1"/></svg>`
+  file.design.artboards[0].layers.push({ ...at23, id: 's', name: 'S', type: 'svg', svg })
+  await assert.rejects(applyDesignOp(file, { op: 'duplicate', layer: 'S' }, services), { message: TOO_LARGE })
+  await run(file, services, { op: 'set', layer: 'S', props: { x: 5 } })
+  await assert.rejects(designZipBytes(file), { message: TOO_LARGE })
+})
+
+test('ops refuse names, labels, gradient stops, dashes and connector points that reading would cut (Ruling 23)', async () => {
+  const NAME = 'Names can be at most 1,000 characters.'
+  const { file, services } = await fresh()
+  const { file: f } = await run(
+    file,
+    services,
+    { op: 'add', type: 'rect', props: { name: 'A' } },
+    { op: 'add', type: 'rect', props: { name: 'B', x: 200 } },
+    { op: 'add', type: 'connector', props: { name: 'Link', from: 'A', to: 'B' } },
+    { op: 'add', type: 'text', props: { name: 'T', text: 'Hi' } }
+  )
+  const long = 'n'.repeat(1001)
+  const stops = (n: number) => Array.from({ length: n }, (_, i) => ({ offset: i / (n - 1), color: '#000000' }))
+  const tiny = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="1" height="1"/></svg>'
+  const refused: [AgentOp, string][] = [
+    [{ op: 'add', type: 'rect', props: { name: long } }, NAME],
+    [{ op: 'set', layer: 'A', props: { name: long } }, NAME],
+    [{ op: 'group', layers: ['A'], name: long }, NAME],
+    [{ op: 'artboard', action: 'rename', name: long }, NAME],
+    [{ op: 'style', color: { name: long, color: '#000000' } }, NAME],
+    [{ op: 'svg', svg: tiny, name: long }, NAME],
+    [{ op: 'set', layer: 'T', props: { font: long } }, NAME],
+    [{ op: 'set', layer: 'Link', props: { label: long } }, 'Labels can be at most 1,000 characters.'],
+    [{ op: 'set', layer: 'A', props: { fill: { type: 'linear', stops: stops(257) } } }, 'Gradients can have at most 256 stops.'],
+    [{ op: 'set', layer: 'A', props: { dash: Array(1001).fill(2) } }, 'A dash can have at most 1,000 lengths.'],
+    [{ op: 'set', layer: 'Link', props: { points: Array(10_001).fill([1, 2]) } }, 'A connector can have at most 10,000 points.']
+  ]
+  for (const [op, message] of refused) await assert.rejects(applyDesignOp(f, op, services), { message }, JSON.stringify(op).slice(0, 80))
+  // at each limit they go in, and they save and open again as they are, with nothing repaired
+  const ok = await run(
+    f,
+    services,
+    { op: 'set', layer: 'A', props: { name: 'n'.repeat(1000), fill: { type: 'linear', stops: stops(256) }, dash: Array(1000).fill(2) } },
+    { op: 'set', layer: 'Link', props: { label: 'l'.repeat(1000), points: Array(10_000).fill([1, 2]) } }
+  )
+  const back = await readDesignZip(await designZipBytes(ok.file))
+  assert.equal(back.notes, undefined)
+  assert.deepEqual(back.design.artboards[0].layers, ok.file.design.artboards[0].layers)
+  // what an op derives on its own is cut to fit (an SVG id of 1,001 characters names its layer with the first 1,000),
+  // and an SVG dash that doubles past 1,000 lengths is refused
+  const id = 'x'.repeat(1001)
+  const imported = await run(f, services, { op: 'svg', svg: `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect id="${id}" width="5" height="5"/><rect width="2" height="2"/></svg>` })
+  assert.ok(all(imported.file).some(l => l.name === id.slice(0, 1000)))
+  const dashes = Array(501).fill(1).join(' ')
+  await assert.rejects(applyDesignOp(f, { op: 'svg', svg: `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><path d="M0 0L9 9" stroke="#000" stroke-dasharray="${dashes}"/><rect width="1" height="1"/></svg>` }, services), {
+    message: 'A dash can have at most 1,000 lengths.'
+  })
+  // numbers reading would clamp are clamped the same way by the ops
+  const far = await run(f, services, { op: 'set', layer: 'A', props: { rotation: 1e9, scaleX: -1e9, radius: 1e9, blur: 1e9, dash: [1e9], shadow: { x: 1e9, y: -1e9, blur: 1e9 }, timing: { start: 1e9 } } })
+  const a = byName(far.file, 'A')
+  assert.deepEqual([a.rotation, a.scaleX, a.radius, a.blur, a.dash, a.shadow, a.timing], [1e7, -1e5, 1e5, 1e5, [1e5], { x: 1e7, y: -1e7, blur: 1e5, color: '#00000040' }, { start: 1e7 }])
+  assert.deepEqual((await readDesignZip(await designZipBytes(far.file))).design.artboards[0].layers, far.file.design.artboards[0].layers)
+})
+
+test('apply checks the layer count after each op, so a batch that doubles its layers stops as soon as it passes 100,000 (Ruling 23)', async () => {
+  const { file } = await fresh()
+  // each round wraps everything in a new group and copies what that group holds: 2^(r+1) - 1 layers after round r,
+  // so round 16's copy (op 33) is the first op past 100,000
+  const ops: AgentOp[] = [{ op: 'add', type: 'rect', props: { name: 'R0' } }]
+  for (let r = 1; r <= 17; r++) ops.push({ op: 'group', layers: [`R${r - 1}`], name: `R${r}` }, { op: 'duplicate', layer: `R${r}/R${r - 1}` })
+  await assert.rejects(applyDesignOp(file, { op: 'apply', ops }, {}), { message: "op 33: That would leave a design that can't be opened: it has more than 100,000 layers." })
+  // a batch that stays within the limit isn't refused
+  const fine = await applyDesignOp(file, { op: 'apply', ops: ops.slice(0, 31) }, {})
+  assert.equal(all(fine.file!).length, 2 ** 16 - 1)
+  // the same rounds on a text of 100,000 characters pass 1,000,000 in round 4 (op 9), long before the layer count
+  // would (17 rounds of it would hold 13 billion characters)
+  const text: AgentOp[] = [{ op: 'add', type: 'text', props: { name: 'R0', text: 'a'.repeat(100_000), width: 500 } }, ...ops.slice(1)]
+  await assert.rejects(applyDesignOp(file, { op: 'apply', ops: text }, {}), { message: "op 9: That would leave a design that can't be opened: it holds more than 1,000,000 characters of text." })
 })

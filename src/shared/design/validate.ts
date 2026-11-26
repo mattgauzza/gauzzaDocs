@@ -1,5 +1,5 @@
-import { MAX_ARTBOARD_SIDE } from './model'
-import { cleanSvg } from './svgClean'
+import { ARTBOARD_TOO_LARGE, MAX_ARTBOARD_SIDE } from './model'
+import { MAX_SVG_BYTES, SVG_TOO_LARGE, cleanSvg } from './svgClean'
 import type { Design, Layer, Override, Paint } from './types'
 
 // A design read from a file, checked against the schema in types.ts before anything else touches it. design.json is
@@ -23,6 +23,9 @@ export const MAX_COORD = 1e7
 export const MAX_SIZE = 1e5
 /** Most stops a gradient keeps. */
 export const MAX_STOPS = 256
+/** Most lengths a dash, and points a connector, may hold; reading drops a longer one. */
+export const MAX_DASH = 1000
+export const MAX_POINTS = 10_000
 /** An id: letters, digits, _ and -, at most 64 of them. */
 const ID = /^[A-Za-z0-9_-]{1,64}$/
 const COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i
@@ -76,19 +79,66 @@ export const LIMIT = {
   layerText: (layer: string): string => `layer ${layer} holds more than ${count(MAX_LAYER_TEXT)} characters`,
   overrideText: `an override holds more than ${count(MAX_LAYER_TEXT)} characters`,
   text: `it holds more than ${count(MAX_DESIGN_TEXT)} characters of text`,
-  svg: 'its SVG layers come to over 16 MB',
-  side: `an artboard is over ${MAX_ARTBOARD_SIDE} px per side`
+  svg: 'its SVG layers come to over 16 MB'
 }
+
+/**
+ * What reading would cut or drop (noting the repair), refused in these words by the ops and by saving, so a design
+ * comes back exactly as it was saved.
+ */
+export const TOO_LONG = {
+  name: `Names can be at most ${count(MAX_NAME)} characters.`,
+  label: `Labels can be at most ${count(MAX_NAME)} characters.`,
+  stops: `Gradients can have at most ${MAX_STOPS} stops.`,
+  dash: `A dash can have at most ${count(MAX_DASH)} lengths.`,
+  points: `A connector can have at most ${count(MAX_POINTS)} points.`
+}
+
+// The zip itself: reading refuses one past these before it opens design.json (core/formats/design.ts).
+export const MAX_ENTRIES = 10_000
+export const MAX_UNCOMPRESSED = 1024 * 1024 * 1024
+/** The most design.json may come to; reading refuses more. */
+export const MAX_DESIGN_JSON = 64 * 1024 * 1024
+export const TOO_MANY_ENTRIES = `This design has too many entries (more than ${count(MAX_ENTRIES)}).`
+export const TOO_LARGE_UNCOMPRESSED = 'This design is too large to open (over 1 GB uncompressed).'
 
 /** What a design takes of each limit reading enforces, measured as reading measures it. */
 interface Usage {
   depth: number; layers: number; components: number; svg: number; side: number
   /** the most runs, and characters, in one text layer (and which), the most in one override, and all text */
   runs: number; runsAt: string; layerText: number; layerTextAt: string; overrideText: number; text: number
+  /**
+   * How many values reading would drop or cut: svg layers over 5 MB, names and connector labels over 1,000
+   * characters, gradients over 256 stops, dashes over 1,000 lengths and connectors over 10,000 points
+   */
+  bigSvg: number; names: number; labels: number; stops: number; dashes: number; points: number
 }
 const noUsage = (): Usage => ({
-  depth: 0, layers: 0, components: 0, svg: 0, side: 0, runs: 0, runsAt: '', layerText: 0, layerTextAt: '', overrideText: 0, text: 0
+  depth: 0, layers: 0, components: 0, svg: 0, side: 0, runs: 0, runsAt: '', layerText: 0, layerTextAt: '', overrideText: 0, text: 0,
+  bigSvg: 0, names: 0, labels: 0, stops: 0, dashes: 0, points: 0
 })
+
+/** Whether `s` comes to more than `most` bytes as UTF-8 (a lone surrogate as the 3 bytes of U+FFFD), without encoding it. */
+function utf8Over(s: string, most: number): boolean {
+  if (s.length > most) return true
+  if (s.length * 3 <= most) return false
+  let bytes = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) bytes += 1
+    else if (c < 0x800) bytes += 2
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      bytes += 4
+      i++
+    } else bytes += 3
+    if (bytes > most) return true
+  }
+  return false
+}
+
+const longName = (v: unknown): boolean => typeof v === 'string' && v.length > MAX_NAME
+/** A gradient past MAX_STOPS stops (reading keeps only the first 256). */
+const manyStops = (p: unknown): boolean => isObj(p) && Array.isArray(p.stops) && p.stops.length > MAX_STOPS
 
 /**
  * Adds what `roots` (top-level layers) and everything inside their groups take to `u`, walked with a stack. It never
@@ -109,6 +159,10 @@ function measure(u: Usage, roots: readonly unknown[]): void {
     if (++u.layers > MAX_LAYERS) return
     if (depth > u.depth) u.depth = depth
     const id = typeof l.id === 'string' ? l.id.slice(0, 64) : ''
+    if (longName(l.name)) u.names++
+    if (manyStops(l.fill)) u.stops++
+    if (manyStops(l.stroke)) u.stops++
+    if (Array.isArray(l.dash) && l.dash.length > MAX_DASH) u.dashes++
     if (l.type === 'group') {
       const kids = l.children
       if (!Array.isArray(kids) || depth > MAX_DEPTH) continue
@@ -124,62 +178,211 @@ function measure(u: Usage, roots: readonly unknown[]): void {
       if (l.runs.length > u.runs) [u.runs, u.runsAt] = [l.runs.length, id]
       if (l.runs.length > MAX_RUNS) continue
       let chars = 0
-      for (const r of l.runs) if (isObj(r) && typeof r.text === 'string') chars += r.text.length
+      for (const r of l.runs) {
+        if (!isObj(r)) continue
+        if (typeof r.text === 'string') chars += r.text.length
+        if (manyStops(r.color)) u.stops++
+      }
       if (chars > u.layerText) [u.layerText, u.layerTextAt] = [chars, id]
       u.text += chars
     } else if (l.type === 'instance' && isObj(l.overrides)) {
       for (const o of Object.values(l.overrides)) {
-        if (!isObj(o) || typeof o.text !== 'string') continue
+        if (!isObj(o)) continue
+        if (manyStops(o.fill)) u.stops++
+        if (manyStops(o.stroke)) u.stops++
+        if (typeof o.text !== 'string') continue
         if (o.text.length > u.overrideText) u.overrideText = o.text.length
         u.text += o.text.length
       }
-    } else if (l.type === 'svg' && typeof l.svg === 'string') u.svg += l.svg.length
+    } else if (l.type === 'connector') {
+      if (longName(l.label)) u.labels++
+      if (Array.isArray(l.points) && l.points.length > MAX_POINTS) u.points++
+    } else if (l.type === 'svg' && typeof l.svg === 'string') {
+      u.svg += l.svg.length
+      if (utf8Over(l.svg, MAX_SVG_BYTES)) u.bigSvg++
+    }
   }
 }
 
-/** What a design takes of each limit: every component's layers and every artboard's, and the largest artboard side. */
+/**
+ * What a design takes of each limit: every component's layers and every artboard's, the largest artboard side, and
+ * the names of artboards, components, styles and diagrams.
+ */
 function usageOf(design: Design): Usage {
   const u = noUsage()
-  const comps: unknown[] = Array.isArray(design.components) ? design.components : []
+  const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
+  const comps = list(design.components)
   u.components = comps.length
   measure(u, comps.map(c => (isObj(c) ? c.root : undefined)))
-  for (const a of Array.isArray(design.artboards) ? (design.artboards as unknown[]) : []) {
+  for (const c of comps) if (isObj(c) && longName(c.name)) u.names++
+  for (const a of list(design.artboards)) {
     if (!isObj(a)) continue
     for (const side of [a.width, a.height]) if (typeof side === 'number' && side > u.side) u.side = side
+    if (longName(a.name)) u.names++
+    if (manyStops(a.background)) u.stops++
+    for (const d of list(a.diagrams)) if (isObj(d) && longName(d.name)) u.names++
     if (Array.isArray(a.layers)) measure(u, a.layers)
+  }
+  const styles: Obj = isObj(design.styles) ? design.styles : {}
+  for (const s of list(styles.colors)) if (isObj(s) && longName(s.name)) u.names++
+  for (const s of list(styles.text)) {
+    if (!isObj(s)) continue
+    if (longName(s.name)) u.names++
+    if (isObj(s.run) && manyStops(s.run.color)) u.stops++
   }
   return u
 }
 
-/** Each limit: what it measures, how far it may go, and why a design past it is refused. */
-const CHECKS: [keyof Usage, number, (u: Usage) => string][] = [
-  ['depth', MAX_DEPTH, () => LIMIT.depth],
-  ['layers', MAX_LAYERS, () => LIMIT.layers],
-  ['components', MAX_COMPONENTS, () => LIMIT.components],
-  ['runs', MAX_RUNS, u => LIMIT.runs(u.runsAt)],
-  ['layerText', MAX_LAYER_TEXT, u => LIMIT.layerText(u.layerTextAt)],
-  ['overrideText', MAX_LAYER_TEXT, () => LIMIT.overrideText],
-  ['text', MAX_DESIGN_TEXT, () => LIMIT.text],
-  ['svg', MAX_SVG_MARKUP, () => LIMIT.svg],
-  ['side', MAX_ARTBOARD_SIDE, () => LIMIT.side]
+/** What a design took of each limit at some point, to compare a later state with (pastLimit's `before`). */
+export interface Limits { usage: Usage }
+export const limitsOf = (design: Design): Limits => ({ usage: usageOf(design) })
+
+/** Why a design is past a limit: reading's reason (it refuses the file as damaged), or the sentence everything says it in. */
+export interface Past {
+  reason: string
+  /** past the 16 MB of svg markup, which the ops and saving each word their own way */
+  svg: boolean
+  /** a limit reading words as a sentence of its own: the ops and saving say exactly this */
+  message?: string
+}
+
+/** Each limit: what it measures, how far it may go, and reading's reason (damage) or sentence for a design past it. */
+const CHECKS: { key: keyof Usage; most: number; reason?: (u: Usage) => string; message?: string }[] = [
+  { key: 'depth', most: MAX_DEPTH, reason: () => LIMIT.depth },
+  { key: 'layers', most: MAX_LAYERS, reason: () => LIMIT.layers },
+  { key: 'components', most: MAX_COMPONENTS, reason: () => LIMIT.components },
+  { key: 'runs', most: MAX_RUNS, reason: u => LIMIT.runs(u.runsAt) },
+  { key: 'layerText', most: MAX_LAYER_TEXT, reason: u => LIMIT.layerText(u.layerTextAt) },
+  { key: 'overrideText', most: MAX_LAYER_TEXT, reason: () => LIMIT.overrideText },
+  { key: 'text', most: MAX_DESIGN_TEXT, reason: () => LIMIT.text },
+  { key: 'svg', most: MAX_SVG_MARKUP, reason: () => LIMIT.svg },
+  { key: 'bigSvg', most: 0, message: SVG_TOO_LARGE },
+  { key: 'side', most: MAX_ARTBOARD_SIDE, message: ARTBOARD_TOO_LARGE },
+  { key: 'names', most: 0, message: TOO_LONG.name },
+  { key: 'labels', most: 0, message: TOO_LONG.label },
+  { key: 'stops', most: 0, message: TOO_LONG.stops },
+  { key: 'dashes', most: 0, message: TOO_LONG.dash },
+  { key: 'points', most: 0, message: TOO_LONG.points }
 ]
 
 /**
- * The first limit reading enforces that `design` is past, as reading words it (LIMIT), or null when it can be read:
- * groups nested past 64, more than 100,000 layers or 10,000 components, a text layer past 1,000 runs or 100,000
- * characters (an override past 100,000), more than 1,000,000 characters of text, over 16 MB of svg markup (`svg` is
- * then set), or an artboard over 8192 px. Given `before` (the design an op started from), a limit counts only when
+ * The first limit reading enforces that `design` is past, or null when it reads back exactly as it is: groups nested
+ * past 64, more than 100,000 layers or 10,000 components, a text layer past 1,000 runs or 100,000 characters (an
+ * override past 100,000), more than 1,000,000 characters of text, over 16 MB of svg markup (`svg` is then set), all of
+ * which reading refuses as damage (`reason`, in its words); and in a sentence of its own (`message`, reading's words
+ * where it says one): an artboard over 8192 px, an svg layer over 5 MB, and anything reading would cut or drop (a name
+ * or label over 1,000 characters, a gradient over 256 stops, a dash over 1,000 lengths, a connector over 10,000
+ * points). Given `before` (the design an op started from, or what limitsOf measured of it), a limit counts only when
  * `design` takes more of it than `before` did, so an op that doesn't make a design worse (a delete, say) is never
  * refused for what it already was.
  */
-export function pastLimit(design: Design, before?: Design): { reason: string; svg: boolean } | null {
+export function pastLimit(design: Design, before?: Design | Limits): Past | null {
   const now = usageOf(design)
   let was: Usage | undefined
-  for (const [k, most, why] of CHECKS) {
-    if ((now[k] as number) <= most) continue
-    if (before && (now[k] as number) <= ((was ??= usageOf(before))[k] as number)) continue
-    return { reason: why(now), svg: k === 'svg' }
+  for (const c of CHECKS) {
+    const v = now[c.key] as number
+    if (v <= c.most) continue
+    if (before && v <= ((was ??= 'artboards' in before ? usageOf(before) : before.usage)[c.key] as number)) continue
+    if (c.message) return { reason: c.message, svg: false, message: c.message }
+    return { reason: c.reason!(now), svg: c.key === 'svg' }
   }
+  return null
+}
+
+/** How many layers a design holds, every artboard's and every component's, counted only as far as `most` + 1. */
+export function layerCount(design: Design, most = MAX_LAYERS): number {
+  const stack: unknown[] = []
+  for (const c of Array.isArray(design.components) ? design.components : []) if (isObj(c)) stack.push(c.root)
+  for (const a of Array.isArray(design.artboards) ? design.artboards : []) if (isObj(a) && Array.isArray(a.layers)) for (const l of a.layers) stack.push(l)
+  let n = 0
+  while (stack.length && n <= most) {
+    const l = stack.pop()
+    if (!isObj(l)) continue
+    n++
+    if (l.type === 'group' && Array.isArray(l.children)) for (const k of l.children) stack.push(k)
+  }
+  return n
+}
+
+/** What a design's zip holds besides design.json: its assets by path, and its thumbnail's size when there is one. */
+export interface Stored {
+  assets: Record<string, { byteLength: number } | undefined>
+  thumbnail?: number
+}
+
+/**
+ * Every asset a design points to (what saving writes into assets/): images, packed fonts, instances' image overrides
+ * and text styles' fonts. Walked with a stack, and never past MAX_LAYERS + 1 layers, so a group that holds itself ends it.
+ */
+export function assetRefs(design: Design): Set<string> {
+  const refs = new Set<string>()
+  const stack: unknown[] = []
+  for (const c of Array.isArray(design.components) ? design.components : []) if (isObj(c)) stack.push(c.root)
+  for (const a of Array.isArray(design.artboards) ? design.artboards : []) if (isObj(a) && Array.isArray(a.layers)) for (const l of a.layers) stack.push(l)
+  const fontAsset = (r: unknown): void => {
+    if (isObj(r) && isObj(r.font) && typeof r.font.asset === 'string') refs.add(r.font.asset)
+  }
+  for (let seen = 0; stack.length && seen <= MAX_LAYERS; seen++) {
+    const l = stack.pop()
+    if (!isObj(l)) continue
+    if ((l.type === 'image' || l.type === 'paint') && typeof l.asset === 'string') refs.add(l.asset)
+    else if (l.type === 'text' && Array.isArray(l.runs)) for (const r of l.runs) fontAsset(r)
+    else if (l.type === 'instance' && isObj(l.overrides)) {
+      for (const o of Object.values(l.overrides)) if (isObj(o) && typeof o.asset === 'string') refs.add(o.asset)
+    } else if (l.type === 'group' && Array.isArray(l.children)) for (const k of l.children) stack.push(k)
+  }
+  const styles = isObj(design.styles) && Array.isArray(design.styles.text) ? design.styles.text : []
+  for (const s of styles) if (isObj(s)) fontAsset(s.run)
+  return refs
+}
+
+/** design.json's size in UTF-8 bytes; MAX_DESIGN_JSON when it can't be written at all (saving says why). */
+function jsonBytes(design: Design): number {
+  let json: string
+  try {
+    json = JSON.stringify(design)
+  } catch {
+    return MAX_DESIGN_JSON
+  }
+  let bytes = json.length
+  for (let i = 0; i < json.length; i++) {
+    const c = json.charCodeAt(i)
+    // JSON.stringify escapes lone surrogates, so every surrogate here is half of a pair: 4 bytes for its 2 units
+    if (c >= 0x80) bytes += c < 0x800 || (c >= 0xd800 && c <= 0xdfff) ? 1 : 2
+  }
+  return bytes
+}
+
+/** How many entries, and bytes uncompressed, a design's zip comes to. */
+function zipUsage(design: Design, stored: Stored, json: number | undefined, exact: boolean): { entries: number; bytes: number } {
+  const refs = assetRefs(design)
+  let bytes = (stored.thumbnail ?? 0) + (json ?? jsonBytes(design))
+  for (const r of refs) if (Object.prototype.hasOwnProperty.call(stored.assets, r)) bytes += stored.assets[r]?.byteLength ?? 0
+  // design.json, the assets/ folder JSZip writes when there are assets, and the thumbnail
+  const thumbnail = exact ? (stored.thumbnail === undefined ? 0 : 1) : 1
+  return { entries: refs.size + 1 + (refs.size ? 1 : 0) + thumbnail, bytes }
+}
+
+/**
+ * The zip's own limits, which reading checks before it opens design.json, in reading's words: at most 10,000 entries
+ * (design.json, the thumbnail, the assets/ folder and each asset the design points to) and 1 GB uncompressed (all of
+ * them). Saving gives `json` (design.json's size in UTF-8 bytes) and counts a thumbnail only when there is one; an op
+ * counts one either way (the app adds one on its next save), and measures design.json only when everything else comes
+ * within 64 MB of 1 GB. Given `before`, a limit counts only when the zip comes to more of it than it did.
+ */
+export function pastZipLimit(design: Design, stored: Stored, opts: { json?: number; before?: { design: Design; stored: Stored } } = {}): Past | null {
+  const exact = opts.json !== undefined
+  // the most it could come to: every asset held, whether the design points to it or not, and design.json at its largest
+  const held = Object.keys(stored.assets)
+  let most = (stored.thumbnail ?? 0) + (opts.json ?? MAX_DESIGN_JSON)
+  for (const k of held) most += stored.assets[k]?.byteLength ?? 0
+  if (held.length + 3 <= MAX_ENTRIES && most <= MAX_UNCOMPRESSED) return null
+  const now = zipUsage(design, stored, opts.json, exact)
+  let was: { entries: number; bytes: number } | undefined
+  const before = opts.before
+  const grew = (k: 'entries' | 'bytes'): boolean => !before || now[k] > (was ??= zipUsage(before.design, before.stored, undefined, exact))[k]
+  if (now.entries > MAX_ENTRIES && grew('entries')) return { reason: TOO_MANY_ENTRIES, svg: false, message: TOO_MANY_ENTRIES }
+  if (now.bytes > MAX_UNCOMPRESSED && grew('bytes')) return { reason: TOO_LARGE_UNCOMPRESSED, svg: false, message: TOO_LARGE_UNCOMPRESSED }
   return null
 }
 
@@ -657,7 +860,7 @@ function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | nu
   r.optNum(out, 'blur', 0, MAX_SIZE)
   if (out.dash !== undefined) {
     const d = out.dash
-    if (Array.isArray(d) && d.length <= 1000 && d.every(x => r.number(x, 'a dash length') !== undefined)) {
+    if (Array.isArray(d) && d.length <= MAX_DASH && d.every(x => r.number(x, 'a dash length') !== undefined)) {
       out.dash = d.map(x => clamp(r.number(x, 'a dash length') ?? 0, 0, MAX_SIZE))
     } else {
       r.note('a dash that was not a list of lengths (dropped)')
@@ -771,7 +974,7 @@ function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | nu
       out.arrow = r.oneOf(raw.arrow, ['end', 'both', 'none'] as const, 'end', 'arrow')
       if (out.points !== undefined) {
         const pts = out.points
-        if (Array.isArray(pts) && pts.length <= 10_000 && pts.every(p => Array.isArray(p) && p.length === 2 && p.every(n => typeof n === 'number' && Number.isFinite(n)))) {
+        if (Array.isArray(pts) && pts.length <= MAX_POINTS && pts.every(p => Array.isArray(p) && p.length === 2 && p.every(n => typeof n === 'number' && Number.isFinite(n)))) {
           out.points = (pts as [number, number][]).map(([px, py]) => [clamp(px, -MAX_COORD, MAX_COORD), clamp(py, -MAX_COORD, MAX_COORD)])
         } else {
           r.note("a connector's points that were not well formed (dropped)")
@@ -898,9 +1101,7 @@ function artboard(r: Reader, a: unknown, pending: { board: Obj; raw: unknown; sc
   out.name = r.name(a.name, 'Artboard')
   out.width = r.num(a, 'width', 1080, 1, Infinity)
   out.height = r.num(a, 'height', 1080, 1, Infinity)
-  if ((out.width as number) > MAX_ARTBOARD_SIDE || (out.height as number) > MAX_ARTBOARD_SIDE) {
-    throw new Error(`Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`)
-  }
+  if ((out.width as number) > MAX_ARTBOARD_SIDE || (out.height as number) > MAX_ARTBOARD_SIDE) throw new Error(ARTBOARD_TOO_LARGE)
   if (a.background === undefined || a.background === null) {
     if (a.background === undefined) r.grow(18)
     out.background = null

@@ -49,7 +49,9 @@ export const MAX_VALUE_LENGTH = 2000
 /** Most url() references one value may hold; past these they're dropped. */
 export const MAX_VALUE_REFS = 4
 
-const TOO_LARGE = 'This SVG is too large (over 5 MB).'
+/** Why an SVG over 5 MB is refused: reading drops an svg layer for it, so the ops and saving refuse one in these words. */
+export const SVG_TOO_LARGE = 'This SVG is too large (over 5 MB).'
+const TOO_LARGE = SVG_TOO_LARGE
 const TOO_MANY = 'This SVG has too many elements (over 50,000).'
 
 const ELEMENTS = new Set([
@@ -547,7 +549,8 @@ function declarePrefixes(s: string): string {
   return m ? s.slice(0, m.index + 4) + add + s.slice(m.index + 4) : s
 }
 
-function utf8Length(s: string): number {
+/** An SVG's size as the 5 MB check measures it: UTF-8 bytes (any string longer than 5 MB in characters is over it). */
+export function utf8Length(s: string): number {
   if (s.length > MAX_SVG_BYTES) return s.length
   if (s.length * 3 <= MAX_SVG_BYTES) return s.length
   return new TextEncoder().encode(s).length

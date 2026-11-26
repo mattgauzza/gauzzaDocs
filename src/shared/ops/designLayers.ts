@@ -7,6 +7,7 @@ import { cleanText, layoutText } from '../design/text'
 import type {
   Artboard, BlendMode, Component, Design, End, FontRef, Layer, Override, Paint, Shadow, TextLayer, TextRun, Timing
 } from '../design/types'
+import { MAX_DASH, MAX_NAME, MAX_POINTS, MAX_STOPS, TOO_LONG } from '../design/validate'
 import type { AgentOp } from '../types'
 import { OpError, type OpServices } from './types'
 
@@ -75,8 +76,12 @@ export const contains = (outer: Layer, id: string): boolean => {
   return found
 }
 
-/** The next free "<Type> <n>" name on the board. */
+/**
+ * The next free "<Type> <n>" name on the board. A base that would take the name past 1,000 characters (a component's
+ * long name, say) is cut first, so the name is never one reading would cut.
+ */
 export function nextName(board: Artboard, base: string): string {
+  base = base.slice(0, MAX_NAME - 8)
   let most = 0
   const re = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} (\\d+)$`)
   walk(board.layers, l => {
@@ -186,6 +191,8 @@ export const MAX_COORD = 1e7
 export const MAX_SIZE = 1e5
 export const coord = (key: string, v: unknown): number => Math.min(MAX_COORD, Math.max(-MAX_COORD, number(key, v)))
 const size = (key: string, v: unknown, min: number): number => Math.min(MAX_SIZE, number(key, v, min))
+/** A number clamped to +/- `most`, as reading clamps it (rotation, scale, spacing and the like). */
+const within = (key: string, v: unknown, most: number): number => Math.min(most, Math.max(-most, number(key, v)))
 
 export const number = (key: string, v: unknown, min?: number, max?: number): number => {
   const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v
@@ -207,10 +214,11 @@ export const text = (key: string, v: unknown): string => {
   if (typeof v !== 'string') throw new OpError(`${key} must be text`)
   return cleanText(v)
 }
-/** A name on one line, never empty. */
+/** A name on one line, never empty, and at most 1,000 characters (reading cuts a longer one). */
 export const nameOf = (key: string, v: unknown): string => {
   const name = text(key, v).replace(/[\r\n\t]+/g, ' ').trim()
   if (!name) throw new OpError(`${key} must not be empty`)
+  if (name.length > MAX_NAME) throw new OpError(TOO_LONG.name)
   return name
 }
 
@@ -224,6 +232,7 @@ export function hexColor(v: unknown): string | null {
 
 function styleRef(doc: DesignDoc, name: string, key: string): Paint {
   if (!name) throw new OpError(`${key} names a color style without a name`)
+  if (name.length > MAX_NAME) throw new OpError(TOO_LONG.name)
   if (name.startsWith('kit/')) return { type: 'style', ref: name }
   const colors = doc.design.styles?.colors ?? []
   if (!colors.some(c => c.name === name)) {
@@ -255,6 +264,7 @@ export function paintOf(doc: DesignDoc, key: string, v: unknown): Paint | null {
   if (p.type === 'style') return styleRef(doc, typeof p.ref === 'string' ? p.ref : '', key)
   if (p.type === 'linear' || p.type === 'radial') {
     if (!Array.isArray(p.stops) || p.stops.length < 2) throw new OpError(`${key}: a gradient needs at least two stops`)
+    if (p.stops.length > MAX_STOPS) throw new OpError(TOO_LONG.stops)
     const n = p.stops.length
     const stops = p.stops.map((s: unknown, i) => {
       const o = (s ?? {}) as Record<string, unknown>
@@ -263,17 +273,22 @@ export function paintOf(doc: DesignDoc, key: string, v: unknown): Paint | null {
       return { offset: number(`${key} stop ${i + 1} offset`, o.offset ?? i / (n - 1), 0, 1), color }
     })
     const out: Paint = { type: p.type, stops }
-    if (p.angle !== undefined) out.angle = number(`${key} angle`, p.angle)
+    if (p.angle !== undefined) out.angle = within(`${key} angle`, p.angle, MAX_COORD)
     return out
   }
   throw bad()
 }
 
 export function fontOf(v: unknown, fallback: FontRef = DEFAULT_FONT): FontRef {
-  if (typeof v === 'string' && v.trim()) return { family: v.trim(), weight: fallback.weight, style: fallback.style }
+  const long = (s: unknown): boolean => typeof s === 'string' && s.trim().length > MAX_NAME
+  if (typeof v === 'string' && v.trim()) {
+    if (long(v)) throw new OpError(TOO_LONG.name)
+    return { family: v.trim(), weight: fallback.weight, style: fallback.style }
+  }
   if (v && typeof v === 'object') {
     const f = v as Record<string, unknown>
     if (typeof f.family !== 'string' || !f.family.trim()) throw new OpError('font needs a family')
+    if (long(f.family) || long(f.postscript)) throw new OpError(TOO_LONG.name)
     const out: FontRef = {
       family: f.family.trim(),
       weight: f.weight === undefined ? 400 : number('font weight', f.weight, 1, 1000),
@@ -320,7 +335,7 @@ function shadowOf(v: unknown): Shadow | undefined {
   const s = v as Record<string, unknown>
   const color = hexColor(s.color ?? '#00000040')
   if (!color) throw new OpError('shadow color must be like #rrggbb or #rrggbbaa')
-  return { x: number('shadow x', s.x ?? 0), y: number('shadow y', s.y ?? 0), blur: number('shadow blur', s.blur ?? 0, 0), color }
+  return { x: coord('shadow x', s.x ?? 0), y: coord('shadow y', s.y ?? 0), blur: size('shadow blur', s.blur ?? 0, 0), color }
 }
 
 /** A layer's start and end in seconds (nothing else is kept), the start at or before the end. */
@@ -329,8 +344,8 @@ function timingOf(v: unknown): Timing | undefined {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new OpError('timing must be { start?, end? } in seconds, or none')
   const given = v as Record<string, unknown>
   const t: Timing = {}
-  if (given.start !== undefined) t.start = number('timing start', given.start, 0)
-  if (given.end !== undefined) t.end = number('timing end', given.end, 0)
+  if (given.start !== undefined) t.start = Math.min(MAX_COORD, number('timing start', given.start, 0))
+  if (given.end !== undefined) t.end = Math.min(MAX_COORD, number('timing end', given.end, 0))
   if (t.start !== undefined && t.end !== undefined && t.start > t.end) throw new OpError('timing start must be at or before its end')
   return t
 }
@@ -381,8 +396,8 @@ export function runsOf(doc: DesignDoc, v: unknown): TextRun[] {
       const p = paintOf(doc, `run ${i + 1} color`, r.color)
       if (p) run.color = p
     }
-    if (r.letterSpacing !== undefined) run.letterSpacing = number(`run ${i + 1} letterSpacing`, r.letterSpacing)
-    if (r.lineHeight !== undefined) run.lineHeight = number(`run ${i + 1} lineHeight`, r.lineHeight, 0)
+    if (r.letterSpacing !== undefined) run.letterSpacing = within(`run ${i + 1} letterSpacing`, r.letterSpacing, MAX_SIZE)
+    if (r.lineHeight !== undefined) run.lineHeight = size(`run ${i + 1} lineHeight`, r.lineHeight, 0)
     return run
   })
 }
@@ -433,21 +448,22 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
       case 'height':
         h = size('height', v, 0)
         break
+      // clamped as reading clamps them, so a design comes back as it was saved
       case 'rotation':
+        l.rotation = within(key, v, MAX_COORD)
+        break
       case 'scaleX':
       case 'scaleY':
-        L[key] = number(key, v)
+        L[key] = within(key, v, MAX_SIZE)
         break
       case 'strokeWidth':
-        L[key] = size(key, v, 0)
-        break
       case 'blur':
       case 'radius':
-        L[key] = number(key, v, 0)
+        L[key] = size(key, v, 0)
         break
       case 'letterSpacing':
       case 'lineHeight': {
-        const n = number(key, v, key === 'lineHeight' ? 0 : undefined)
+        const n = key === 'lineHeight' ? size(key, v, 0) : within(key, v, MAX_SIZE)
         runs(r => (r[key] = n))
         break
       }
@@ -469,12 +485,17 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
         // a run's own color draws over the layer's fill, so a new fill on text takes their place
         if (key === 'fill') runs(r => delete r.color)
         break
-      case 'dash':
-        if (v === null || v === 'none' || (Array.isArray(v) && !v.length)) delete l.dash
-        else if (Array.isArray(v)) l.dash = v.map((x, i) => number(`dash ${i + 1}`, x, 0))
-        else if (typeof v === 'string') l.dash = v.trim().split(/[\s,]+/).map((x, i) => number(`dash ${i + 1}`, x, 0))
-        else throw new OpError('dash must be a list of lengths')
+      case 'dash': {
+        if (v === null || v === 'none' || (Array.isArray(v) && !v.length)) {
+          delete l.dash
+          break
+        }
+        const lengths = Array.isArray(v) ? v : typeof v === 'string' ? v.trim().split(/[\s,]+/) : null
+        if (!lengths) throw new OpError('dash must be a list of lengths')
+        if (lengths.length > MAX_DASH) throw new OpError(TOO_LONG.dash)
+        l.dash = lengths.map((x, i) => size(`dash ${i + 1}`, x, 0))
         break
+      }
       case 'shadow': {
         const s = shadowOf(v)
         if (s) l.shadow = s
@@ -564,6 +585,7 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
         break
       case 'label':
         L.label = text('label', v)
+        if ((L.label as string).length > MAX_NAME) throw new OpError(TOO_LONG.label)
         break
       case 'route':
         L.route = oneOf('route', v, ['straight', 'orthogonal'] as const)
@@ -573,8 +595,10 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
         break
       case 'points':
         if (v === null || v === 'none') delete L.points
-        else if (Array.isArray(v)) L.points = v.map((p, i) => [coord(`point ${i + 1} x`, (p as unknown[])?.[0]), coord(`point ${i + 1} y`, (p as unknown[])?.[1])])
-        else throw new OpError('points must be a list of [x, y]')
+        else if (Array.isArray(v)) {
+          if (v.length > MAX_POINTS) throw new OpError(TOO_LONG.points)
+          L.points = v.map((p, i) => [coord(`point ${i + 1} x`, (p as unknown[])?.[0]), coord(`point ${i + 1} y`, (p as unknown[])?.[1])])
+        } else throw new OpError('points must be a list of [x, y]')
         break
     }
   }

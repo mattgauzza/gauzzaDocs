@@ -1,6 +1,8 @@
 import type { Artboard, Design, Layer } from './types'
 
 export const MAX_ARTBOARD_SIDE = 8192
+/** How reading, the ops and saving all refuse an artboard over MAX_ARTBOARD_SIDE. */
+export const ARTBOARD_TOO_LARGE = `Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`
 
 export const PRESETS: Record<string, { width: number; height: number; transparent?: boolean; label: string }> = {
   instagram: { width: 1080, height: 1080, label: 'Instagram post' },
@@ -43,9 +45,7 @@ export function newDesign(preset: string): Design {
     height = +m[2]
     name = `${width}x${height}`
   }
-  if (width > MAX_ARTBOARD_SIDE || height > MAX_ARTBOARD_SIDE) {
-    throw new Error(`Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`)
-  }
+  if (width > MAX_ARTBOARD_SIDE || height > MAX_ARTBOARD_SIDE) throw new Error(ARTBOARD_TOO_LARGE)
   return {
     format: 1,
     id: crypto.randomUUID(),

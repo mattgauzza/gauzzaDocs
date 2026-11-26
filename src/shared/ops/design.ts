@@ -1,12 +1,14 @@
 import { type Box, boxOf, centerOf, fin } from '../design/geometry'
-import { MAX_ARTBOARD_SIDE, PRESETS, artboardOf, newId, walk } from '../design/model'
+import { ARTBOARD_TOO_LARGE, MAX_ARTBOARD_SIDE, PRESETS, artboardOf, newId, walk } from '../design/model'
 import { parsePath, pathBounds } from '../design/path'
 import { designToSvg } from '../design/render'
 import { cleanSvg } from '../design/svgClean'
 import { importSvg, layerAsSvg } from '../design/svgImport'
 import { cleanText, num as fmt, textReport } from '../design/text'
 import type { Artboard, BlendMode, Component, Design, DesignFile, Layer, Override, Paint, TextRun } from '../design/types'
-import { MAX_SVG_MARKUP, SVG_LAYERS_FULL, pastLimit, svgMarkupIn, svgMarkupOf } from '../design/validate'
+import {
+  LIMIT, MAX_LAYERS, MAX_SVG_MARKUP, type Past, SVG_LAYERS_FULL, layerCount, limitsOf, pastLimit, pastZipLimit, svgMarkupIn, svgMarkupOf
+} from '../design/validate'
 import type { AgentOp } from '../types'
 import {
   DEFAULT_FONT, type DesignDoc, type GroupLayer, MAX_SIZE, boundsOf, boundsOfLayers, componentOf, contains, coord, endOf, fontOf,
@@ -33,8 +35,10 @@ import { OpError, type OpHandler, type OpServices, str } from './types'
  *   apply { ops }                               -> { results }
  * Every op runs on a copy, so a failure changes nothing; `apply` runs its ops in order on one copy and stops at the
  * first failure with "op <n>: <message>". An op (or a whole batch) that would leave the design past a limit reading
- * enforces is refused (pastLimit), so a design the ops make can always be saved and opened again. `summary` says what
- * changed in a few plain words, for the undo step.
+ * enforces, or with a value reading would cut, is refused in reading's words (pastLimit, and pastZipLimit for the zip's
+ * own 10,000 entries and 1 GB), so a design the ops make always saves and opens again as it was. A batch also checks
+ * its layer count after each op, and every limit after each copy, so it can't grow far past one before its end.
+ * `summary` says what changed in a few plain words, for the undo step.
  * Pure apart from `services`: the design editor applies these live and core/ops to files on disk.
  */
 export async function applyDesignOp(
@@ -50,11 +54,19 @@ export async function applyDesignOp(
   const result = await runOp(draft, op)
   const summary = describe(draft.changes)
   if (!draft.changes.length) return { result, summary }
-  // never make a design reading would refuse: past any of its limits, the file couldn't be opened once saved
-  const past = pastLimit(draft.design, file.design)
-  if (past) throw new OpError(past.svg ? SVG_LAYERS_FULL : `That would leave a design that can't be opened: ${past.reason}.`)
+  // never make a design reading would refuse or repair: past any of its limits, the file couldn't be opened once saved
+  // (or wouldn't come back as it was), and that includes the zip's own limits
+  const thumbnail = file.thumbnail?.byteLength
+  const past =
+    pastLimit(draft.design, file.design) ??
+    pastZipLimit(draft.design, { assets: draft.assets, thumbnail }, { before: { design: file.design, stored: { assets: file.assets, thumbnail } } })
+  if (past) throw new OpError(refusal(past))
   return { result, file: { ...file, design: draft.design, assets: draft.assets }, summary }
 }
+
+/** How an op refuses a design past a limit: reading's own sentence where it has one, else why it couldn't open. */
+const refusal = (past: Past): string =>
+  past.svg ? SVG_LAYERS_FULL : past.message ?? `That would leave a design that can't be opened: ${past.reason}.`
 
 export const designOps: OpHandler = async (payload, op, ctx) => {
   if (payload.kind !== 'design') throw new OpError('not a design')
@@ -583,7 +595,7 @@ function sizeOf(v: unknown): { width: number; height: number } {
     height = number('height', s.height)
   } else throw new OpError('artboard needs size (<w>x<h> or a preset name)')
   if (!(width >= 1 && height >= 1)) throw new OpError('An artboard must be at least 1 px per side')
-  if (width > MAX_ARTBOARD_SIDE || height > MAX_ARTBOARD_SIDE) throw new OpError(`Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`)
+  if (width > MAX_ARTBOARD_SIDE || height > MAX_ARTBOARD_SIDE) throw new OpError(ARTBOARD_TOO_LARGE)
   return { width, height }
 }
 
@@ -656,8 +668,8 @@ function styleOp(d: Draft, op: AgentOp): unknown {
       const p = paintOf(d, 'color', r.color)
       if (p) run.color = p
     }
-    if (r.letterSpacing !== undefined) run.letterSpacing = number('letterSpacing', r.letterSpacing)
-    if (r.lineHeight !== undefined) run.lineHeight = number('lineHeight', r.lineHeight, 0)
+    if (r.letterSpacing !== undefined) run.letterSpacing = Math.min(MAX_SIZE, Math.max(-MAX_SIZE, number('letterSpacing', r.letterSpacing)))
+    if (r.lineHeight !== undefined) run.lineHeight = Math.min(MAX_SIZE, number('lineHeight', r.lineHeight, 0))
     const had = styles.text.find(s => s.name === name)
     if (had) had.run = run
     else styles.text.push({ name, run })
@@ -725,6 +737,15 @@ async function applyOp(d: Draft, op: AgentOp): Promise<unknown> {
   if (!Array.isArray(op.ops)) throw new OpError('apply needs ops (a list of ops)')
   if (op.ops.length > MAX_BATCH) throw new OpError(`apply takes at most ${MAX_BATCH.toLocaleString('en-US')} ops at once; send the rest in another batch`)
   const results: unknown[] = []
+  // The layer count is checked after each op, so a batch can't grow far past the limit (copying a group again and
+  // again doubles it) before the check at its end. What the design held at the start plus a new id for every layer made
+  // since bounds it for nothing; it's counted again only when that bound passes the limit. A copy is the one op that
+  // multiplies what a design holds (a long text copied again and again), so after each one every limit is checked.
+  const start = layerCount(d.design)
+  let known = start
+  let minted = d.taken.size
+  const copies = op.ops.some(o => !!o && typeof o === 'object' && (o as AgentOp).op === 'duplicate')
+  const before = copies ? limitsOf(d.design) : undefined
   for (let i = 0; i < op.ops.length; i++) {
     const sub = op.ops[i] as AgentOp
     try {
@@ -732,6 +753,15 @@ async function applyOp(d: Draft, op: AgentOp): Promise<unknown> {
       if (sub.op === 'apply') throw new OpError("apply can't hold another apply")
       // the batch's artboard is each op's default
       results.push(await runOp(d, op.artboard !== undefined && sub.artboard === undefined ? { ...sub, artboard: op.artboard } : sub))
+      if (known + d.taken.size - minted > MAX_LAYERS) {
+        known = layerCount(d.design)
+        minted = d.taken.size
+        if (known > MAX_LAYERS && known > start) throw new OpError(`That would leave a design that can't be opened: ${LIMIT.layers}.`)
+      }
+      if (before && sub.op === 'duplicate') {
+        const past = pastLimit(d.design, before)
+        if (past) throw new OpError(refusal(past))
+      }
     } catch (e) {
       throw new OpError(`op ${i + 1}: ${(e as Error).message}`)
     }

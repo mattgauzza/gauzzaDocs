@@ -514,7 +514,7 @@ test('a design whose repairs would take it past 64 MB is refused, and one over 6
   assert.equal(opened.design.artboards[0].layers.length, 1000)
   // a design built past 64 MB in memory is refused on save, rather than written where it couldn't open again
   const big = newDesign('instagram')
-  big.artboards[0].layers.push(rect('r', 'n'.repeat(65 * 1024 * 1024)))
+  big.artboards[0].layers.push({ ...base, id: 'p', name: 'p', type: 'path', d: 'M0 0' + ' L1 1'.repeat(13 * 1024 * 1024) })
   await assert.rejects(designZipBytes({ design: big, assets: {} }), { message: 'This design is too large to save (its design.json would be over 64 MB).' })
 })
 
@@ -630,7 +630,7 @@ test('a save says what stopped it, and refuses over 16 MB of SVG layers so a reo
   await assert.rejects(designZipBytes({ design: loop, assets: {} }), { message: "This design can't be saved: part of it contains itself." })
   // too large stays as it was
   const big = newDesign('instagram')
-  big.artboards[0].layers.push(rect('r', 'n'.repeat(65 * 1024 * 1024)))
+  big.artboards[0].layers.push({ ...base, id: 'p', name: 'p', type: 'path', d: 'M0 0' + ' L1 1'.repeat(13 * 1024 * 1024) })
   await assert.rejects(designZipBytes({ design: big, assets: {} }), { message: 'This design is too large to save (its design.json would be over 64 MB).' })
   // svg layers: four of 4,000,000 characters (16,000,000, within 16 MB) save and reopen whole; a fifth is refused
   const markup = (i: number): string => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!--${'p'.repeat(4_000_000 - 100)}--><rect id="r${i}" width="1" height="1"/></svg>`
@@ -719,3 +719,51 @@ test('ids past 64 characters are renamed without being kept as keys, so 3,000 of
   assert.deepEqual([c.from.layer, c.to.layer], ['', ''])
 })
 const R56 = (s: string): string => s.repeat(56)
+
+test('a save past 10,000 zip entries is refused, so it never writes a file reading refuses (Ruling 23)', async () => {
+  const ENTRIES = 'This design has too many entries (more than 10,000).'
+  const images = (n: number): DesignFile => {
+    const design = newDesign('instagram')
+    const assets: Record<string, Uint8Array> = {}
+    for (let i = 0; i < n; i++) {
+      const bytes = new Uint8Array([i & 255, i >> 8, 7])
+      const asset = assetName(bytes, 'png')
+      assets[asset] = bytes
+      design.artboards[0].layers.push({ ...base, id: `i${i}`, name: 'I', type: 'image', asset })
+    }
+    return { design, assets }
+  }
+  // 9,998 assets, design.json and the assets/ folder are 10,000 entries: it saves, and opens again
+  const f = images(9998)
+  const back = await readDesignZip(await designZipBytes(f))
+  assert.equal(Object.keys(back.assets).length, 9998)
+  // a thumbnail, or one more asset, is one entry too many
+  await assert.rejects(designZipBytes({ ...f, thumbnail: new Uint8Array([1]) }), { message: ENTRIES })
+  await assert.rejects(designZipBytes(images(9999)), { message: ENTRIES })
+  // reading words it the same way
+  const z = new JSZip()
+  z.file('design.json', JSON.stringify(newDesign('x')))
+  for (let i = 0; i < 10_000; i++) z.file(`junk/${i}.txt`, '')
+  await assert.rejects(readDesignZip(await z.generateAsync({ type: 'nodebuffer' })), { message: ENTRIES })
+})
+
+test('a save refuses what reading would repair or refuse, in reading\'s own words (Ruling 23)', async () => {
+  const saved = (layers: Layer[], width = 1080) => {
+    const d = newDesign('instagram')
+    return designZipBytes({ design: { ...d, artboards: [{ ...d.artboards[0], width, layers }] }, assets: {} })
+  }
+  const link = (more: Record<string, unknown>): Layer =>
+    ({ ...base, id: 'c', name: 'c', type: 'connector', from: { layer: 'r' }, to: { layer: 'r' }, route: 'straight', arrow: 'end', ...more }) as Layer
+  const stops = (n: number) => Array.from({ length: n }, (_, i) => ({ offset: i / (n - 1), color: '#000000' }))
+  await assert.rejects(saved([rect('r', 'n'.repeat(1001))]), { message: 'Names can be at most 1,000 characters.' })
+  await assert.rejects(saved([rect('r', 'R'), link({ label: 'l'.repeat(1001) })]), { message: 'Labels can be at most 1,000 characters.' })
+  await assert.rejects(saved([{ ...rect('r', 'R'), fill: { type: 'linear', stops: stops(257) } }]), { message: 'Gradients can have at most 256 stops.' })
+  await assert.rejects(saved([{ ...rect('r', 'R'), dash: Array(1001).fill(1) }]), { message: 'A dash can have at most 1,000 lengths.' })
+  await assert.rejects(saved([rect('r', 'R'), link({ points: Array(10_001).fill([0, 0]) })]), { message: 'A connector can have at most 10,000 points.' })
+  await assert.rejects(saved([], 9000), { message: 'Artboards can be at most 8192 px per side.' })
+  // at each limit it saves and opens again with nothing repaired
+  const at = [{ ...rect('r', 'n'.repeat(1000)), fill: { type: 'linear', stops: stops(256) }, dash: Array(1000).fill(1) } as Layer, link({ label: 'l'.repeat(1000), points: Array(10_000).fill([0, 0]) })]
+  const back = await readDesignZip(await saved(at, 8192))
+  assert.equal(back.notes, undefined)
+  assert.deepEqual(back.design.artboards[0].layers, at)
+})
