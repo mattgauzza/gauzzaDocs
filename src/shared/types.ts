@@ -1,3 +1,4 @@
+import type { DesignFile } from './design/types'
 import type { Kind } from './kinds'
 
 // ---------- spreadsheet model (shared by the sheet editor, the formula engine, file IO and the CLI) ----------
@@ -92,6 +93,8 @@ export type FilePayload =
   // ---- slides (begin) ----
   | { kind: 'slides'; deck: Deck; lossy?: boolean; lossyReasons?: string[] }
   // ---- slides (end) ----
+  // A layered design (.gdesign). With `partial`, file.assets holds only the assets added since the last save.
+  | { kind: 'design'; file: DesignFile; partial?: boolean }
 
 // ---------- presentations (.pptx), edited by renderer/src/slides; model helpers in shared/slides ----------
 

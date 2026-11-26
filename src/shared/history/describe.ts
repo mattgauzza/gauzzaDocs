@@ -59,6 +59,21 @@ const BY_KIND: Record<string, Record<string, Phrase>> = {
   sheet: { append: 'Added rows at the end', prepend: 'Added rows at the start', write: 'Rewrote the sheet', merge: 'Merged cells' },
   slides: { append: 'Added slides at the end', prepend: 'Added slides at the start' },
   pdf: { merge: 'Added pages from other PDFs' },
+  design: {
+    add: 'Added layers',
+    set: 'Changed layers',
+    delete: 'Deleted layers',
+    move: 'Moved layers',
+    group: 'Grouped layers',
+    ungroup: 'Ungrouped layers',
+    align: 'Aligned layers',
+    distribute: 'Spaced layers evenly',
+    duplicate: 'Duplicated layers',
+    artboard: 'Changed artboards',
+    style: 'Changed styles',
+    svg: 'Imported SVG',
+    apply: 'Changed the design',
+  },
 }
 
 /** An op name as words: "replaceText" becomes "Replace text". */
@@ -71,7 +86,7 @@ const words = (op: string) => {
   return w.charAt(0).toUpperCase() + w.slice(1)
 }
 
-/** One op in plain words. `kind` (doc, sheet, slides, pdf, text) picks the right meaning where ops share a name. */
+/** One op in plain words. `kind` (doc, sheet, slides, pdf, text, design) picks the right meaning where ops share a name. */
 export function describeOp(op: string, kind?: string, count = 1): string {
   const p = (kind && BY_KIND[kind]?.[op]) || PHRASES[op]
   if (!p) return words(op)
