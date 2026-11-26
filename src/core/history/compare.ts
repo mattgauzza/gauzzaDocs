@@ -10,6 +10,7 @@ import { extOf } from '../../shared/kinds'
 import { htmlToMarkdown } from '../../shared/convert'
 import { parseAddr } from '../../shared/sheet/address'
 import { deckToMarkdown } from '../../shared/slides/markdown'
+import { applyDesignOp } from '../../shared/ops/design'
 import type { Sheet } from '../../shared/types'
 
 /** Comparisons only happen when both versions are under this size. */
@@ -44,6 +45,11 @@ export async function versionText(file: string, bytes: Uint8Array): Promise<stri
         return payload.workbook.sheets.flatMap(sheetLines).join('\n')
       case 'text':
         return payload.text
+      case 'design': {
+        // what an agent reads: artboards, then every artboard's layers one per line, styles and components
+        const r = await applyDesignOp(payload.file, { op: 'read', format: 'text', allArtboards: true })
+        return (r.result as { content: string }).content
+      }
       default:
         throw new Error(`Cannot compare .${ext} files as text`)
     }

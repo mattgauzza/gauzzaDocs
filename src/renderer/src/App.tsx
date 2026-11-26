@@ -25,6 +25,7 @@ import LargeViewer from './shell/LargeViewer'
 import { Participants } from './shell/Participants'
 import { SelectionBubble } from './shell/SelectionBubble'
 import { Icon, KindIcon, Logo } from './shell/icons'
+import { designSizeItems } from './design/presets'
 import { MenuBar, MenuList } from './shell/Menus'
 import { type EditorAccess, type LoadedPlugins, fits, loadPlugins } from './shell/plugins'
 
@@ -360,9 +361,10 @@ export default function App() {
   }, [])
   const open = (path: string) => openFile(path).catch(e => say((e as Error).message))
   const openDialog = async () => (await api.openDialog()).forEach(open)
-  const newFile = async (kind: Kind, ext?: string, dir?: string) => {
+  /** preset: a new design's size (a PRESETS name). */
+  const newFile = async (kind: Kind, ext?: string, dir?: string, preset?: string) => {
     try {
-      await open(await api.newFile(kind, ext, dir))
+      await open(await api.newFile(kind, ext, dir, preset))
     } catch (e) {
       say((e as Error).message)
     }
@@ -431,6 +433,7 @@ export default function App() {
     try {
       const payload = await h.getPayload()
       const mtime = await api.save(t.path, payload, ctxOf(t, taken))
+      h.saved?.(payload)
       patch(id, { saving: false, dirty: (changeSeq.current.get(id) || 0) !== seq, mtime, saved: Date.now(), external: false })
       window.gd.changed(t.path, { type: 'saved' })
     } catch (e) {
@@ -456,6 +459,11 @@ export default function App() {
       if (t.kind === 'text') return hh.getText?.() ?? null
       if (t.kind === 'doc' || t.kind === 'sheet' || t.kind === 'slides') {
         const r = (await hh.agent({ op: 'read', format: t.kind === 'sheet' ? 'csv' : 'md' }, { name: 'gauzzaDocs' })) as { content?: string }
+        return typeof r?.content === 'string' ? r.content : null
+      }
+      if (t.kind === 'design') {
+        // one line per layer on every artboard, the same text version history compares
+        const r = (await hh.agent({ op: 'read', format: 'text', allArtboards: true }, { name: 'gauzzaDocs' })) as { content?: string }
         return typeof r?.content === 'string' ? r.content : null
       }
     } catch { /* not ready */ }
@@ -515,7 +523,9 @@ export default function App() {
     const to = await api.saveAsDialog(t.path)
     if (!to) return
     const h = handles.current.get(t.id)!
-    const payload = await h.getPayload()
+    let payload = await h.getPayload()
+    // A design's save sends only its new assets, the rest coming from its own file: a new file needs all of them.
+    if (payload.kind === 'design' && payload.partial && h.peekPayload) payload = await h.peekPayload()
     if (kindOf(to) !== t.kind) return say('Pick a format of the same kind (use File → Download to convert)')
     await api.save(to, payload, ctxOf(t, tabAuthors.current.get(t.id))) // the tab's authors, when it was changed since its last save
     // Reopen as the new file so its editor follows the new format (e.g. .md vs .html).
@@ -903,7 +913,8 @@ export default function App() {
       sheet: [['Excel (.xlsx)', 'xlsx'], ['Comma separated (.csv)', 'csv'], ['Tab separated (.tsv)', 'tsv'], ['PDF (.pdf)', 'pdf']],
       pdf: [],
       text: [],
-      slides: [['PowerPoint (.pptx)', 'pptx'], ['PDF (.pdf)', 'pdf'], ['Markdown outline (.md)', 'md']] // slides
+      slides: [['PowerPoint (.pptx)', 'pptx'], ['PDF (.pdf)', 'pdf'], ['Markdown outline (.md)', 'md']], // slides
+      design: [] // SVG, PNG and PDF exports come with design export
     }
     const sep: MenuItem = { label: '', sep: true }
     const file: MenuItem[] = [
@@ -911,6 +922,7 @@ export default function App() {
         { label: 'Document', run: () => newFile('doc') },
         { label: 'Spreadsheet', run: () => newFile('sheet') },
         { label: 'Presentation', run: () => newFile('slides') }, // slides
+        { label: 'Design', submenu: designSizeItems(preset => newFile('design', undefined, undefined, preset)) },
         { label: 'Markdown document', run: () => newFile('doc', 'md') },
         { label: 'Word document', run: () => newFile('doc', 'docx') },
         { label: 'Text file', run: () => newFile('text') }

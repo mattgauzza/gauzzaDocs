@@ -1,6 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { payloadBytes } from '../core/files'
+import { withDesignLock } from '../core/design/lock'
+import { kindOf } from '../shared/kinds'
 import { getSettings } from '../core/paths'
 import {
   COMPARE_MAX_BYTES,
@@ -154,7 +156,9 @@ export const historyJobs: Record<string, Job> = {
     let unsaved = o.unsavedPayload ? await payloadBytes(p, o.unsavedPayload) : undefined
     if (unsaved && unsaved.length === 0 && o.unsavedPayload?.kind === 'pdf') unsaved = undefined // a PDF streamed from disk holds no bytes of its own
     const unsavedAuthors = Array.isArray(o.unsavedAuthors) && o.unsavedAuthors.length ? o.unsavedAuthors : undefined
-    return onQueue(p, () => restoreVersion(p, v, { authors: o.authors!, unsaved, unsavedAuthors, discardCurrent: !!o.discardCurrent }))
+    const restore = () => onQueue(p, () => restoreVersion(p, v, { authors: o.authors!, unsaved, unsavedAuthors, discardCurrent: !!o.discardCurrent }))
+    // A design is written holding its lock, taken before the file's queue as every save takes it (core/files.ts).
+    return kindOf(p) === 'design' ? withDesignLock(p, restore) : restore()
   },
   historyName: ([file, n, name, by]) => {
     if (typeof by !== 'string' || !by) throw new Error('Naming a version needs to say who named it.')

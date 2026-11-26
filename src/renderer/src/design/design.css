@@ -1,0 +1,25 @@
+/* Design editor (.gdesign): artboards side by side on a neutral canvas. Theme values come from styles.css. */
+.de-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.de-toolbar { margin-top: 6px; }
+.de-zoom { min-width: 52px; font-variant-numeric: tabular-nums; }
+
+/* what opening the file repaired, once, until dismissed */
+.de-notes { margin: 0 12px 6px; padding: 4px 4px 4px 12px; border-radius: var(--radius); background: var(--accent-soft); font-size: 13px; flex: none; }
+.de-notes-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.de-notes .icon-btn svg { width: 18px; height: 18px; }
+.de-notes ul { margin: 2px 0 6px; padding-left: 20px; max-height: 160px; overflow: auto; }
+.de-link { color: var(--accent); font-weight: 500; padding: 2px 6px; border-radius: 4px; }
+.de-link:hover { background: var(--hover); }
+
+.de-canvas { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--canvas); border-top: 1px solid var(--line-soft); outline: none; }
+.de-row { display: flex; align-items: safe center; justify-content: safe center; width: max-content; min-width: 100%; min-height: 100%; box-sizing: border-box; }
+.de-board-wrap { margin: 0; flex: none; }
+.de-board-name { height: 24px; font-size: 12px; line-height: 18px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.de-board-name .muted { margin-left: 4px; }
+.de-board { position: relative; overflow: hidden; box-shadow: var(--page-shadow); }
+.de-board > svg { display: block; width: 100%; height: 100%; }
+/* an artboard with no background is see-through: a checkerboard shows it */
+.de-board.clear { --check: #e3e3e3; background: repeating-conic-gradient(var(--check) 0 25%, var(--surface) 0 50%) 0 0 / 16px 16px; }
+:root[data-theme='dark'] .de-board.clear { --check: #2d2f33; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .de-board.clear { --check: #2d2f33; } }
+.de-board-error { display: grid; place-items: center; padding: 16px; background: var(--surface); color: var(--danger); text-align: center; }

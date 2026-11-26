@@ -4,13 +4,15 @@
  *  sheet spreadsheet editor (Google Sheets style): .xlsx .csv .tsv
  *  pdf   PDF viewer / markup: .pdf
  *  slides presentation editor (Google Slides style): .pptx
+ *  design layered design editor (artboards, layers, diagrams): .gdesign
  *  text  code and plain text editor (Notepad++ style): everything else
  */
-export type Kind = 'doc' | 'sheet' | 'pdf' | 'text' | 'slides'
+export type Kind = 'doc' | 'sheet' | 'pdf' | 'text' | 'slides' | 'design'
 
 const DOC = ['html', 'htm', 'md', 'markdown', 'docx']
 const SHEET = ['xlsx', 'csv', 'tsv']
 const SLIDES = ['pptx']
+const DESIGN = ['gdesign']
 
 export const extOf = (file: string) => {
   const base = file.split(/[\\/]/).pop() || ''
@@ -26,6 +28,7 @@ export function kindOf(file: string): Kind {
   if (SHEET.includes(ext)) return 'sheet'
   if (ext === 'pdf') return 'pdf'
   if (SLIDES.includes(ext)) return 'slides'
+  if (DESIGN.includes(ext)) return 'design'
   return 'text'
 }
 
@@ -62,5 +65,6 @@ export const OPEN_FILTERS = [
   { name: 'Documents', extensions: DOC },
   { name: 'Spreadsheets', extensions: SHEET },
   { name: 'Presentations', extensions: SLIDES },
+  { name: 'Designs', extensions: DESIGN },
   { name: 'PDF', extensions: ['pdf'] }
 ]

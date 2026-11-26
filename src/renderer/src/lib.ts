@@ -1,6 +1,7 @@
 import type { Author, HistoryVersion, InstalledPlugin, OpenFile, RecentFile, Settings, FilePayload } from '../../shared/types'
 import type { Kind } from '../../shared/kinds'
 import type { Hunk } from '../../shared/diff'
+import type { ElkGraph, FontRef } from '../../shared/design/types'
 
 /** Mirrors src/core/comments.ts (kept here so the window does not import Node code). */
 export interface Reply { id: string; author: string; by: 'user' | 'agent'; text: string; created: number }
@@ -50,7 +51,8 @@ export const api = {
   load: (path: string) => window.gd.call<OpenFile>('load', path),
   /** ctx: who changed it since the last save; main credits the person when it is left out. */
   save: (path: string, payload: FilePayload, ctx?: SaveContext) => window.gd.call<number>('save', path, payload, ctx),
-  newFile: (kind: Kind, ext?: string, dir?: string) => window.gd.call<string>('newFile', kind, ext, dir),
+  /** preset: a new design's size (a PRESETS name, shared/design/model.ts). */
+  newFile: (kind: Kind, ext?: string, dir?: string, preset?: string) => window.gd.call<string>('newFile', kind, ext, dir, preset),
   projectsList: () => window.gd.call<Project[]>('projectsList'),
   projectsAdd: (dir: string, name?: string) => window.gd.call<Project>('projectsAdd', dir, name),
   projectsRemove: (dir: string) => window.gd.call('projectsRemove', dir),
@@ -110,6 +112,13 @@ export const api = {
     window.gd.call<{ matches: { line: number; text: string }[]; truncated: boolean }>('largeFind', path, q, opts),
   largeForget: (path: string) => window.gd.call('largeForget', path),
   systemFont: (name: string) => window.gd.call<Uint8Array | null>('systemFont', name),
+  // ---------- designs (worker jobs: the window can't scan installed fonts or run ELK) ----------
+  /** The installed face closest to a design's font reference, or null when none of that family is installed. */
+  designFontBytes: (ref: FontRef) => window.gd.call<Uint8Array | null>('designFontBytes', ref),
+  /** The fallback font's bytes (Liberation Sans Regular). */
+  designFallbackFont: () => window.gd.call<Uint8Array>('designFallbackFont'),
+  /** A diagram's graph laid out by ELK, for the design ops' `services.layout`. */
+  designLayout: (graph: ElkGraph) => window.gd.call<ElkGraph>('designLayout', graph),
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
   openDefaultApps: () => window.gd.call('openDefaultApps'),

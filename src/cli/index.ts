@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
-import { createFile, loadFile } from '../core/files'
+import { DEFAULT_DESIGN_PRESET, createFile, loadFile } from '../core/files'
+import { PRESETS, newDesign } from '../shared/design/model'
 import { HOME, freeName, getRecent, getSettings, readServer } from '../core/paths'
 import { DOC_ID, docId } from '../shared/docId'
 import { resolveDocId } from './docIds'
@@ -93,17 +94,21 @@ program
 
 program
   .command('new <kind> [name]')
-  .description('create a new file: doc | sheet | slides | text (in the docs folder, or --dir). Opens it if the app is running')
+  .description('create a new file: doc | sheet | slides | design | text (in the docs folder, or --dir). Opens it if the app is running')
   .option('--ext <ext>', 'file extension, e.g. md, docx, csv, py')
   .option('--dir <dir>', 'folder to create it in (default: the app\'s docs folder)')
+  .option('--size <size>', `a design's size: ${Object.keys(PRESETS).join(', ')} or <w>x<h> (default ${DEFAULT_DESIGN_PRESET})`)
   .option('--no-open', 'do not open it in the app')
   .action(async (kind: Kind, name: string | undefined, o) => {
-    if (!['doc', 'sheet', 'slides', 'text'].includes(kind)) throw new Error('kind must be doc, sheet, slides or text')
+    if (!['doc', 'sheet', 'slides', 'design', 'text'].includes(kind)) throw new Error('kind must be doc, sheet, slides, design or text')
+    if (o.size !== undefined && kind !== 'design') throw new Error('Only a design takes --size')
+    if (kind === 'design' && o.ext && o.ext.replace(/^\./, '').toLowerCase() !== 'gdesign') throw new Error('A design is always a .gdesign file')
     const s = getSettings()
-    const ext = o.ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
-    const stemName = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
+    const ext = o.ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx', design: 'gdesign' }[kind]
+    const stemName = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation', design: 'Untitled design' }[kind]
+    if (kind === 'design') newDesign(o.size || DEFAULT_DESIGN_PRESET) // an unknown size fails here, before any file is named
     const file = freeName(path.resolve(o.dir || s.docsDir), stemName, ext)
-    await createFile(file, asAgent())
+    await createFile(file, asAgent(), kind === 'design' ? o.size : undefined)
     if (o.open) await call('open', { path: file }).catch(() => null)
     out({ path: file }, () => file)
   })

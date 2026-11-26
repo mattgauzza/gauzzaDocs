@@ -31,6 +31,7 @@
       "out/**",
       "dist/cli.mjs",
       "resources/icon.png",
+      "resources/fonts/**",
       "plugins/**",
       "src/shared/ops.md",
       "package.json"
@@ -159,6 +160,15 @@
           "description": "PowerPoint presentation",
           "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
           "role": "Editor"
+        },
+        {
+          "ext": [
+            "gdesign"
+          ],
+          "name": "gauzzaDocs design",
+          "description": "gauzzaDocs design",
+          "mimeType": "application/x-gauzzadocs-design",
+          "role": "Editor"
         }
       ]
     },
@@ -263,6 +273,15 @@
           "name": "PowerPoint presentation",
           "description": "PowerPoint presentation",
           "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "role": "Editor"
+        },
+        {
+          "ext": [
+            "gdesign"
+          ],
+          "name": "gauzzaDocs design",
+          "description": "gauzzaDocs design",
+          "mimeType": "application/x-gauzzadocs-design",
           "role": "Editor"
         }
       ]

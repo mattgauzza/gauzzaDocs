@@ -15,7 +15,8 @@ import {
 import { describeOp } from '../shared/history/describe'
 import { kindOf } from '../shared/kinds'
 import type { HistoryVersion } from '../shared/types'
-import { call } from './common'
+import { call, refuseOpenDesign } from './common'
+import { withDesignLock } from '../core/design/lock'
 import type { Ctx } from './common'
 
 /** "v7" or "7" as a number. */
@@ -119,9 +120,10 @@ export function registerHistoryCommands(program: Command, ctx: Ctx, agentName: (
       let version2: HistoryVersion
       try {
         if (!o.offline) live = (await call('historyRestore', { path: f, n, discardCurrent: !!o.discardCurrent, agent })) as Live | null
-        version2 = live
-          ? live.version
-          : await restoreVersion(f, n, { authors: [{ name: agent.name, by: 'agent' }], discardCurrent: !!o.discardCurrent })
+        else await refuseOpenDesign(f)
+        const onDisk = () => restoreVersion(f, n, { authors: [{ name: agent.name, by: 'agent' }], discardCurrent: !!o.discardCurrent })
+        // a design is written holding its lock (core/design/lock.ts)
+        version2 = live ? live.version : kindOf(f) === 'design' ? await withDesignLock(f, onDisk) : await onDisk()
       } catch (e) {
         // The history store names its option discardCurrent; here it is the --discard-current flag.
         throw new Error(((e as Error).message || String(e)).replace(/\bdiscardCurrent\b/g, '--discard-current'))

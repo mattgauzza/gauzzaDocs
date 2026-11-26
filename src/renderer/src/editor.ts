@@ -24,6 +24,11 @@ export interface EditorHandle {
   /** The same content without the side effects of saving (a PDF folds its pending edits into the page on save). */
   peekPayload?(): FilePayload | Promise<FilePayload>
   /**
+   * A payload getPayload returned is now on disk (called after the save succeeded). A design's save sends only the
+   * assets the file doesn't hold yet, so it needs to know which saves landed.
+   */
+  saved?(payload: FilePayload): void
+  /**
    * An agent op on the live editor (routed here from the CLI when the file is open). Implement 'read', 'write',
    * 'info' and the kind's ops (src/shared/ops.md). Edits must go through the editor so they are undoable and visible,
    * and must call props.onChange(). Throw an Error with a helpful message for bad input. The shell handles 'save'.

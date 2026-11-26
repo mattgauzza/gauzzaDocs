@@ -137,6 +137,16 @@ function textRefs(design: Design): FontRef[] {
 const keyOf = (r: FontRef) => r.asset ? `asset:${r.asset}` : `${r.family.toLowerCase()}|${r.weight}|${r.style}|${r.postscript || ''}`
 
 /**
+ * True when `after` names a font `before` didn't (a new text family, an svg import), so a FontSource built for `before`
+ * would measure it with the fallback: build one for `after` before measuring.
+ */
+export function newFonts(before: Design, after: Design): boolean {
+  if (before === after) return false
+  const had = new Set(textRefs(before).map(keyOf))
+  return textRefs(after).some(r => !had.has(keyOf(r)))
+}
+
+/**
  * Loads every font a design names: the packed asset first, then `fetch`. A font nothing can supply resolves to the
  * fallback with `missing: true`, so `get` never throws.
  */

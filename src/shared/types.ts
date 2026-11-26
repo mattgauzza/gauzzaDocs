@@ -93,8 +93,9 @@ export type FilePayload =
   // ---- slides (begin) ----
   | { kind: 'slides'; deck: Deck; lossy?: boolean; lossyReasons?: string[] }
   // ---- slides (end) ----
-  // A layered design (.gdesign). With `partial`, file.assets holds only the assets added since the last save.
-  | { kind: 'design'; file: DesignFile; partial?: boolean }
+  // A layered design (.gdesign). With `partial`, file.assets holds only the assets added since the last save: the rest
+  // are copied from the file on disk. `notes` says what opening the file repaired or dropped (validateDesign).
+  | { kind: 'design'; file: DesignFile; partial?: boolean; notes?: string[] }
 
 // ---------- presentations (.pptx), edited by renderer/src/slides; model helpers in shared/slides ----------
 

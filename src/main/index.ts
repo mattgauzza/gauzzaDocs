@@ -88,13 +88,13 @@ async function openInWindow(file: string, opts: { focus?: boolean } = {}) {
   return p
 }
 
-/** `ctx` says who created it: its first version is theirs. */
-async function newFilePath(kind: Kind, ext: string | undefined, name: string | undefined, dir: string | undefined, ctx: WriteContext) {
+/** `ctx` says who created it: its first version is theirs. `preset` is a new design's size (a PRESETS name or <w>x<h>). */
+async function newFilePath(kind: Kind, ext: string | undefined, name: string | undefined, dir: string | undefined, ctx: WriteContext, preset?: string) {
   const s = getSettings()
-  const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
-  const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
+  const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx', design: 'gdesign' }[kind]
+  const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation', design: 'Untitled design' }[kind]
   const file = freeName(dir || s.docsDir, base, e)
-  await work('createFile', [file, ctx])
+  await work('createFile', [file, ctx, preset])
   return file
 }
 
@@ -110,10 +110,14 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'open':
       return { path: await openInWindow(file, { focus: params.focus !== false }) }
     case 'new': {
-      const created = await newFilePath(String(params.kind || 'doc') as Kind, params.ext as string, params.name as string, undefined, asAgent(agent))
+      const preset = typeof params.preset === 'string' ? params.preset : undefined
+      const created = await newFilePath(String(params.kind || 'doc') as Kind, params.ext as string, params.name as string, undefined, asAgent(agent), preset)
       if (params.open !== false) await openInWindow(created)
       return { path: created }
     }
+    // The CLI asks before an --offline op on a design: one open here takes every op in its editor.
+    case 'isOpen':
+      return { open: isOpen(file) }
     // ---------- comments: agents read and answer the person's comments ----------
     case 'comments':
       return comments.list(file, { all: !!params.all })
@@ -451,9 +455,17 @@ const api: Record<string, (...a: any[]) => unknown> = {
   largeForget: (file: string) => work('largeForget', [file]),
   /** An installed font's file for a PDF font name (PDF text edits keep the PDF's own font when it's installed). */
   systemFont: (name: string) => work('systemFont', [name]),
+  // ---------- designs: fonts and diagram layout come from the worker (the window can't scan fonts or run ELK) ----------
+  /** The installed face closest to a design's font reference ({ family, weight, style, postscript? }), or null. */
+  designFontBytes: (ref: unknown) => work('designFontBytes', [ref]),
+  /** Liberation Sans Regular, what a design's text falls back to. */
+  designFallbackFont: () => work('designFallbackFont'),
+  /** A diagram's graph laid out by ELK. */
+  designLayout: (graph: unknown) => work('designLayout', [graph]),
   /** ctx: who changed it since the last save ({ authors, summary }); the person when the window does not say. */
   save: (file: string, payload: FilePayload, ctx?: WriteContext) => work<number>('saveFile', [file, payload, ctx ?? person()]),
-  newFile: (kind: Kind, ext?: string, dir?: string) => newFilePath(kind, ext, undefined, dir, person()),
+  /** preset: a new design's size (a PRESETS name or <w>x<h>). */
+  newFile: (kind: Kind, ext?: string, dir?: string, preset?: string) => newFilePath(kind, ext, undefined, dir, person(), preset),
   /** The person's name: comments and versions credit it, and agents @mention it to ask them something. */
   userName: () => userName(),
   // ---------- version history (worker jobs; see historyJobs.ts) ----------
@@ -523,7 +535,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
   saveAsDialog: async (file: string) => {
     const ext = extOf(file)
     const kind = kindOf(file)
-    const choices: Record<Kind, string[]> = { doc: ['html', 'md', 'docx'], sheet: ['xlsx', 'csv', 'tsv'], pdf: ['pdf'], text: [ext || 'txt'], slides: ['pptx'] }
+    const choices: Record<Kind, string[]> = { doc: ['html', 'md', 'docx'], sheet: ['xlsx', 'csv', 'tsv'], pdf: ['pdf'], text: [ext || 'txt'], slides: ['pptx'], design: ['gdesign'] }
     const r = await dialog.showSaveDialog(win!, {
       defaultPath: file,
       filters: [...new Set([ext, ...choices[kind]])].filter(Boolean).map(e => ({ name: e.toUpperCase(), extensions: [e] }))

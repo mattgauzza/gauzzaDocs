@@ -7,8 +7,11 @@ import { loadPdf } from './formats/pdf'
 import { loadSheet, sheetBytes } from './formats/sheet'
 import { loadText, textBytes } from './formats/text'
 import { backupSlidesOriginal, loadSlides, slidesBytes } from './formats/slides' // slides
+import { designZipBytes, readDesignZip } from './formats/design'
+import { withDesignLock } from './design/lock'
 import { type WriteContext, guardedWrite, writeAtomic } from './history'
 import { newDeck } from '../shared/slides/model' // slides
+import { newDesign } from '../shared/design/model'
 import { LARGE_BYTES } from './large'
 import { extOf } from '../shared/kinds'
 
@@ -22,8 +25,28 @@ export async function loadFile(file: string, opts: { full?: boolean } = {}): Pro
   if (!opts.full && stat.size > LARGE_BYTES && (kind === 'text' || csv))
     return { path: p, kind, payload: { kind: 'large', size: stat.size, as: csv ? 'csv' : 'text' }, mtime: stat.mtimeMs }
   const payload: FilePayload =
-    kind === 'doc' ? await loadDoc(p) : kind === 'sheet' ? await loadSheet(p) : kind === 'pdf' ? loadPdf(p) : kind === 'slides' ? await loadSlides(p) : loadText(p)
+    kind === 'doc' ? await loadDoc(p) : kind === 'sheet' ? await loadSheet(p) : kind === 'pdf' ? loadPdf(p) : kind === 'slides' ? await loadSlides(p)
+      : kind === 'design' ? await loadDesign(p) : loadText(p)
   return { path: p, kind, payload, mtime: stat.mtimeMs }
+}
+
+/** A design as the editor gets it: read and validated (readDesignZip), with what reading repaired as `notes`. */
+async function loadDesign(file: string): Promise<FilePayload & { kind: 'design' }> {
+  return designPayload(await readDesignZip(new Uint8Array(await fs.promises.readFile(file))))
+}
+export function designPayload(read: Awaited<ReturnType<typeof readDesignZip>>): FilePayload & { kind: 'design' } {
+  const { notes, ...file } = read
+  return notes?.length ? { kind: 'design', file, notes } : { kind: 'design', file }
+}
+
+/** The file on disk, for a partial design save to copy its unchanged assets and thumbnail from (none when it's new). */
+async function onDisk(file: string): Promise<Uint8Array | undefined> {
+  try {
+    return new Uint8Array(await fs.promises.readFile(file))
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw e
+  }
 }
 
 /** The bytes a payload becomes on disk for this file name. Builds in memory; never writes. */
@@ -39,6 +62,9 @@ export async function payloadBytes(file: string, payload: FilePayload): Promise<
       return payload.bytes
     case 'text':
       return textBytes(payload.text, payload.eol)
+    case 'design':
+      // partial: only the assets added since the last save came along; the others are in the file on disk
+      return designZipBytes(payload.file, payload.partial ? await onDisk(file) : undefined)
     default:
       throw new Error('Large files are edited in place, not saved whole')
   }
@@ -46,11 +72,16 @@ export async function payloadBytes(file: string, payload: FilePayload): Promise<
 
 const AGENT: WriteContext = { authors: [{ name: 'Agent', by: 'agent' }] }
 
-/** Writes a payload in the format the file name asks for: built in memory, swapped in atomically, kept as a version. Returns the new modification time. */
-export async function saveFile(file: string, payload: FilePayload, ctx: WriteContext = AGENT): Promise<number> {
+/**
+ * Writes a payload in the format the file name asks for: built in memory, swapped in atomically, kept as a version.
+ * Returns the new modification time. A design is written holding its lock (core/design/lock.ts); `locked` says the
+ * caller already holds it (an offline op holds it from loading to saving).
+ */
+export async function saveFile(file: string, payload: FilePayload, ctx: WriteContext = AGENT, opts: { locked?: boolean } = {}): Promise<number> {
   const p = path.resolve(file)
   if (payload.kind === 'large') throw new Error('Large files are edited in place, not saved whole')
   fs.mkdirSync(path.dirname(p), { recursive: true })
+  if (kindOf(p) === 'design' && !opts.locked) return withDesignLock(p, () => saveFile(p, payload, ctx, { locked: true }))
   const st = await guardedWrite(p, ctx, async () => {
     // The one-time copy of the original Word/PowerPoint file, before the first save that could lose something.
     if (payload.kind === 'doc') await backupDocOriginal(p)
@@ -62,12 +93,19 @@ export async function saveFile(file: string, payload: FilePayload, ctx: WriteCon
   return st.mtime
 }
 
-/** A brand-new empty file of the given kind. `ctx` says who created it (its first version's authors). */
-export async function createFile(file: string, ctx?: WriteContext) {
+/** A design's size when none is asked for. */
+export const DEFAULT_DESIGN_PRESET = 'instagram'
+
+/**
+ * A brand-new empty file of the given kind. `ctx` says who created it (its first version's authors). `preset` is a
+ * design's size: a PRESETS name or `<w>x<h>` (Instagram post when left out); other kinds ignore it.
+ */
+export async function createFile(file: string, ctx?: WriteContext, preset?: string) {
   const kind = kindOf(file)
   if (kind === 'doc') await saveFile(file, { kind, html: '<p></p>' }, ctx)
   else if (kind === 'sheet') await saveFile(file, { kind, workbook: { sheets: [{ name: 'Sheet1', cells: {} }] } }, ctx)
   else if (kind === 'slides') await saveFile(file, { kind, deck: newDeck() }, ctx)
+  else if (kind === 'design') await saveFile(file, { kind, file: { design: newDesign(preset || DEFAULT_DESIGN_PRESET), assets: {} } }, ctx)
   else if (kind === 'pdf') {
     const { PDFDocument } = await import('pdf-lib')
     const doc = await PDFDocument.create()
