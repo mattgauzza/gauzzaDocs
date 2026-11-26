@@ -18,12 +18,6 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
     const r = await call(method, { ...params, agent: { name: agentName() } })
     return r === null ? offline() : (r as T)
   }
-  const show = (t: store.Thread) => {
-    const lines = [`[${t.id}] ${t.author}${t.by === 'agent' ? ' (agent)' : ''}${t.resolved ? ' · resolved' : ''}${t.quote ? ` on "${clip(t.quote, 80)}"` : ''}`, `    ${t.text}`]
-    for (const r of t.replies) lines.push(`    ↳ [${r.id}] ${r.author}${r.by === 'agent' ? ' (agent)' : ''}: ${r.text}`)
-    return lines.join('\n')
-  }
-
   program
     .command('comments <file>')
     .description('comment threads on a file (open ones; --all includes resolved)')
@@ -32,7 +26,7 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
     .action(async (file: string, o) => {
       let ts = await via('comments', { path: abs(file), all: !!o.all }, () => store.list(abs(file), { all: !!o.all }))
       if (o.waiting) ts = ts.filter(waiting)
-      ctx.out(ts, () => ts.map(show).join('\n\n') || '(no comments)')
+      ctx.out(ts, () => ts.map(showThread).join('\n\n') || '(no comments)')
     })
 
   program
@@ -170,6 +164,27 @@ export function registerCommentCommands(program: Command, ctx: Ctx, agentName: (
 }
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+
+/**
+ * Where a thread points in a design, in ids an agent can pass to --layer and --artboard (layer names needn't be unique):
+ * " (layer <id> on artboard <id>)". Empty for anything else.
+ */
+export function anchorWords(t: Pick<store.Thread, 'anchor'>): string {
+  const a = t.anchor
+  if (a?.layer) return ` (layer ${a.layer}${a.artboard ? ` on artboard ${a.artboard}` : ''})`
+  return a?.artboard ? ` (artboard ${a.artboard})` : ''
+}
+
+/** One thread as `gdocs comments` prints it. */
+export function showThread(t: store.Thread): string {
+  const lines = [
+    `[${t.id}] ${t.author}${t.by === 'agent' ? ' (agent)' : ''}${t.resolved ? ' · resolved' : ''}${t.quote ? ` on "${clip(t.quote, 80)}"` : ''}${anchorWords(t)}`,
+    `    ${t.text}`
+  ]
+  for (const r of t.replies) lines.push(`    ↳ [${r.id}] ${r.author}${r.by === 'agent' ? ' (agent)' : ''}: ${r.text}`)
+  return lines.join('\n')
+}
+
 const lastAuthor = (t: store.Thread) => (t.replies.length ? t.replies[t.replies.length - 1].author : t.author)
 const lastBy = (t: store.Thread) => (t.replies.length ? t.replies[t.replies.length - 1].by : t.by)
 /** Open thread whose most recent message is the person's: an agent owes an answer. */
@@ -190,11 +205,11 @@ function human(ev: Record<string, unknown>): string {
   const t = ev.thread as store.Thread | undefined
   switch (ev.type) {
     case 'comment':
-      return `${ev.forYou ? '(for you) ' : ''}${ev.waiting ? 'waiting' : 'comment'} [${t!.id}] ${ev.author} on ${file}${t!.quote ? ` about "${clip(t!.quote, 100)}"` : ''}:\n  ${t!.text}${
+      return `${ev.forYou ? '(for you) ' : ''}${ev.waiting ? 'waiting' : 'comment'} [${t!.id}] ${ev.author} on ${file}${t!.quote ? ` about "${clip(t!.quote, 100)}"` : ''}${anchorWords(t!)}:\n  ${t!.text}${
         t!.replies.length ? '\n' + t!.replies.map(r => `  ↳ ${r.author}: ${r.text}`).join('\n') : ''}\n  (answer: gdocs reply "${ev.path}" ${t!.id} "…")`
     case 'reply': {
       const r = ev.reply as store.Reply
-      return `${ev.forYou ? '(for you) ' : ''}reply [${t!.id}] ${r.author} on ${file}${t!.quote ? ` (thread about "${clip(t!.quote, 60)}")` : ''}:\n  ${r.text}\n  (answer: gdocs reply "${ev.path}" ${t!.id} "…")`
+      return `${ev.forYou ? '(for you) ' : ''}reply [${t!.id}] ${r.author} on ${file}${t!.quote ? ` (thread about "${clip(t!.quote, 60)}")` : ''}${anchorWords(t!)}:\n  ${r.text}\n  (answer: gdocs reply "${ev.path}" ${t!.id} "…")`
     }
     case 'resolved':
       return `${ev.resolved ? 'resolved' : 'reopened'} [${t!.id}] by ${ev.author} on ${file}`

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import { test } from 'node:test'
-import type { Artboard, Layer } from '../src/shared/design/types'
-import { type Handle, apply, handlePoints, hitTest, marquee, placeAll, resizeBox } from '../src/renderer/src/design/selection'
+import { fontsFor } from '../src/shared/design/fonts'
+import { newDesign } from '../src/shared/design/model'
+import type { Artboard, Layer, TextLayer } from '../src/shared/design/types'
+import { applyDesignOp } from '../src/shared/ops/design'
+import { type Handle, apply, handlePoints, hitTest, marquee, placeAll, resizeBox, resizeProps } from '../src/renderer/src/design/selection'
 
 // The design canvas's hit testing and handle math: pure, in artboard coordinates.
 
@@ -138,4 +142,51 @@ test('the marquee selects layers whose boxes intersect it', () => {
   const g = group('g', [rect('g1', 0, 0, 40, 40), rect('g2', 60, 0, 40, 40)])
   assert.deepEqual(ids(marquee(board(g), { x: 50, y: 0, w: 60, h: 10 })), ['g'])
   assert.deepEqual(ids(marquee(board(g), { x: 50, y: 0, w: 60, h: 10 }, 'g')), ['g2'])
+})
+
+test('resize props send only what changed, rounded', () => {
+  const r = rect('r', 100, 100, 200, 100)
+  assert.deepEqual(resizeProps(r, resizeBox(r, 'e', [300, 150], [340.004, 150], false)), { width: 240 })
+  assert.deepEqual(resizeProps(r, resizeBox(r, 'w', [100, 150], [59.996, 150], false)), { x: 60, width: 240 })
+  assert.deepEqual(resizeProps(r, resizeBox(r, 'se', [300, 200], [300.001, 200.002], false)), {})
+})
+
+test('resizing point text makes it box text at the dragged width, and the op keeps it there', async () => {
+  const liberation = new Uint8Array(fs.readFileSync('node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf'))
+  const design = newDesign('instagram')
+  const services = { fonts: await fontsFor(design, {}, async () => liberation, liberation) }
+  let file = { design, assets: {} }
+  const added = await applyDesignOp(file, { op: 'add', type: 'text', props: { name: 'Title', x: 100, y: 100, text: 'Summer market on the green', size: 40 } }, services)
+  file = added.file!
+  const text = () => file.design.artboards[0].layers[0] as TextLayer
+  const point = text()
+  assert.equal(point.mode, 'point')
+  const oneLine = point.height
+  assert.ok(point.width > 300, `one line is ${point.width} wide`)
+
+  // the right handle, dragged in to 300 px: the width it was dragged to, and no height (it fits the wrapped lines)
+  const h = handlePoints(placeAll([point])[0])
+  const props = resizeProps(point, resizeBox(point, 'e', h.e, [100 + 300, h.e[1]], false))
+  assert.deepEqual(props, { mode: 'box', width: 300 })
+  const r = await applyDesignOp(file, { op: 'set', layer: point.id, props }, services)
+  const box = r.file!.design.artboards[0].layers[0] as TextLayer
+  assert.equal(box.mode, 'box')
+  assert.equal(box.width, 300) // not fitted back to its one line
+  assert.equal(box.x, 100)
+  assert.ok(box.height > oneLine * 1.5, `wrapped: ${box.height} vs one line ${oneLine}`)
+  assert.equal(r.summary, 'set mode and width on Title')
+
+  // a corner sets the height too, and the left handle moves x with the right edge fixed
+  const c = resizeProps(point, resizeBox(point, 'sw', h.sw, [h.sw[0] + 50, h.sw[1] + 100], false))
+  assert.deepEqual(Object.keys(c), ['mode', 'x', 'width', 'height'])
+  assert.equal(c.x, 150)
+  assert.ok(Math.abs(Number(c.x) + Number(c.width) - (100 + point.width)) < 0.011, 'the right edge stays')
+  const cr = await applyDesignOp(file, { op: 'set', layer: point.id, props: c }, services)
+  const cb = cr.file!.design.artboards[0].layers[0] as TextLayer
+  assert.equal(cb.mode, 'box')
+  assert.equal(cb.height, c.height)
+  assert.equal(cb.width, c.width)
+
+  // box text and other layers keep their mode: a width alone
+  assert.deepEqual(resizeProps(box, resizeBox(box, 'e', [400, 150], [420, 150], false)), { width: 320 })
 })

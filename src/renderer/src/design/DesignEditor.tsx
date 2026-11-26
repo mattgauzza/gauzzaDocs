@@ -151,6 +151,8 @@ export default function DesignEditor(props: EditorProps) {
     return p
   }
   const loads = useRef(0)
+  /** The first load of the design's fonts (settled either way): ops wait for it. */
+  const firstFonts = useRef<Promise<unknown> | null>(null)
   /** Loads every font `f` names; the newest load wins. */
   const loadFonts = async (f: DesignFile): Promise<FontSource> => {
     const n = ++loads.current
@@ -228,14 +230,18 @@ export default function DesignEditor(props: EditorProps) {
   /**
    * Works an op out on the design as it is, then applies the result in one step. An op that brings in a font not loaded
    * yet (a new text family, an svg import) is worked out again once it's loaded, so its text is measured in it. If the
-   * design changed while an op waited (layout, fonts), it's worked out again on what's there now.
+   * design changed while an op waited (layout, fonts), it's worked out again on what's there now. An op made while the
+   * design's fonts are still loading (the panels show before the canvas) waits for them.
    */
   const applyOp = async (op: AgentOp, name: (summary: string) => string, merge?: string) => {
+    if (!fontsRef.current) await firstFonts.current
     if (failedRef.current) throw new Error(failedRef.current)
+    const ready = fontsRef.current
+    if (!ready) throw new Error('The fonts for this design are still loading. Try again in a moment.')
     for (let tries = 0; ; tries++) {
       const before = fileRef.current
       // the fonts this op measures with, and the design they were loaded for
-      let { source: fonts, built } = fontsRef.current!
+      let { source: fonts, built } = fontsRef.current ?? ready
       const load = async (f: DesignFile) => {
         fonts = await loadFonts(f)
         built = f.design
@@ -522,7 +528,7 @@ export default function DesignEditor(props: EditorProps) {
       showAnchor: a => L().showAnchor(a)
     }
     // Ready for agents (and for gdocs look to picture it) once the fonts are in; a failure is reported to each op.
-    loadFonts(fileRef.current)
+    firstFonts.current = loadFonts(fileRef.current)
       .catch(e => {
         const msg = `Could not load fonts for this design: ${(e as Error)?.message || e}`
         failedRef.current = msg

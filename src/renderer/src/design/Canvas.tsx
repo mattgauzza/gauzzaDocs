@@ -3,10 +3,11 @@ import type { FontSource } from '../../../shared/design/fonts'
 import { type Box, type Point, fin } from '../../../shared/design/geometry'
 import { designToSvg } from '../../../shared/design/render'
 import type { Artboard, Design, DesignFile, Layer } from '../../../shared/design/types'
-import { resize, shift } from '../../../shared/ops/designLayers'
+import { writeProps } from '../../../shared/ops/designLayers'
 import type { AgentOp } from '../../../shared/types'
 import {
-  HANDLES, type Handle, type Placed, apply, corners, deltaIn, handleCursor, handlePoints, hitTest, inside, invert, marquee, placeAll, resizeBox
+  HANDLES, type Handle, type Placed, apply, corners, deltaIn, handleCursor, handlePoints, hitTest, inside, invert, marquee, placeAll, resizeBox,
+  resizeProps
 } from './selection'
 
 /** What's selected: layers on one artboard, and the group a double-click entered (clicks pick inside it). */
@@ -38,21 +39,26 @@ interface Props {
 /** Screen pixels around the pointer that still count as on a layer (thin lines). */
 const REACH = 4
 const HANDLE = 8
-const r2 = (v: number) => Math.round(v * 100) / 100
 const pts = (ps: Point[], z: number) => ps.map(p => `${p[0] * z},${p[1] * z}`).join(' ')
 
 /**
- * The design as it would be with some layers changed: only those layers (copied) and the groups holding them are new
- * objects, so a drag can be drawn every frame without copying the whole design.
+ * The design as it would be with `set` given these props on these layers, written by the op's own code
+ * (designLayers.writeProps), so a drag's preview is exactly what its op will make: point text turned box text and
+ * rewrapped, say. Only those layers (copied) and the groups holding them are new objects, so it's cheap enough for every
+ * frame. null when the op would refuse.
  */
-function edited(design: Design, board: string, edits: Map<string, (l: Layer) => void>): Design {
+function edited(file: DesignFile, fonts: FontSource, board: string, edits: Map<string, Record<string, unknown>>): Design | null {
+  const design = file.design
+  const at = design.artboards.find(a => a.id === board)
+  if (!at) return null
+  const doc = { design, assets: file.assets, services: { fonts } }
   const go = (list: Layer[]): Layer[] => {
     let changed = false
     const out = list.map(l => {
-      const fn = edits.get(l.id)
-      if (fn) {
+      const props = edits.get(l.id)
+      if (props) {
         const copy = structuredClone(l)
-        fn(copy)
+        writeProps(doc, at, copy, props)
         changed = true
         return copy
       }
@@ -67,28 +73,23 @@ function edited(design: Design, board: string, edits: Map<string, (l: Layer) => 
     })
     return changed ? out : list
   }
-  return { ...design, artboards: design.artboards.map(a => (a.id === board ? { ...a, layers: go(a.layers) } : a)) }
-}
-
-/** What `set` with x, y, width and height does to a layer (designLayers.writeProps): resize from its top left, then move. */
-function sizeTo(l: Layer, b: Box): void {
-  resize(l, b.w, b.h)
-  shift(l, b.x - fin(l.x, 0), b.y - fin(l.y, 0))
-}
-
-/** Window listeners for one drag, until the pointer is released. */
-function track(move: (e: PointerEvent) => void, up: (e: PointerEvent) => void): void {
-  const mv = (e: PointerEvent) => move(e)
-  const u = (e: PointerEvent) => {
-    window.removeEventListener('pointermove', mv)
-    window.removeEventListener('pointerup', u)
-    window.removeEventListener('pointercancel', u)
-    up(e)
+  try {
+    return { ...design, artboards: design.artboards.map(a => (a === at ? { ...a, layers: go(a.layers) } : a)) }
+  } catch {
+    return null
   }
-  window.addEventListener('pointermove', mv)
-  window.addEventListener('pointerup', u)
-  window.addEventListener('pointercancel', u)
 }
+
+/** A move's props for one layer: its new x and y, only those that change. */
+function moveProps(l: Layer, [dx, dy]: Point): Record<string, number> {
+  const props: Record<string, number> = {}
+  if (dx) props.x = fin(l.x, 0) + dx
+  if (dy) props.y = fin(l.y, 0) + dy
+  return props
+}
+
+/** A drag's preview: the design as its op will make it, the artboard it changes, and which drag set it. */
+interface Preview { board: string; design: Design; n: number }
 
 /**
  * The design editor's canvas: every artboard side by side, each drawn by designToSvg (raster), with the selection,
@@ -102,8 +103,15 @@ export function Canvas(p: Props) {
   const z = p.zoom
   const rowRef = useRef<HTMLDivElement>(null)
   const boardEls = useRef(new Map<string, HTMLDivElement>())
-  /** The design while a drag is under way, and the artboard it changes. */
-  const [preview, setPreview] = useState<{ board: string; design: Design } | null>(null)
+  /** The design while a drag is under way (until its op is in). */
+  const [preview, setPreview] = useState<Preview | null>(null)
+  /** Drags so far, numbering each one's preview. */
+  const drags = useRef(0)
+  /** Ends the drag under way without applying it. */
+  const stopDrag = useRef<(() => void) | null>(null)
+  /** A preview waiting for the next frame: each one redraws a whole artboard, so a drag draws at most one a frame. */
+  const pending = useRef<{ n: number; board: string; build: () => Design | null } | null>(null)
+  const frame = useRef(0)
   const [box, setBox] = useState<Box | null>(null)
   const [space, setSpace] = useState(false)
   const spaceRef = useRef(false)
@@ -140,6 +148,76 @@ export function Canvas(p: Props) {
     return r ? [(cx - r.left) / k, (cy - r.top) / k] : [0, 0]
   }
   const parentOf = (placed: Map<string, Placed>, id: string): string | null => placed.get(id)?.ancestors.at(-1)?.id ?? null
+
+  // ---------- drags: one at a time, previewed once a frame, applied on release, dropped on cancel ----------
+  /** Draws the preview waiting for a frame now. */
+  const drawPending = () => {
+    cancelAnimationFrame(frame.current)
+    frame.current = 0
+    const job = pending.current
+    pending.current = null
+    const design = job?.build()
+    if (job && design) setPreview({ board: job.board, design, n: job.n })
+  }
+  /** Shows drag n's preview of `board` on the next frame (the newest asked for wins). */
+  const showPreview = (n: number, board: string, build: () => Design | null) => {
+    pending.current = { n, board, build }
+    if (!frame.current) frame.current = requestAnimationFrame(drawPending)
+  }
+  /** Drops drag n's preview, and only its own: a newer drag's stays. */
+  const dropPreview = (n: number) => {
+    if (pending.current?.n === n) {
+      pending.current = null
+      cancelAnimationFrame(frame.current)
+      frame.current = 0
+    }
+    setPreview(v => (v && v.n === n ? null : v))
+  }
+  /**
+   * Window listeners for one drag. `up` runs when the pointer is released; `abort` when the drag ends any other way:
+   * pointercancel, Escape, the window losing focus, a release that never arrived (a move with no button down), or the
+   * canvas going away. Either way the listeners go. A new drag aborts one still under way.
+   */
+  const track = (move: (e: PointerEvent) => void, up: (e: PointerEvent) => void, abort: () => void) => {
+    stopDrag.current?.()
+    const off = () => {
+      window.removeEventListener('pointermove', mv)
+      window.removeEventListener('pointerup', u)
+      window.removeEventListener('pointercancel', stop)
+      window.removeEventListener('keydown', key, true)
+      window.removeEventListener('blur', stop)
+      if (stopDrag.current === stop) stopDrag.current = null
+    }
+    const stop = () => {
+      off()
+      abort()
+    }
+    const mv = (e: PointerEvent) => (e.buttons === 0 ? stop() : move(e))
+    const u = (e: PointerEvent) => {
+      off()
+      up(e)
+    }
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      // this Escape is the drag's: the editor doesn't also clear the selection
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      stop()
+    }
+    window.addEventListener('pointermove', mv)
+    window.addEventListener('pointerup', u)
+    window.addEventListener('pointercancel', stop)
+    window.addEventListener('keydown', key, true)
+    window.addEventListener('blur', stop)
+    stopDrag.current = stop
+  }
+  useEffect(
+    () => () => {
+      stopDrag.current?.()
+      cancelAnimationFrame(frame.current)
+    },
+    []
+  )
 
   // Space held over the canvas turns a drag into a pan (in a field or on a button it keeps typing or pressing).
   useEffect(() => {
@@ -188,7 +266,12 @@ export function Canvas(p: Props) {
         s.scrollLeft = x0 - (ev.clientX - e.clientX)
         s.scrollTop = y0 - (ev.clientY - e.clientY)
       },
-      () => setPanning(false)
+      () => setPanning(false),
+      () => {
+        s.scrollLeft = x0
+        s.scrollTop = y0
+        setPanning(false)
+      }
     )
   }
 
@@ -198,8 +281,10 @@ export function Canvas(p: Props) {
     const movers = ids.map(id => placed.get(id)).filter((x): x is Placed => !!x && !x.locked && !x.ancestors.some(a => ids.includes(a.id)))
     if (!movers.length) return false
     e.preventDefault()
+    const n = ++drags.current
     const start = toBoard(board, e.clientX, e.clientY)
     let deltas: Point[] | null = null
+    const edits = (ds: Point[]) => new Map(movers.map((m, i) => [m.layer.id, moveProps(m.layer, ds[i])]))
     track(
       ev => {
         if (!deltas && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 3) return
@@ -207,24 +292,18 @@ export function Canvas(p: Props) {
         // in each layer's own parent space, so a layer inside a turned group follows the pointer
         const ds = movers.map(m => deltaIn(m.outer, start, now).map(Math.round) as Point)
         deltas = ds
-        const edits = new Map(movers.map((m, i) => [m.layer.id, (l: Layer) => shift(l, ds[i][0], ds[i][1])]))
-        setPreview({ board, design: edited(pr.current.file.design, board, edits) })
+        showPreview(n, board, () => edited(pr.current.file, pr.current.fonts, board, edits(ds)))
       },
       () => {
-        const ds = deltas
-        if (!ds) return setPreview(null)
-        const ops: AgentOp[] = []
-        movers.forEach((m, i) => {
-          const [dx, dy] = ds[i]
-          const props: Record<string, number> = {}
-          if (dx) props.x = fin(m.layer.x, 0) + dx
-          if (dy) props.y = fin(m.layer.y, 0) + dy
-          if (dx || dy) ops.push({ op: 'set', layer: m.layer.id, props })
-        })
-        if (!ops.length) return setPreview(null)
+        drawPending()
+        const ops: AgentOp[] = deltas
+          ? [...edits(deltas)].filter(([, props]) => Object.keys(props).length).map(([layer, props]) => ({ op: 'set', layer, props }))
+          : []
+        if (!ops.length) return dropPreview(n)
         // the preview stays until the op is in, so the layer never jumps back for a frame
-        void pr.current.onOps(board, ops).finally(() => setPreview(null))
-      }
+        void pr.current.onOps(board, ops).finally(() => dropPreview(n))
+      },
+      () => dropPreview(n)
     )
     return true
   }
@@ -236,31 +315,27 @@ export function Canvas(p: Props) {
     const inv = invert(target.outer)
     if (!inv) return
     const l = target.layer
+    const n = ++drags.current
     const from = apply(inv, toBoard(board, e.clientX, e.clientY))
-    let next: Box | null = null
+    // only what changed (the undo step names it: "set width on Logo"); point text becomes box text at the new size
+    let props: Record<string, unknown> = {}
     track(
       ev => {
-        const b = resizeBox(l, k, from, apply(inv, toBoard(board, ev.clientX, ev.clientY)), ev.shiftKey)
-        const nb = { x: r2(b.x), y: r2(b.y), w: r2(b.w), h: r2(b.h) }
-        next = nb
-        setPreview({ board, design: edited(pr.current.file.design, board, new Map([[l.id, (x: Layer) => sizeTo(x, nb)]])) })
+        const next = resizeProps(l, resizeBox(l, k, from, apply(inv, toBoard(board, ev.clientX, ev.clientY)), ev.shiftKey))
+        props = next
+        showPreview(n, board, () => edited(pr.current.file, pr.current.fonts, board, new Map([[l.id, next]])))
       },
       () => {
-        const nb = next
-        if (!nb) return setPreview(null)
-        // only what changed, so the undo step names it ("set width on Logo")
-        const props: Record<string, number> = {}
-        if (nb.x !== fin(l.x, 0)) props.x = nb.x
-        if (nb.y !== fin(l.y, 0)) props.y = nb.y
-        if (nb.w !== fin(l.width, 0)) props.width = nb.w
-        if (nb.h !== fin(l.height, 0)) props.height = nb.h
-        if (!Object.keys(props).length) return setPreview(null)
-        void pr.current.onOps(board, [{ op: 'set', layer: l.id, props }]).finally(() => setPreview(null))
-      }
+        drawPending()
+        if (!Object.keys(props).length) return dropPreview(n)
+        void pr.current.onOps(board, [{ op: 'set', layer: l.id, props }]).finally(() => dropPreview(n))
+      },
+      () => dropPreview(n)
     )
   }
 
-  const startMarquee = (e: React.PointerEvent, board: string, scope: string | null, base: string[]) => {
+  /** `before`: the selection a cancelled marquee goes back to. */
+  const startMarquee = (e: React.PointerEvent, board: string, scope: string | null, base: string[], before: Sel) => {
     const row = rowRef.current
     const b = boardOf(board)
     if (!row || !b) return
@@ -281,7 +356,11 @@ export function Canvas(p: Props) {
         last = ids.join('\n')
         pr.current.onSelect({ board, ids, scope })
       },
-      () => setBox(null)
+      () => setBox(null),
+      () => {
+        setBox(null)
+        pr.current.onSelect(before)
+      }
     )
   }
 
@@ -300,8 +379,9 @@ export function Canvas(p: Props) {
     const placed = committed(board)
     const pt = toBoard(board, e.clientX, e.clientY)
     const hit = over ? hitTest(b, pt, { scope, tolerance: REACH / P.zoom }) : null
+    const before = P.sel
     if (e.shiftKey || e.ctrlKey || e.metaKey) {
-      if (!hit) return startMarquee(e, board, scope, current)
+      if (!hit) return startMarquee(e, board, scope, current, before)
       // Shift-click adds or removes at one level; a layer at another level starts a new selection there
       const level = parentOf(placed, hit.id)
       const base = level === scope ? current : []
@@ -317,7 +397,7 @@ export function Canvas(p: Props) {
     // nothing drawn here, but inside what's selected (between a group's layers): drag the selection
     if (over && current.some(id => placed.get(id) && inside(placed.get(id)!, pt)) && startMove(e, board, current)) return
     P.onSelect({ board, ids: [], scope: null })
-    startMarquee(e, board, null, [])
+    startMarquee(e, board, null, [], before)
   }
 
   // A double-click on a group enters it, selecting the layer inside under the pointer.

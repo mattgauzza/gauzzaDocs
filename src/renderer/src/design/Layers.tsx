@@ -86,7 +86,19 @@ export function Layers(p: Props) {
     setOpen(next)
   }
 
-  /** Where the dragged layer lands: in front of (above) or behind (below) a row, or at the front inside a group. */
+  /** Where a layer sits now, or null when it's gone (an agent deleted it while it was being dragged). */
+  const where = (id: string) => {
+    try {
+      return locate(p.board, id)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Where the dragged layer lands: in front of (above) or behind (below) a row, or at the front inside a group. Nothing
+   * happens when either layer is gone.
+   */
   const land = (from: string, target: Layer, zone: Zone) => {
     let parent: string
     let index: number
@@ -94,11 +106,13 @@ export function Layers(p: Props) {
       parent = target.id
       index = target.children.length
     } else {
-      const at = locate(p.board, target.id)
+      const at = where(target.id)
+      if (!at) return
       parent = at.parent?.id ?? ''
       index = zone === 'before' ? at.index + 1 : at.index
     }
-    const was = locate(p.board, from)
+    const was = where(from)
+    if (!was) return
     // the move takes the layer out first, so a place after it in the same list is one less
     if ((was.parent?.id ?? '') === parent) {
       if (was.index < index) index--
@@ -110,13 +124,7 @@ export function Layers(p: Props) {
   const zoneOf = (e: React.DragEvent, l: Layer): Zone | null => {
     const from = dragging.current
     if (!from || from === l.id) return null
-    const src = (() => {
-      try {
-        return locate(p.board, from)
-      } catch {
-        return null
-      }
-    })()
+    const src = where(from)
     // a group can't go inside itself
     if (!src || contains(src.list[src.index], l.id)) return null
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -252,9 +260,8 @@ export function Layers(p: Props) {
           e.preventDefault()
           const from = dragging.current
           setDrop(null)
-          if (!from) return
-          const was = locate(p.board, from)
-          if (was.parent || was.index !== 0) p.onMove(from, '', 0)
+          const was = from ? where(from) : null
+          if (from && was && (was.parent || was.index !== 0)) p.onMove(from, '', 0)
         }}
       >
         {p.board.layers.length ? [...p.board.layers].reverse().map(l => row(l, 0, null, false)) : <p className="de-empty">No layers yet</p>}

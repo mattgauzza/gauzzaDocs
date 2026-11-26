@@ -268,3 +268,25 @@ export function resizeBox(l: Layer, k: Handle, from: Point, to: Point, keepRatio
   const cy = c[1] + a[1] + n[1]
   return { x: r6(cx - w / 2), y: r6(cy - h / 2), w: r6(w), h: r6(h) }
 }
+
+const r2 = (v: number): number => Math.round(v * 100) / 100
+
+/**
+ * The `set` props that resize a layer to `b` (from resizeBox): rounded to a hundredth of a pixel, and only what changed,
+ * so the undo step names it ("set width on Logo"). Point text is sized by its lines, so `set` would fit it straight back:
+ * it becomes box text at the new size instead (as in Figma), its text wrapping in the dragged width and its height
+ * fitting the wrapped lines, unless the drag set the height too.
+ */
+export function resizeProps(l: Layer, b: Box): Record<string, number | string> {
+  const props: Record<string, number> = {}
+  const changed = (now: number, was: unknown) => Math.abs(now - fin(was, 0)) >= 0.005
+  if (changed(b.x, l.x)) props.x = r2(b.x)
+  if (changed(b.y, l.y)) props.y = r2(b.y)
+  if (changed(b.w, l.width)) props.width = r2(b.w)
+  if (changed(b.h, l.height)) props.height = r2(b.h)
+  if (l.type === 'text' && l.mode === 'point' && (props.width !== undefined || props.height !== undefined)) {
+    // the mode first: the op fits text after writing every prop, and box text keeps the width it's given
+    return { mode: 'box', ...props, width: r2(b.w) }
+  }
+  return props
+}
