@@ -33,6 +33,9 @@ export interface RunOpts { live?: boolean; offline?: boolean; agent?: string; fo
 
 export const OPEN_IN_APP = 'This design is open in gauzzaDocs. Edit it there, or close it first.'
 
+/** What drawing a design to pixels (PNG export, gdocs look, thumbnails) says when the app isn't running. */
+export const RENDER_NEEDS_APP = 'Start gauzzaDocs to render designs. Editing and SVG export work without it.'
+
 /**
  * A design open in the app takes every op in its editor: one made on disk would land under the editor's undo history,
  * and the app would never reload it. With the app not running, editing on disk is fine.

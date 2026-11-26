@@ -33,6 +33,46 @@ Addresses are A1 style; `sheet` picks a sheet by name or 0-based index (default:
   (greater/less/between/equal/contains/empty/custom formula with style, or a two-color scale)
 - `charts`, `addChart { range, type: "column" | "bar" | "line" | "pie" | "scatter", title? }`, `updateChart { id, ... }`, `deleteChart { id }`
 
+## design (.gdesign)
+Every op takes `artboard`: an id or a name only one artboard has (default: the first). Layers are named by `layer` (or
+`layers`, a list or names separated by commas): an id, a Group/Child path or a name only one layer on the artboard has.
+A name that matches nothing fails and lists the artboard's layers. Coordinates are px from the artboard's top left.
+Paints are `"#rrggbb"`, `"style:<name>"` (a color style), `"none"` or a paint object (`{ type: "color", color }`, or
+`{ type: "linear" | "radial", stops: [{ offset, color }], angle? }`). Each edit, or a whole `apply` batch, is one undo step.
+- `read { format?: "text", allArtboards? }` -> `{ artboard, artboards, layers, styles, components }` with one line per
+  layer (`id  name  type  x,y wxh  "text"  flags`, indented by depth), or `{ content }` as plain lines with format "text"
+- `info` -> `{ artboards, layers }`
+- `export { format?: "svg", width? }` -> `{ svg, artboard, width, height, leftOut? }`: the artboard as an SVG file, fonts
+  not embedded; `width` sizes the root and keeps the view box
+- `add { type, props?, parent?, index? }` -> `{ ids }`. Types: rect, ellipse, line, path, text, image, group, instance,
+  connector. Props on every layer: name, x, y, width (w), height (h), rotation, scaleX, scaleY, opacity, blend, visible,
+  locked, fill, stroke, strokeWidth, dash, shadow `{ x, y, blur, color }`, blur, timing `{ start?, end? }`. Then by type:
+  radius (rect); d (path, SVG path data); text, runs, font, size, weight, italic, color, align, valign, mode (box or
+  point), letterSpacing, lineHeight, outlines (text); data (a data URL or base64), asset, fit (image); clip (group);
+  component, overrides (instance); from, to, label, route, arrow, points (connector)
+- `set { layer, props, part?, allArtboards? }` -> `{ ids, note? }`; `part` names a layer inside an instance's component
+  and sets its text, fill, stroke, visible or image for that instance only
+- `delete { layer, allArtboards? }` -> `{ ids }` (connectors left joining nothing go too)
+- `move { layer, to: "front" | "back" | "forward" | "backward" | { parent, index? }, allArtboards? }` -> `{ ids }`
+  (`parent` "" is the top of the artboard; `index` 0 is the back)
+- `group { layers, name? }` -> `{ id }`, `ungroup { layer }` -> `{ ids, note? }`
+- `align { layers, edge: "left" | "center" | "right" | "top" | "middle" | "bottom", to?: "selection" | "artboard" }` -> `{ ids }`
+- `distribute { layers, axis: "x" | "y" }` -> `{ ids }` (3 or more layers, equal gaps)
+- `duplicate { layer, dx?, dy? }` -> `{ ids }`
+- `artboard { action: "add" | "resize" | "rename" | "delete", name?, size? }` -> `{ id }`; size is `"<w>x<h>"` or a
+  preset (instagram, portrait, story, linkedin, x, youtube, logo, letter), at most 8192 px per side
+- `style { color?: "Name=#hex" | { name, color }, text?: { name, run: { font, size } }, remove?: name }` -> `{ colors, text }`
+- `svg { svg, name?, parent?, index?, x?, y? }` -> `{ id, removed, kept }` imports SVG as a group after cleaning it
+  (`removed` says what went); `svg { get: layer | true }` -> `{ svg }`
+- `diagram { name?, spec | text }` -> `{ id, nodes, links, containers, note? }` lays a diagram out for you. `text` has one
+  item per line: `node <id>: <label> [in <box>]`, `box <id>: <label> [in <box>]`, `<from> -> <to> [: <label>]`,
+  `diagram <name>` and `direction right|down|left|up`. `spec` is `{ name, direction?, spacing?, nodes: [{ id, label,
+  in? }], links: [{ from, to, label? }], containers?: [{ id, label, in? }] }`. `nodes` and `containers` map spec ids to
+  layer ids. The same name again redraws that diagram
+- `tidy { diagram?, unpin? }` -> the same: lays a diagram out again around nodes moved by hand (`unpin` moves them too)
+- `apply { ops }` -> `{ results }`: up to 1,000 ops in order as one step; the first failure stops it with
+  "op <n>: <message>" and changes nothing
+
 ## comments (any kind; through `gdocs comments | comment | reply | resolve | listen`, not `gdocs op`)
 Threads are `{ id, author, by: "user" | "agent", text, quote?, resolved?, replies: [...] }`. `gdocs listen <file>` streams
 the person's events as JSON lines with `--json`: `comment`, `reply`, `resolved`, `deleted`, and `edit` (`{ line, removed[], added[] }`).

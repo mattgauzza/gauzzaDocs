@@ -23,6 +23,7 @@ import { registerDocCommands } from './doc'
 import { registerPdfCommands } from './pdf'
 import { registerSheetCommands } from './sheet'
 import { registerSlidesCommands } from './slides' // slides
+import { registerDesignCommands } from './design'
 import { registerHistoryCommands } from './history'
 import { flushHistory, listHistoryPaths } from '../core/history'
 
@@ -30,7 +31,7 @@ const program = new Command()
 program
   .name('gdocs')
   .description(
-    'gauzzaDocs: read and edit documents, spreadsheets, presentations, PDFs and text files, live in the app or on disk.\n\n' +
+    'gauzzaDocs: read and edit documents, spreadsheets, presentations, designs, PDFs and text files, live in the app or on disk.\n\n' +
       'When the app is running and a file is open in it, edits go into the open editor and appear as you watch\n' +
       '(undoable, saved by the app). Otherwise the file on disk is edited directly. --live opens the file first.\n' +
       'Before editing, run `gdocs instructions <file>`: it prints standing instructions (global and per file).\n' +
@@ -168,7 +169,7 @@ program
 liveOptions(
   program
     .command('read <file>')
-    .description('print a file\'s content: docs as markdown (or --format html|text), sheets as CSV, slides as Markdown, PDFs as text')
+    .description('print a file\'s content: docs as markdown (or --format html|text), sheets as CSV, slides as Markdown, PDFs as text, designs as layer lines')
     .option('--format <format>', 'md | html | text (docs); csv | json | formulas (sheets); text | json (pdf)')
     .option('--lines <range>', 'text files: only these lines, e.g. 10-40')
     .option('--range <range>', 'sheets: only this range, e.g. A1:D20')
@@ -180,6 +181,7 @@ liveOptions(
     const op: AgentOp = { op: 'read' }
     if (o.format) op.format = o.format
     else if (kind === 'sheet') op.format = 'csv'
+    else if (kind === 'design') op.format = 'text' // the lines gdocs design read prints
     if (o.lines) op.lines = o.lines
     if (o.range) op.range = o.range
     if (o.sheet) op.sheet = o.sheet
@@ -474,6 +476,7 @@ registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)
 registerPdfCommands(program, ctx, agentName)
 registerSlidesCommands(program, ctx) // slides
+registerDesignCommands(program, ctx)
 registerHistoryCommands(program, ctx, agentName)
 
 // Always node-style argv: installed copies run this under the app's Electron runtime (ELECTRON_RUN_AS_NODE),

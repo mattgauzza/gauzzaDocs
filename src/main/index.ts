@@ -243,7 +243,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
 }
 
 /** Ops that only look, so they're not news to other agents. */
-const READ_ONLY_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets', 'charts', 'rules', 'merges', 'comments'])
+const READ_ONLY_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets', 'charts', 'rules', 'merges', 'comments', 'export'])
 
 // ---------- subscribed agents ----------
 let runner: AgentRunner | null = null

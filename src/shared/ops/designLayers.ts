@@ -41,14 +41,29 @@ export function hits(board: Artboard, ref: string): Layer[] {
   return all.filter(e => e.path.length === want.length && e.path.every((n, i) => n === want[i])).map(e => e.layer)
 }
 
-/** One layer on the board, by id, unique name or path; a name shared by several fails and lists their ids. */
+/**
+ * One layer on the board, by id, unique name or path. A name shared by several fails and lists their ids; a ref that
+ * matches nothing fails and lists the board's layers.
+ */
 export function layerOn(board: Artboard, ref: unknown): Layer {
   if (typeof ref !== 'string' || !ref) throw new OpError('Name a layer by its id, name or Group/Child path')
   const found = hits(board, ref)
   if (found.length === 1) return found[0]
   if (found.length > 1) throw new OpError(`${found.length} layers are named "${ref}": ${found.map(l => l.id).join(', ')}`)
-  throw new OpError(`No layer "${ref}" on ${board.name}`)
+  const choices: string[] = []
+  walk(board.layers, l => void choices.push(`${shortName(l.name)} (${l.id})`))
+  throw new OpError(`No layer "${ref}" on ${board.name}. ${choices.length ? `Its layers: ${upTo(choices, 20)}.` : 'It has no layers yet.'}`)
 }
+
+/** A name as a list shows it: on one line, at most 40 characters. */
+export const shortName = (name: unknown): string => {
+  const s = String(name ?? '').replace(/\s+/g, ' ').trim()
+  return s.length > 40 ? s.slice(0, 37) + '...' : s
+}
+
+/** The first `most` items as a list, then how many more: "a, b and 3 more". */
+export const upTo = (items: string[], most: number): string =>
+  items.length > most ? `${items.slice(0, most).join(', ')} and ${items.length - most} more` : list(items)
 
 /** Where a layer sits: the list holding it, its place there and the group that list belongs to (null at the top). */
 export function locate(board: Artboard, id: string): { list: Layer[]; index: number; parent: GroupLayer | null } {

@@ -286,7 +286,7 @@ test('apply with a bad third op leaves the design unchanged and reports "op 3: .
       },
       services
     ),
-    { message: 'op 3: No layer "Missing" on Instagram post' }
+    { message: /^op 3: No layer "Missing" on Instagram post\. Its layers: One \(\S+\) and Two \(\S+\)\.$/ }
   )
   assert.deepEqual(file.design, snapshot)
   // a good batch is one result and one summary
@@ -869,4 +869,51 @@ test('no op or save keeps a layer box over 100,000 px per side, which reading wo
   assert.deepEqual([byName(joined.file, 'Far').width, byName(joined.file, 'Huge').width, byName(joined.file, 'Huge').height], [1e5, 1e5, 1e5])
   const back = await readDesignZip(await designZipBytes(joined.file))
   assert.deepEqual(back.design.artboards[0].layers, joined.file.design.artboards[0].layers)
+})
+
+// Task 8
+
+test('artboards and layers that match nothing list the choices; a shared artboard name lists their ids', async () => {
+  const { file, services } = await fresh()
+  const ops: AgentOp[] = Array.from({ length: 23 }, (_, i) => ({ op: 'add', type: 'rect', props: { name: `R${i + 1}` } }))
+  const { file: f } = await run(file, services, { op: 'apply', ops }, { op: 'artboard', action: 'add', name: 'Second' })
+  const [first, second] = f.design.artboards
+  await assert.rejects(applyDesignOp(f, { op: 'delete', layer: 'Nope' }, services), (e: Error) => {
+    assert.match(e.message, /^No layer "Nope" on Instagram post\. Its layers: R1 \(\S+\), R2 \(\S+\), .*R20 \(\S+\) and 3 more\.$/)
+    assert.doesNotMatch(e.message, /R21/)
+    return true
+  })
+  await assert.rejects(applyDesignOp(f, { op: 'delete', layer: 'Nope', artboard: 'Second' }, services), { message: 'No layer "Nope" on Second. It has no layers yet.' })
+  await assert.rejects(applyDesignOp(f, { op: 'read', artboard: 'Third' }, services), { message: `No artboard "Third". Artboards: Instagram post (${first.id}) and Second (${second.id}).` })
+  // two artboards of one name (a file edited by hand): the name picks neither, an id still does
+  const twin = structuredClone(f)
+  twin.design.artboards[1].name = 'Instagram post'
+  await assert.rejects(applyDesignOp(twin, { op: 'read', artboard: 'Instagram post' }, services), { message: `2 artboards are named "Instagram post": ${first.id}, ${second.id}` })
+  assert.equal(((await applyDesignOp(twin, { op: 'read', artboard: second.id }, services)).result as { layers: string[] }).layers.length, 0)
+})
+
+test('info counts artboards and layers; export gives the artboard as SVG, sized by width, and changes nothing', async () => {
+  const { file, services } = await fresh()
+  const { file: f } = await run(
+    file,
+    services,
+    { op: 'add', type: 'rect', props: { name: 'A', width: 100, height: 50 } },
+    { op: 'add', type: 'text', props: { name: 'T', text: 'Hi' } },
+    { op: 'group', layers: ['A', 'T'], name: 'G' },
+    { op: 'artboard', action: 'add', name: 'Wide', size: '1600x900' }
+  )
+  const info = await applyDesignOp(f, { op: 'info' }, services)
+  assert.deepEqual([info.result, info.file], [{ artboards: 2, layers: 3 }, undefined])
+  const out = await applyDesignOp(f, { op: 'export' }, services)
+  assert.equal(out.file, undefined)
+  const r = out.result as { svg: string; artboard: { name: string }; width: number; height: number; leftOut?: unknown }
+  assert.equal(r.svg, designToSvg(f.design, f.design.artboards[0].id, { fonts: services.fonts, assets: {}, mode: 'export' }))
+  assert.deepEqual([r.artboard.name, r.width, r.height, r.leftOut], ['Instagram post', 1080, 1080, undefined])
+  assert.match(r.svg, /inkscape:label="G"/)
+  const wide = (await applyDesignOp(f, { op: 'export', artboard: 'Wide', width: 400 }, services)).result as { svg: string; width: number; height: number }
+  assert.match(wide.svg, /^<svg [^>]* width="400" height="225" viewBox="0 0 1600 900">/)
+  assert.deepEqual([wide.width, wide.height], [400, 225])
+  await assert.rejects(applyDesignOp(f, { op: 'export', format: 'png' }, services), { message: 'format must be svg' })
+  await assert.rejects(applyDesignOp(f, { op: 'export', width: 0 }, services), { message: 'width must be 1 or more' })
+  await assert.rejects(applyDesignOp(f, { op: 'export' }), /needs fonts/)
 })

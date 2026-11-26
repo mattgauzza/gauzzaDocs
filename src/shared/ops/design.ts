@@ -2,7 +2,7 @@ import { type DiagramSpec, applyLayout, checkSpec, diagramGraph, diagramOn, diag
 import { type Box, boxOf, centerOf, fin, layerIndex } from '../design/geometry'
 import { ARTBOARD_TOO_LARGE, MAX_ARTBOARD_SIDE, PRESETS, artboardOf, newId, walk } from '../design/model'
 import { parsePath, pathBounds } from '../design/path'
-import { designToSvg } from '../design/render'
+import { type Downgrade, designToSvg } from '../design/render'
 import { cleanSvg } from '../design/svgClean'
 import { importSvg, layerAsSvg } from '../design/svgImport'
 import { cleanText, num as fmt, textReport } from '../design/text'
@@ -13,16 +13,20 @@ import {
 import type { AgentOp } from '../types'
 import {
   DEFAULT_FONT, type DesignDoc, type GroupLayer, MAX_SIZE, boundsOf, boundsOfLayers, componentOf, contains, coord, endOf, fontOf,
-  hexColor, hits, layerOn, list, locate, nameOf, nextName, number, oneOf, overrideOf, paintOf, propsOf, refit, shift, writeProps
+  hexColor, hits, layerOn, list, locate, nameOf, nextName, number, oneOf, overrideOf, paintOf, propsOf, refit, shift, shortName, upTo,
+  writeProps
 } from './designLayers'
 import { OpError, type OpHandler, type OpServices, str } from './types'
 
 /**
- * Ops on designs (.gdesign). Every op takes `artboard` (an id or name; the first artboard by default). Layers are named
- * by `layer`: an id, a name that is unique on the artboard, or a Group/Child path.
+ * Ops on designs (.gdesign). Every op takes `artboard` (an id, or a name that is unique; the first artboard by default).
+ * Layers are named by `layer`: an id, a name that is unique on the artboard, or a Group/Child path.
  *   read { format? }                           -> { artboard, artboards, layers, styles, components }: one line per layer,
  *                                                 `id  name  type  x,y wxh  "text"  flags`, indented by depth
  *   read { format: "text", allArtboards? }      -> { content }: the same as plain lines (every artboard's with allArtboards)
+ *   info                                        -> { artboards, layers }: how many of each
+ *   export { format?: "svg", width? }           -> { svg, artboard, width, height, leftOut? }: the artboard as an SVG file
+ *                                                 (no fonts embedded); width sizes the root and keeps the view box
  *   add { type, props?, parent?, index? }       -> { ids }
  *   set { layer, props, part?, allArtboards? }  -> { ids }   (`part` writes an instance's override for that inner layer)
  *   delete { layer, allArtboards? }             -> { ids }
@@ -98,12 +102,22 @@ interface Change { verb: string; names: string[]; what?: string }
 
 type InstanceLayer = Layer & { type: 'instance' }
 
-const OPS = ['read', 'add', 'set', 'delete', 'move', 'group', 'ungroup', 'align', 'distribute', 'duplicate', 'artboard', 'style', 'svg', 'diagram', 'tidy', 'apply']
+const OPS = [
+  'read', 'info', 'export', 'add', 'set', 'delete', 'move', 'group', 'ungroup', 'align', 'distribute', 'duplicate', 'artboard', 'style',
+  'svg', 'diagram', 'tidy', 'apply'
+]
+
+/** The design ops that only look: they never change the design. */
+export const DESIGN_READ_OPS = new Set(['read', 'info', 'export'])
 
 async function runOp(d: Draft, op: AgentOp): Promise<unknown> {
   switch (op.op) {
     case 'read':
       return readOp(d, op)
+    case 'info':
+      return infoOp(d)
+    case 'export':
+      return exportOp(d, op)
     case 'add':
       return addOp(d, op)
     case 'set':
@@ -143,10 +157,7 @@ async function runOp(d: Draft, op: AgentOp): Promise<unknown> {
 const words = (key: string): string => key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
 
 /** A name as a summary shows it: at most 40 characters, on one line. */
-const named = (name: string): string => {
-  const s = String(name ?? '').replace(/\s+/g, ' ').trim()
-  return s.length > 40 ? s.slice(0, 37) + '...' : s
-}
+const named = shortName
 
 /** The changes as one plain past-tense phrase: "added 3 layers", "set fill on Logo and moved Title". */
 function describe(changes: Change[]): string {
@@ -180,9 +191,21 @@ function takenIds(design: Design): Set<string> {
   return ids
 }
 
+/**
+ * The artboard an op names: by id, or by a name only one artboard has (as layers are named); the first by default. A
+ * name several share fails and lists their ids, and one that matches nothing lists the artboards.
+ */
 const boardOf = (d: Draft, op: AgentOp): Artboard => {
   const ref = op.artboard
-  return artboardOf(d.design, ref === undefined || ref === null || ref === '' ? undefined : String(ref))
+  if (ref === undefined || ref === null || ref === '') return artboardOf(d.design)
+  const want = String(ref)
+  const boards = d.design.artboards
+  const byId = boards.find(a => a.id === want)
+  if (byId) return byId
+  const byName = boards.filter(a => a.name === want)
+  if (byName.length === 1) return byName[0]
+  if (byName.length > 1) throw new OpError(`${byName.length} artboards are named "${want}": ${byName.map(a => a.id).join(', ')}`)
+  throw new OpError(`No artboard "${want}". Artboards: ${upTo(boards.map(a => `${named(a.name)} (${a.id})`), 20)}.`)
 }
 
 /** The layers an op targets with `layer`: one on the op's artboard, or with allArtboards one per artboard that has it. */
@@ -251,6 +274,39 @@ function readOp(d: Draft, op: AgentOp): unknown {
   }
   if (components.length) out.push('Components:', ...components.map(c => `  ${c.id}  ${c.name}`))
   return { content: out.join('\n') }
+}
+
+/** How many artboards and layers the design holds (layers inside groups count, a component's own layers don't). */
+function infoOp(d: Draft): unknown {
+  let layers = 0
+  for (const a of d.design.artboards) walk(a.layers, () => void layers++)
+  return { artboards: d.design.artboards.length, layers }
+}
+
+/**
+ * The artboard as a standalone SVG file, drawn by designToSvg in export mode (fonts are never embedded). `width` sets
+ * the root's width and height, keeping its shape and view box. Layers the drawing leaves out are listed in `leftOut`.
+ */
+function exportOp(d: Draft, op: AgentOp): unknown {
+  const board = boardOf(d, op)
+  if (op.format !== undefined) oneOf('format', op.format, ['svg'] as const)
+  const fonts = d.services.fonts
+  if (!fonts) throw new OpError('Exporting needs fonts to measure text, and none were given')
+  const downgrades: Downgrade[] = []
+  let svg = designToSvg(d.design, board.id, { fonts, assets: d.assets, mode: 'export', downgrades })
+  let width = fin(board.width, 0)
+  let height = fin(board.height, 0)
+  if (op.width !== undefined) {
+    const w = number('width', op.width, 1, MAX_SIZE)
+    height = width ? (height * w) / width : height
+    width = w
+    // only the root's own size: designToSvg writes it once, before the view box
+    const end = svg.indexOf('>')
+    svg = svg.slice(0, end).replace(/ width="[^"]*" height="[^"]*"/, ` width="${fmt(width)}" height="${fmt(height)}"`) + svg.slice(end)
+  }
+  const result: Record<string, unknown> = { svg, artboard: { id: board.id, name: board.name }, width, height }
+  if (downgrades.length) result.leftOut = downgrades
+  return result
 }
 
 /**

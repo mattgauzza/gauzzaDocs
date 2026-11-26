@@ -52,7 +52,7 @@ const HOME = -1
 const isLossy = (t: { path: string; payload: FilePayload | null }) =>
   (t.payload?.kind === 'doc' || t.payload?.kind === 'slides') && t.payload.lossy !== undefined ? t.payload.lossy : lossy(t.path)
 /** Ops that only look: shown as "reading" rather than "editing". */
-const READ_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets'])
+const READ_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets', 'export'])
 /** Tabs kept loaded besides the active one (most recently used). The rest sleep once saved, to keep memory low. */
 const WARM = 2
 const SLEEP_AFTER_MS = 45_000
