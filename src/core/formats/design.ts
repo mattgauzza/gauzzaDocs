@@ -38,6 +38,7 @@ async function openChecked(bytes: Uint8Array): Promise<JSZipT> {
 }
 
 const MAX_DESIGN_JSON = 64 * 1024 * 1024
+export const TOO_LARGE_TO_SAVE = 'This design is too large to save (its design.json would be over 64 MB).'
 const MAX_THUMBNAIL = 16 * 1024 * 1024
 
 /** Bytes still allowed across everything inflated in one read or write. */
@@ -153,7 +154,7 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile & { n
     throw new Error('This design file is damaged: design.json is not valid JSON')
   }
   const notes: string[] = []
-  const design = validateDesign(raw, notes)
+  const design = validateDesign(raw, notes, json.length)
   checkAssetRefs(design)
   const assets: Record<string, Uint8Array> = {}
   for (const name of Object.keys(zip.files)) {
@@ -169,12 +170,20 @@ export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile & { n
 
 /**
  * Writes the file. Assets the design refers to but `f.assets` lacks are copied from `base` (the file as it is on disk),
- * and assets nothing refers to are dropped, so autosave only has to send design.json and new assets.
+ * and assets nothing refers to are dropped, so autosave only has to send design.json and new assets. A design.json
+ * over 64 MB is refused rather than written, since it could not be opened again.
  */
 export async function designZipBytes(f: DesignFile, base?: Uint8Array): Promise<Uint8Array> {
   checkAssetRefs(f.design)
   const zip = await newZip()
-  zip.file(DESIGN, JSON.stringify(f.design), { compression: 'DEFLATE' })
+  let json: string
+  try {
+    json = JSON.stringify(f.design)
+  } catch {
+    throw new Error(TOO_LARGE_TO_SAVE)
+  }
+  if (json.length > MAX_DESIGN_JSON || Buffer.byteLength(json, 'utf8') > MAX_DESIGN_JSON) throw new Error(TOO_LARGE_TO_SAVE)
+  zip.file(DESIGN, json, { compression: 'DEFLATE' })
   const refs = referencedAssets(f.design)
   const baseZip = base ? await openChecked(base) : null
   const budget: Budget = { left: MAX_UNCOMPRESSED }

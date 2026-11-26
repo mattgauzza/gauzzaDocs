@@ -276,12 +276,17 @@ export interface InlineCache { tail: string; mark: string; size: number }
 /** How the root begins before the box is put in. */
 const HEAD = '<svg x="0" y="0" width="0" height="0"'
 
-/** A character the source doesn't hold, from the private use area, to stand for the prefix. */
+/**
+ * A character the source doesn't hold, from the private use area, to stand for the prefix: the first one not among
+ * those it holds, gathered in one pass over it.
+ */
 function markFor(svg: string): string {
-  for (let c = 0xe000; c <= 0xf8ff; c++) {
-    const m = String.fromCharCode(c)
-    if (!svg.includes(m)) return m
+  const used = new Set<number>()
+  for (let i = 0; i < svg.length; i++) {
+    const c = svg.charCodeAt(i)
+    if (c >= 0xe000 && c <= 0xf8ff) used.add(c)
   }
+  for (let c = 0xe000; c <= 0xf8ff; c++) if (!used.has(c)) return String.fromCharCode(c)
   throw new Error('This SVG uses every private use character.')
 }
 

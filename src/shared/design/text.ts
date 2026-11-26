@@ -38,22 +38,29 @@ function graphemes(s: string): string[] {
   return Array.from(segmenter.segment(s), x => x.segment)
 }
 
-/** The runs a layer draws: its own, or one run of `overrideText` in the first run's style. Text is cleaned for XML. */
+/**
+ * The runs a layer draws: its own, or one run of `overrideText` in the first run's style. Text is cleaned for XML.
+ * Each holds only the fields drawing reads, never a copy of the whole run (which could hold any number of fields a
+ * later release added).
+ */
 export function textRuns(layer: TextLayer, overrideText?: string): TextRun[] {
-  const runs = overrideText === undefined ? layer.runs : layer.runs.slice(0, 1).map(r => ({ ...r, text: overrideText }))
-  return runs.map(r => ({ ...r, text: cleanText(String(r.text ?? '')).replace(/\r\n?/g, '\n') }))
+  const runs = overrideText === undefined ? layer.runs : layer.runs.slice(0, 1)
+  return runs.map(r => ({
+    text: cleanText(String((overrideText === undefined ? r?.text : overrideText) ?? '')).replace(/\r\n?/g, '\n'),
+    font: r?.font, size: r?.size, color: r?.color, letterSpacing: r?.letterSpacing, lineHeight: r?.lineHeight
+  }))
 }
 
 /** A run's size as layout uses it: a positive finite number, else 0. */
 export const runSize = (r: TextRun): number => (Number.isFinite(r.size) && r.size > 0 ? r.size : 0)
 const sizeOf = runSize
 
-interface Shaped { glyphs: any[]; positions: any[]; k: number; spacing: number; width: number }
+interface Shaped { font: any; glyphs: any[]; positions: any[]; k: number; spacing: number; width: number }
 
 /** Lays out one run's text with its font (the fallback when the font is missing). Never throws. */
 function shape(fonts: FontSource, run: TextRun, text: string): Shaped {
   const font = fonts.get(run.font).font
-  const k = sizeOf(run) / (font?.unitsPerEm || 1000)
+  const k = scaleOf(font, run)
   const spacing = Number.isFinite(run.letterSpacing) ? (run.letterSpacing as number) : 0
   let glyphs: any[] = []
   let positions: any[] = []
@@ -64,8 +71,11 @@ function shape(fonts: FontSource, run: TextRun, text: string): Shaped {
   }
   let width = 0
   for (let i = 0; i < glyphs.length; i++) width += advance(glyphs[i], positions[i]) * k + spacing
-  return { glyphs, positions, k, spacing, width }
+  return { font, glyphs, positions, k, spacing, width }
 }
+
+/** Font units to pixels for a run. */
+const scaleOf = (font: any, run: TextRun): number => sizeOf(run) / (font?.unitsPerEm || 1000)
 
 const advance = (g: any, p: any): number => p?.xAdvance ?? g?.advanceWidth ?? 0
 
@@ -249,16 +259,73 @@ export function layoutText(layer: TextLayer, fonts: FontSource, overrideText?: s
   return { lines, height, overflow: wrap && height > box.h + EPS }
 }
 
+/** What one character's glyph outlines came to in all (`sum`) over the `n` times it was drawn. */
+interface Seen { sum: number; n: number }
+/**
+ * What each character's glyph outline came to where it was drawn, by font, then by scale, then by code point. A
+ * drawing fills it in as it builds outlines, so a text like one already drawn is costed from it.
+ */
+export type GlyphCosts = WeakMap<object, Map<number, Map<number, Seen>>>
+
 /** Characters of outline a caller still allows; building past it throws OutlinesTooLong. */
-export interface OutlineBudget { left: number }
+export interface OutlineBudget {
+  left: number
+  /** where to record what each glyph came to */
+  costs?: GlyphCosts
+}
 export class OutlinesTooLong extends Error {}
 
 /**
+ * The share of a glyph's average cost counted for it elsewhere: the digits of its coordinates change with where it's
+ * drawn, so a glyph nearer the origin writes a little less.
+ */
+const SEEN_SHARE = 0.9
+
+/** The costs recorded for one font at one scale, made when `make` is set. */
+function costsFor(costs: GlyphCosts | undefined, font: any, k: number, make: boolean): Map<number, Seen> | undefined {
+  if (!costs || !font || typeof font !== 'object') return undefined
+  let byScale = costs.get(font)
+  if (!byScale) {
+    if (!make) return undefined
+    costs.set(font, (byScale = new Map()))
+  }
+  let byCode = byScale.get(k)
+  if (!byCode && make) byScale.set(k, (byCode = new Map()))
+  return byCode
+}
+
+/**
+ * About how many characters `text` in `run` writes as outlines: each visible character at nine tenths of what its
+ * glyph came to on average before in this drawing (from `costs`), or `perGlyph` when it hasn't been drawn yet.
+ */
+export function outlineEstimate(fonts: FontSource, run: TextRun, text: string, perGlyph: number, costs?: GlyphCosts): number {
+  const font = fonts.get(run.font).font
+  const seen = costsFor(costs, font, scaleOf(font, run), false)
+  let total = 0
+  for (let i = 0; i < text.length; i++) {
+    let c = text.charCodeAt(i)
+    if (c <= 32) continue
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      const d = text.charCodeAt(i + 1)
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        c = (c - 0xd800) * 0x400 + (d - 0xdc00) + 0x10000
+        i++
+      }
+    }
+    const known = seen?.get(c)
+    total += known === undefined ? perGlyph : Math.floor((known.sum / known.n) * SEEN_SHARE)
+  }
+  return total
+}
+
+/**
  * Glyph outlines for one span: path data with the pen starting at `x` on baseline `y`. With `budget`, it stops (by
- * throwing OutlinesTooLong) as soon as the outlines pass what's left of it, instead of building them all first.
+ * throwing OutlinesTooLong) as soon as the outlines pass what's left of it, instead of building them all first, and
+ * records what each glyph came to in `budget.costs`.
  */
 export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: number, y: number, budget?: OutlineBudget): string {
-  const { glyphs, positions, k, spacing } = shape(fonts, run, text)
+  const { font, glyphs, positions, k, spacing } = shape(fonts, run, text)
+  const seen = costsFor(budget?.costs, font, k, true)
   const out: string[] = []
   let pen = x
   for (let i = 0; i < glyphs.length; i++) {
@@ -271,6 +338,7 @@ export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: numb
     } catch {
       cmds = []
     }
+    const start = budget ? budget.left : 0
     for (const c of cmds) {
       const a = (c.args as number[]).map((v, j) => num(j % 2 ? oy - v * k : ox + v * k)).join(' ')
       if (budget && (budget.left -= a.length + 1) < 0) throw new OutlinesTooLong('These outlines are too long to draw.')
@@ -279,6 +347,17 @@ export function glyphPath(fonts: FontSource, run: TextRun, text: string, x: numb
       else if (c.command === 'quadraticCurveTo') out.push('Q' + a)
       else if (c.command === 'bezierCurveTo') out.push('C' + a)
       else if (c.command === 'closePath') out.push('Z')
+    }
+    if (seen && budget) {
+      // one character's glyph (not a ligature): what it came to here
+      const codes = glyphs[i]?.codePoints
+      if (Array.isArray(codes) && codes.length === 1 && typeof codes[0] === 'number') {
+        const was = seen.get(codes[0])
+        if (was) {
+          was.sum += start - budget.left
+          was.n++
+        } else seen.set(codes[0], { sum: start - budget.left, n: 1 })
+      }
     }
     pen += advance(glyphs[i], p) * k + spacing
   }

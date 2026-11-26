@@ -1,10 +1,12 @@
 import type { FontSource } from './fonts'
-import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, midpoint, transformedBounds, union } from './geometry'
+import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, layerIndex, midpoint, transformedBounds, union } from './geometry'
 import { artboardOf, walk } from './model'
 import { escapedLength } from './svgClean'
 import { type InlineCache, inlineSvg } from './svgFragment'
-import { OutlinesTooLong, cleanText, layoutText, num as n, runSize, textPaths, textRuns } from './text'
-import type { Artboard, Component, Design, Layer, Override, Paint, TextLayer } from './types'
+import {
+  type GlyphCosts, OutlinesTooLong, cleanText, layoutText, num as n, outlineEstimate, runSize, textPaths, textRuns
+} from './text'
+import type { Artboard, Component, Design, Layer, Override, Paint, TextLayer, TextRun } from './types'
 
 export { connectorPath } from './geometry'
 
@@ -47,9 +49,11 @@ const MAX_STOPS = 256
 
 /**
  * Where a layer is drawn. `overrides` is the chain of override maps from the outermost instance in: the first that
- * holds a layer's id wins, so nothing is copied per instance.
+ * holds a layer's id wins, so nothing is copied per instance. `ends` is where a connector finds the layers it joins.
  */
-interface Scope { prefix: string; overrides: Record<string, Override>[]; top: boolean; board: Artboard; comps: string[] }
+interface Scope { prefix: string; overrides: Record<string, Override>[]; top: boolean; ends: Ends; comps: string[] }
+/** The layers a connector's ends are looked for in (the artboard's, or a component's root), indexed on first use. */
+interface Ends { layers: Layer[]; index?: Map<string, Layer> }
 interface Ctx {
   design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string>
   /** gradient signatures in the order they were added, so a layer left out can take its own back */
@@ -67,8 +71,19 @@ interface Ctx {
   listed: Set<string>
   /** components by id, made on first use */
   comps?: Map<string, Component>
+  /** each component's root as connector ends, made on first use, so instances share one index */
+  compEnds: Map<Component, Ends>
   /** characters the layer being built may still write (what the drawing had left when it began) */
   room: number
+  /**
+   * Layers that didn't fit, with the overrides they were drawn under (failSig). What's left only shrinks as a drawing
+   * goes on, so the same layer under the same overrides (another instance of its component) is left out at once.
+   */
+  failed: Map<Layer, Set<string>>
+  /** escaped lengths of long strings (path data, stored glyphs), each measured once per drawing */
+  escLens: Map<string, number>
+  /** what each glyph's outline has come to so far (see outlineEstimate) */
+  glyphCosts: GlyphCosts
 }
 
 /** Thrown while a layer is built once what it adds passes the budget: the layer is left out without finishing. */
@@ -187,12 +202,42 @@ const base64Size = (bytes: number): number => 4 * Math.ceil(bytes / 3)
  */
 const OUTLINE_PER_GLYPH = 500
 
+/** A string's length once escaped, measured once per drawing (instances of a component share it). */
+function escLen(ctx: Ctx, s: unknown): number {
+  if (typeof s !== 'string') return 0
+  let len = ctx.escLens.get(s)
+  if (len === undefined) {
+    len = escapedLength(s)
+    ctx.escLens.set(s, len)
+  }
+  return len
+}
+
+/** The stored outlines a text layer is drawn with (its font missing and its text not overridden), or null. */
+function storedGlyphs(fonts: FontSource, l: TextLayer, overrideText: string | undefined, runs: TextRun[]): string | null {
+  return typeof l.glyphs === 'string' && l.glyphs && overrideText === undefined && runs.some(r => fonts.get(r.font).missing) ? l.glyphs : null
+}
+
+/** The least a text writes: stored outlines as escaped, else its characters, or (as outlines) what they'll come to. */
+function textLeast(ctx: Ctx, l: TextLayer, overrideText: string | undefined, outlines: boolean, stored: boolean): number {
+  const runs = textRuns(l, overrideText)
+  const glyphs = stored ? storedGlyphs(ctx.opts.fonts, l, overrideText, runs) : null
+  if (glyphs !== null) return escLen(ctx, glyphs)
+  let chars = 0
+  let drawn = 0
+  for (const r of runs) {
+    chars += r.text.length
+    if (outlines) drawn += outlineEstimate(ctx.opts.fonts, r, r.text, OUTLINE_PER_GLYPH, ctx.glyphCosts)
+  }
+  return Math.max(chars, drawn)
+}
+
 /**
  * The least a layer's own drawing will write, read cheaply before it's built: an image's base64, path data as
- * escaped, text as escaped (export) or as outlines (raster), a converted svg layer's markup. A layer whose least
- * doesn't fit is left out before any of it is built.
+ * escaped, text as escaped (export) or as outlines (raster), stored glyphs as escaped, a converted svg layer's
+ * markup. A layer whose least doesn't fit is left out before any of it is built.
  */
-function leastSize(ctx: Ctx, l: Layer): number {
+function leastSize(ctx: Ctx, l: Layer, overrideText: string | undefined): number {
   if ((l.type === 'image' || l.type === 'paint') && typeof l.asset === 'string' && has(ctx.opts.assets, l.asset)) {
     return base64Size(ctx.opts.assets[l.asset]?.length ?? 0)
   }
@@ -200,18 +245,48 @@ function leastSize(ctx: Ctx, l: Layer): number {
     const svg = typeof l.svg === 'string' ? l.svg : ''
     return ctx.opts.mode === 'raster' ? base64Size(svg.length) : (ctx.svgCache.get(svg)?.size ?? 0)
   }
-  if (l.type === 'path') return typeof l.d === 'string' ? escapedLength(l.d) : 0
-  if (l.type === 'text') {
-    let chars = 0
-    let visible = 0
-    for (const r of Array.isArray(l.runs) ? l.runs : []) {
-      const t = typeof r?.text === 'string' ? r.text : ''
-      chars += t.length
-      if (ctx.opts.mode === 'raster' || ctx.opts.outlines || l.outlines) for (let i = 0; i < t.length; i++) if (t.charCodeAt(i) > 32) visible++
-    }
-    return Math.max(chars, visible * OUTLINE_PER_GLYPH)
-  }
+  if (l.type === 'path') return escLen(ctx, l.d)
+  if (l.type === 'text') return textLeast(ctx, l, overrideText, ctx.opts.mode === 'raster' || !!ctx.opts.outlines || !!l.outlines, true)
   return 0
+}
+
+/** The least a clip mask writes as clip geometry: path data as escaped, text as outlines. */
+function clipLeast(ctx: Ctx, l: Layer, overrideText: string | undefined): number {
+  if (l.type === 'path') return escLen(ctx, l.d)
+  if (l.type === 'text') return textLeast(ctx, l, overrideText, true, false)
+  return 0
+}
+
+/** A paint by the fields that draw it, never the whole object (which could hold any number of fields). */
+const paintSig = (p: unknown): unknown => {
+  if (!p || typeof p !== 'object') return p ?? null
+  const q = p as Record<string, unknown>
+  const stops = Array.isArray(q.stops) ? q.stops.slice(0, MAX_STOPS).map(s => [s?.offset, typeof s?.color === 'string' ? s.color : null]) : null
+  return [q.type, typeof q.color === 'string' ? q.color : null, typeof q.ref === 'string' ? q.ref : null, q.angle, stops]
+}
+/** An override by the fields that draw it. */
+const overrideSig = (o: Override | undefined): string =>
+  o
+    ? JSON.stringify([
+        typeof o.text === 'string' ? o.text : null, paintSig(o.fill), paintSig(o.stroke),
+        typeof o.visible === 'boolean' ? o.visible : null, typeof o.asset === 'string' ? o.asset : null
+      ])
+    : ''
+
+/**
+ * What a layer's drawing depends on beyond the layer itself: the override it's drawn with and, for a clip group, its
+ * mask's. Null when it can't be told (then nothing is remembered).
+ */
+function failSig(src: Layer, scope: Scope): string | null {
+  try {
+    let sig = overrideSig(overrideIn(scope, src.id))
+    if (src.type === 'group' && src.clip && Array.isArray(src.children) && src.children[0]) {
+      sig += '\u0000' + overrideSig(overrideIn(scope, src.children[0].id))
+    }
+    return sig
+  } catch {
+    return null
+  }
 }
 
 const boxAttrs = (b: Box): string => `x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}"`
@@ -374,9 +449,13 @@ function filterFor(ctx: Ctx, l: Layer, key: string, extent: () => Box): string {
   return id
 }
 
+/**
+ * A layer as an instance draws it. The overridden fields sit on an object made over the layer (its prototype), never
+ * on a copy: a layer can hold any number of fields a later release added.
+ */
 function withOverride(l: Layer, o: Override | undefined): Layer {
   if (!o) return l
-  const out = { ...l } as Layer & { asset?: string }
+  const out = Object.create(l) as Layer & { asset?: string }
   if (o.fill !== undefined) out.fill = o.fill
   if (o.stroke !== undefined) out.stroke = o.stroke
   if (typeof o.visible === 'boolean') out.visible = o.visible
@@ -397,13 +476,28 @@ const layerAttrs = (key: string, name: unknown): string => {
 /**
  * A layer's group and what it draws, within the drawing's budget: a layer that doesn't fit, or that fails to draw,
  * draws nothing and is listed, and takes back what it had added (definitions and budget). Once the budget is reached
- * every later layer is left out without being built.
+ * every later layer is left out without being built, and a layer that didn't fit is left out at once when it comes
+ * up again under the same overrides.
  */
 function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
   if (ctx.full) return leftOut(ctx, src, OVER_BUDGET)
+  const seen = src && typeof src === 'object' ? ctx.failed.get(src) : undefined
+  let sig: string | null | undefined
+  if (seen) {
+    sig = failSig(src, scope)
+    if (sig !== null && seen.has(sig)) return leftOut(ctx, src, OVER_BUDGET)
+  }
   const before = mark(ctx)
   const out = (reason: string): string => {
     rollBack(ctx, before)
+    if (reason === OVER_BUDGET && src && typeof src === 'object') {
+      if (sig === undefined) sig = failSig(src, scope)
+      if (sig !== null) {
+        const sigs = ctx.failed.get(src)
+        if (sigs) sigs.add(sig)
+        else ctx.failed.set(src, new Set([sig]))
+      }
+    }
     return leftOut(ctx, src, reason)
   }
   try {
@@ -422,11 +516,11 @@ function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
     if (BLENDS.has(l.blend)) a += ` style="mix-blend-mode:${l.blend}"`
     const tf = l.type === 'connector' ? '' : transformOf(l)
     if (tf) a += ` transform="${tf}"`
-    const least = leastSize(ctx, l)
+    const overrideText = typeof o?.text === 'string' ? o.text : undefined
+    const least = leastSize(ctx, l, overrideText)
     if (!spend(ctx, a.length + 8 + least)) return out(OVER_BUDGET)
     ctx.room = MAX_RENDER_OUTPUT - ctx.used + least
-    const overrideText = typeof o?.text === 'string' ? o.text : undefined
-    const pts = l.type === 'connector' ? connectorPath(ctx.design, scope.board, l) : []
+    const pts = l.type === 'connector' ? connectorPath(ctx.design, EMPTY_BOARD, l, endsIndex(scope.ends)) : []
     const fid = filterFor(ctx, l, key, () => extentOf(ctx, l, overrideText, pts))
     if (fid) a += ` filter="url(#${fid})"`
     const inner = content(ctx, l, key, scope, o, pts)
@@ -523,16 +617,19 @@ function textSvg(ctx: Ctx, l: TextLayer, key: string, fonts: FontSource, overrid
   const runs = textRuns(l, overrideText)
   const stroke = strokeAttr(ctx, l, key, b, l.stroke)
   const fillOf = (i: number): string => paintAttr(ctx, fill ?? runs[i]?.color ?? l.fill ?? BLACK, 'fill', key, b)
-  if (typeof l.glyphs === 'string' && l.glyphs && overrideText === undefined && runs.some(r => fonts.get(r.font).missing)) {
+  const glyphs = storedGlyphs(fonts, l, overrideText, runs)
+  if (glyphs !== null) {
     const move = b.x || b.y ? ` transform="translate(${n(b.x)} ${n(b.y)})"` : ''
     // the glyphs are drawn translated to the box, so their paints live in the box's own space
     const own: Box = { x: 0, y: 0, w: b.w, h: b.h }
     const paint = paintAttr(ctx, fill ?? runs[0]?.color ?? l.fill ?? BLACK, 'fill', key, own)
-    return `<path d="${esc(l.glyphs)}"${move}${paint}${strokeAttr(ctx, l, key, own, l.stroke)}/>`
+    return `<path d="${esc(glyphs)}"${move}${paint}${strokeAttr(ctx, l, key, own, l.stroke)}/>`
   }
   if (ctx.opts.mode === 'raster' || ctx.opts.outlines || l.outlines) {
     // built against what the drawing has left, so outlines too long to keep stop as soon as they pass it
-    return textPaths(l, fonts, overrideText, 0, 0, { left: ctx.room }).map(p => `<path d="${p.d}"${fillOf(p.run)}${stroke}/>`).join('')
+    return textPaths(l, fonts, overrideText, 0, 0, { left: ctx.room, costs: ctx.glyphCosts })
+      .map(p => `<path d="${p.d}"${fillOf(p.run)}${stroke}/>`)
+      .join('')
   }
   const style = (i: number): string => {
     const r = runs[i]
@@ -554,25 +651,32 @@ function textSvg(ctx: Ctx, l: TextLayer, key: string, fonts: FontSource, overrid
 function imageEl(ctx: Ctx, asset: unknown, fit: string | undefined, b: Box): string {
   if (typeof asset !== 'string' || !has(ctx.opts.assets, asset)) return ''
   const bytes = ctx.opts.assets[asset]
-  const mime = MIME[(/\.([a-z0-9]+)$/i.exec(asset)?.[1] ?? '').toLowerCase()]
+  const ext = (/\.([a-z0-9]+)$/i.exec(asset)?.[1] ?? '').toLowerCase()
+  const mime = has(MIME, ext) ? MIME[ext] : undefined
   if (!(bytes instanceof Uint8Array) || !mime) return ''
   return imageTag(b, fit === 'contain' ? 'xMidYMid meet' : fit === 'cover' ? 'xMidYMid slice' : 'none', mime, bytes)
 }
 
 /**
  * Children in order. With `clip`, the first child (when visible) is the mask: its layer group holds the clip path
- * (never drawn) and the rest are clipped to it.
+ * (never drawn) and the rest are clipped to it. The mask is charged for before it's built, like a layer: one that
+ * can't fit leaves the group out (thrown, so the group gives back what it took).
  */
 function groupSvg(ctx: Ctx, g: Layer & { type: 'group' }, key: string, scope: Scope): string {
   const inner: Scope = { ...scope, top: false }
   const kids = Array.isArray(g.children) ? g.children : []
   const first = kids[0]
-  const mask = g.clip && kids.length > 1 ? withOverride(first, overrideIn(scope, first.id)) : null
+  const maskOverride = g.clip && kids.length > 1 ? overrideIn(scope, first.id) : undefined
+  const mask = g.clip && kids.length > 1 ? withOverride(first, maskOverride) : null
   if (mask?.visible) {
     const id = nextId(ctx, 'c', key)
     const maskKey = safeId(scope.prefix + mask.id)
+    const least = clipLeast(ctx, mask, typeof maskOverride?.text === 'string' ? maskOverride.text : undefined)
+    if (!spend(ctx, least)) throw new OverBudget('The clip mask does not fit.')
+    ctx.room = MAX_RENDER_OUTPUT - ctx.used + least
     const holder = `<g ${layerAttrs(maskKey, mask.name)}><clipPath id="${id}">${clipShape(ctx, mask, maskKey, scope)}</clipPath></g>`
-    if (!spend(ctx, holder.length)) return leftOut(ctx, g, OVER_BUDGET)
+    if (holder.length < least) ctx.used -= least - holder.length
+    else if (!spend(ctx, holder.length - least)) throw new OverBudget('The clip mask does not fit.')
     return holder + `<g clip-path="url(#${id})">${kids.slice(1).map(k => renderLayer(ctx, k, inner)).join('')}</g>`
   }
   return kids.map(k => renderLayer(ctx, k, inner)).join('')
@@ -585,7 +689,8 @@ function clipShape(ctx: Ctx, l: Layer, key: string, scope: Scope): string {
   const t = tf ? ` transform="${tf}"` : ''
   if (l.type === 'text') {
     const text = overrideIn(scope, l.id)?.text
-    return `<path d="${textPaths(l, ctx.opts.fonts, typeof text === 'string' ? text : undefined, 0, 0, { left: ctx.room }).map(p => p.d).join('')}"${t}/>`
+    const budget = { left: ctx.room, costs: ctx.glyphCosts }
+    return `<path d="${textPaths(l, ctx.opts.fonts, typeof text === 'string' ? text : undefined, 0, 0, budget).map(p => p.d).join('')}"${t}/>`
   }
   return `<rect ${boxAttrs(boxOf(l))}${t}/>`
 }
@@ -607,15 +712,23 @@ function instanceSvg(ctx: Ctx, l: Layer & { type: 'instance' }, key: string, sco
   const sx = r.w ? b.w / r.w : 1
   const sy = r.h ? b.h / r.h : 1
   const tf = `translate(${n(b.x)} ${n(b.y)}) scale(${n(sx, 6)} ${n(sy, 6)})` + (r.x || r.y ? ` translate(${n(-r.x)} ${n(-r.y)})` : '')
+  let ends = ctx.compEnds.get(comp)
+  if (!ends) ctx.compEnds.set(comp, (ends = { layers: [comp.root] }))
   const inner: Scope = {
     prefix: key + '-',
     // the outer instances' overrides win over this one's: looked up in that order, never copied
     overrides: l.overrides && typeof l.overrides === 'object' ? [...scope.overrides, l.overrides] : scope.overrides,
     top: false,
-    board: { ...scope.board, layers: [comp.root] },
+    ends,
     comps: [...scope.comps, comp.id]
   }
   return `<g transform="${tf}">${renderLayer(ctx, comp.root, inner)}</g>`
+}
+
+/** The index of where connectors in a scope find their ends, made the first time one is drawn there. */
+function endsIndex(ends: Ends): Map<string, Layer> {
+  if (!ends.index) ends.index = layerIndex(ends.layers)
+  return ends.index
 }
 
 /** An arrowhead as m-<key>-<n>, pointing along the line at the end (or back along it at the start). */
@@ -665,7 +778,8 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
   return {
     design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, used: 0, full: false, instances: 0,
-    svgCache: new Map(), listed: new Set(), room: MAX_RENDER_OUTPUT
+    svgCache: new Map(), listed: new Set(), compEnds: new Map(), room: MAX_RENDER_OUTPUT, failed: new Map(), escLens: new Map(),
+    glyphCosts: new WeakMap()
   }
 }
 
@@ -695,7 +809,7 @@ export function designToSvg(design: Design, artboardId: string, opts: RenderOpti
   const W = n(fin(board.width, 0))
   const H = n(fin(board.height, 0))
   const bg = background(ctx, board, W, H)
-  const scope: Scope = { prefix: '', overrides: [], top: true, board, comps: [] }
+  const scope: Scope = { prefix: '', overrides: [], top: true, ends: { layers: board.layers }, comps: [] }
   const body = board.layers.map(l => renderLayer(ctx, l, scope)).join('')
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
@@ -720,7 +834,7 @@ export function layerToSvg(design: Design, layer: Layer, opts: RenderOptions): s
     }
   }
   const ctx = newCtx(design, opts)
-  const out = renderLayer(ctx, layer, { prefix: '', overrides: [], top, board, comps: [] })
+  const out = renderLayer(ctx, layer, { prefix: '', overrides: [], top, ends: { layers: board.layers }, comps: [] })
   if (!out || !ctx.defs.length) return out
   const at = out.indexOf('>') + 1
   return out.slice(0, at) + `<defs>${ctx.defs.join('')}</defs>` + out.slice(at)

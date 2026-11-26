@@ -73,11 +73,16 @@ const explicitSide = (s: unknown): Side | null => (s === 'top' || s === 'right' 
  * The connector's points: its own `points`, or a route between the attached layers' boxes. `straight` goes center to
  * center, clipped to each box (or from a named side's middle); `orthogonal` leaves and enters through sides with one
  * or two elbows. When either attached layer is missing there are no points, so the connector draws nothing.
+ * `index` (from layerIndex) finds the ends without walking the artboard, for a caller routing many connectors.
  */
-export function connectorPath(_design: Design, artboard: Artboard, layer: Layer): Point[] {
+export function connectorPath(_design: Design, artboard: Artboard, layer: Layer, index?: Map<string, Layer>): Point[] {
   if (layer.type !== 'connector') return []
   if (Array.isArray(layer.points) && layer.points.length >= 2) return layer.points.map(p => [fin(p[0], 0), fin(p[1], 0)])
   const find = (id: string): Box | null => {
+    if (index) {
+      const l = typeof id === 'string' && id !== layer.id ? index.get(id) : undefined
+      return l ? boxOf(l) : null
+    }
     let hit: Box | null = null
     walk(artboard?.layers ?? [], l => {
       if (!hit && l.id === id && l.id !== layer.id) hit = boxOf(l)
@@ -113,6 +118,20 @@ export function connectorPath(_design: Design, artboard: Artboard, layer: Layer)
     return [p, [p[0], my], [q[0], my], q]
   }
   return flat(fromSide) ? [p, [q[0], p[1]], q] : [p, [p[0], q[1]], q]
+}
+
+/** Every layer in `layers` and their groups by id, the first in drawing order for an id held twice (as connectorPath finds). */
+export function layerIndex(layers: Layer[]): Map<string, Layer> {
+  const index = new Map<string, Layer>()
+  const go = (list: unknown): void => {
+    for (const l of Array.isArray(list) ? (list as Layer[]) : []) {
+      if (!l || typeof l !== 'object') continue
+      if (typeof l.id === 'string' && !index.has(l.id)) index.set(l.id, l)
+      if (l.type === 'group') go(l.children)
+    }
+  }
+  go(layers)
+  return index
 }
 
 /** The point halfway along a polyline. */

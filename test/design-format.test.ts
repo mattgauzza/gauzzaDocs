@@ -8,6 +8,7 @@ import { newDesign, newId, resolveLayer, walk } from '../src/shared/design/model
 import { type Downgrade, designToSvg } from '../src/shared/design/render'
 import type { Design, DesignFile, Layer } from '../src/shared/design/types'
 import { validateDesign } from '../src/shared/design/validate'
+import { applyDesignOp } from '../src/shared/ops/design'
 
 const base = {
   visible: true, locked: false, opacity: 1, blend: 'normal', x: 0, y: 0, width: 10, height: 10,
@@ -446,4 +447,113 @@ test("the reviewer's designs read through readDesignZip, and designToSvg never t
     assert.deepEqual(r.downgrades.map(x => x.layer), ['photo'])
     assert.match(r.out, /data-name="title".*data-name="logo"/)
   }
+})
+
+/** This thread's CPU time for `fn`, in ms (the smaller of wall and process CPU time where Node can't tell). */
+function cpuMs(fn: () => unknown): number {
+  const thread = (process as { threadCpuUsage?: (prev?: NodeJS.CpuUsage) => NodeJS.CpuUsage }).threadCpuUsage?.bind(process)
+  const t0 = thread?.()
+  const cpu = process.cpuUsage()
+  const start = performance.now()
+  fn()
+  const wall = performance.now() - start
+  if (t0 && thread) {
+    const own = thread(t0)
+    return (own.user + own.system) / 1000
+  }
+  const used = process.cpuUsage(cpu)
+  return Math.min(wall, (used.user + used.system) / 1000)
+}
+const storedZip = async (json: string): Promise<Uint8Array> => {
+  const z = new JSZip()
+  z.file('design.json', json, { compression: 'STORE' })
+  return z.generateAsync({ type: 'uint8array' })
+}
+
+test('validateDesign renames 100,000 repeats of one id in under a second (wV dup)', () => {
+  const raw = rawDesign(Array.from({ length: 100_000 }, () => rrect('a')))
+  let d: any
+  const ms = cpuMs(() => (d = validateDesign(raw)))
+  assert.ok(ms < 1000, `${Math.round(ms)} ms`)
+  const ids = d.artboards[0].layers.map((l: Layer) => l.id)
+  assert.equal(new Set(ids).size, 100_000)
+  assert.deepEqual(ids.slice(0, 3), ['a', 'a-2', 'a-3'])
+  // an id the file holds further on is never taken by a rename, however deep it is (wN rename)
+  let deep: any = rrect('x_y', 'DEEP')
+  for (let i = 0; i < 39; i++) deep = { ...base, id: `g${i}`, name: 'g', type: 'group', children: [deep] }
+  const r = validateDesign(rawDesign([rrect('x y', 'TOP'), { ...base, id: 'c', name: 'c', type: 'connector', from: { layer: 'x_y' }, to: { layer: 'b' }, route: 'straight', arrow: 'end' }, rrect('b'), deep]))
+  const all: Layer[] = []
+  walk(r.artboards[0].layers, l => all.push(l))
+  const c = all.find(l => l.id === 'c')
+  assert.ok(c?.type === 'connector')
+  assert.equal(all.find(l => l.id === c.from.layer)?.name, 'DEEP')
+  assert.notEqual(all.find(l => l.name === 'TOP')?.id, 'x_y')
+})
+
+test('a design whose repairs would take it past 64 MB is refused, and one over 64 MB is never written (wV2, wN grow)', async () => {
+  const TOO_LARGE = 'This design is too large to open (over 64 MB once repaired).'
+  // 24 MB of runs that are only {}: each would gain a text, a font and a size
+  const layer = (i: number): string => `{"type":"text","id":"t${i}","runs":[${Array(1000).fill('{}').join(',')}]}`
+  const layers: string[] = []
+  for (let size = 0, i = 0; size < 24 * 1024 * 1024; i++) {
+    layers.push(layer(i))
+    size += layers[i].length + 1
+  }
+  const runs = `{"format":1,"id":"d","artboards":[{"id":"ab","name":"B","width":100,"height":100,"background":null,"layers":[${layers.join(',')}]}]}`
+  layers.length = 0
+  assert.throws(() => validateDesign(JSON.parse(runs), [], runs.length), { message: TOO_LARGE })
+  // 57 MB of rects missing their defaults, read through readDesignZip
+  const name = 'n'.repeat(560)
+  const rects = Array.from({ length: 100_000 }, (_, i) => `{"type":"rect","id":"r${i}","name":"${name}"}`)
+  const json = `{"format":1,"id":"d","artboards":[{"id":"ab","name":"B","width":100,"height":100,"background":null,"layers":[${rects.join(',')}]}]}`
+  assert.ok(json.length > 56 * 1024 * 1024 && json.length < 64 * 1024 * 1024)
+  await assert.rejects(readDesignZip(await storedZip(json)), { message: TOO_LARGE })
+  // the same rects with their defaults written out fit, and open
+  const few = json.slice(0, json.indexOf(',{"type":"rect","id":"r1000"')) + ']}]}'
+  const opened = await readDesignZip(await storedZip(few))
+  assert.equal(opened.design.artboards[0].layers.length, 1000)
+  // a design built past 64 MB in memory is refused on save, rather than written where it couldn't open again
+  const big = newDesign('instagram')
+  big.artboards[0].layers.push(rect('r', 'n'.repeat(65 * 1024 * 1024)))
+  await assert.rejects(designZipBytes({ design: big, assets: {} }), { message: 'This design is too large to save (its design.json would be over 64 MB).' })
+})
+
+test('unknown fields are kept to 32 levels and 8 MB in all; notes stop at 200; svg layers at 16 MB (wN deepunknown, wS)', async () => {
+  const note = "a field this release doesn't know, nested past 32 levels or past 8 MB of such fields (dropped)"
+  // nested 10,000 deep: dropped with a note, so saving and every op still work
+  const deep = JSON.stringify(rawDesign([rrect('r')])).replace('"artboards":', `"future":${'['.repeat(10_000)}${']'.repeat(10_000)},"near":[[1]],"artboards":`)
+  const f = await readDesignZip(await storedZip(deep))
+  assert.deepEqual(f.notes, [note])
+  assert.equal((f.design as any).future, undefined)
+  assert.deepEqual((f.design as any).near, [[1]])
+  const saved = await readDesignZip(await designZipBytes(f))
+  assert.equal(saved.notes, undefined)
+  const op = await applyDesignOp(f, { op: 'set', layer: 'r', props: { x: 3 } } as any)
+  assert.deepEqual(op.result, { ids: ['r'] })
+  // 32 levels are kept, 33 are not
+  const levels = (n: number): unknown => JSON.parse('['.repeat(n - 1) + '1' + ']'.repeat(n - 1))
+  const kept = validateDesign(rawDesign([rrect('r', 'R', { a: levels(32), b: levels(33) })]))
+  const r = kept.artboards[0].layers[0] as any
+  assert.deepEqual(r.a, levels(32))
+  assert.equal(r.b, undefined)
+  // nine unknown fields of 0.9 MB: eight fit in 8 MB, the ninth is dropped
+  const more: Record<string, string> = {}
+  for (let i = 0; i < 9; i++) more[`u${i}`] = String(i).repeat(943_720)
+  const notes: string[] = []
+  const big = validateDesign(rawDesign([rrect('r')], more), notes) as any
+  assert.deepEqual(Object.keys(more).filter(k => k in big), ['u0', 'u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7'])
+  assert.deepEqual(notes, [note])
+  // 300 different notes: the first 200, then how many more
+  const odd = Array.from({ length: 300 }, (_, i) => ({ ...base, id: `s${i}`, name: 's', type: 'svg', svg: `<root${i}/>` }))
+  const many: string[] = []
+  validateDesign(rawDesign([rrect('r'), ...odd]), many)
+  assert.equal(many.length, 201)
+  assert.equal(many[0], 'an SVG layer that could not be cleaned (This is not an SVG: its root element is <root0>; dropped)')
+  assert.equal(many[200], 'and 100 more')
+  // svg layers stop at 16 MB of markup between them
+  const pad = (i: number): string => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!--${'p'.repeat(1024 * 1024)}--><rect id="r${i}" width="1" height="1"/></svg>`
+  const svgs: string[] = []
+  const s = validateDesign(rawDesign(Array.from({ length: 20 }, (_, i) => ({ ...base, id: `s${i}`, name: 's', type: 'svg', svg: pad(i) }))), svgs)
+  assert.equal(s.artboards[0].layers.length, 15)
+  assert.deepEqual(svgs, ['an SVG layer past 16 MB of SVG in this design (dropped) (5 times)'])
 })
