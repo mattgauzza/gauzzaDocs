@@ -137,7 +137,7 @@ test('set with part on an instance writes overrides[innerId].text', async () => 
   // overrides as a whole: {} resets them, and each one is checked like a part's
   const reset = await applyDesignOp(f, { op: 'set', layer: 'Step', props: { overrides: {} } }, services)
   const plain = byName(reset.file!, 'Step')
-  assert.deepEqual(plain.type === 'instance' && plain.overrides, {})
+  assert.deepEqual(plain.type === 'instance' && Object.keys(plain.overrides), [])
   await assert.rejects(applyDesignOp(f, { op: 'set', layer: 'Step', props: { overrides: { lbl: { text: 5 } } } }, services), /text must be text/)
   await assert.rejects(applyDesignOp(f, { op: 'set', layer: 'Step', props: { overrides: { lbl: { x: 1 } } } }, services), /can override text/)
 })
@@ -371,7 +371,13 @@ test('a color style fills a rect, and changing the style later changes the rect'
   const t = await applyDesignOp(changed.file!, { op: 'style', text: { name: 'Heading', run: { font: { family: 'Liberation Sans', weight: 700, style: 'normal' }, size: 48 } } }, services)
   assert.deepEqual(t.file!.design.styles.text.map(s => s.name), ['Heading'])
   await assert.rejects(applyDesignOp(f, { op: 'add', type: 'rect', props: { fill: 'style:Nope' } }, services), /No color style "Nope"/)
-  const removed = await applyDesignOp(t.file!, { op: 'style', remove: 'Brand' }, services)
+  // a style in use can't be removed (Ruling 16): the layers using it are listed
+  const ids = ['Box', 'Other'].map(n => byName(t.file!, n).id)
+  await assert.rejects(applyDesignOp(t.file!, { op: 'style', remove: 'Brand' }, services), {
+    message: `Layers use the style "Brand": ${ids.join(', ')}. Change their colors first.`
+  })
+  const freed = await run(t.file!, services, { op: 'set', layer: 'Box', props: { fill: '#000000' } }, { op: 'set', layer: 'Other', props: { fill: null } })
+  const removed = await applyDesignOp(freed.file, { op: 'style', remove: 'Brand' }, services)
   assert.deepEqual(removed.file!.design.styles.colors, [])
   await assert.rejects(applyDesignOp(file, { op: 'style', color: 'Brand=blue' }, services), /#rrggbb/)
 })
@@ -462,6 +468,151 @@ test('an apply batch takes its artboard as the default for every op in it', asyn
   const text = (await applyDesignOp(r.file!, { op: 'read', format: 'text', allArtboards: true }, services)).result as { content: string }
   assert.match(text.content, /Layers on Instagram post:\n {2}\S+ {2}Rectangle 1 {2}rect/)
   assert.match(text.content, /Layers on Second:\n {2}\S+ {2}Rectangle 1 {2}rect/)
+})
+
+// Fix round 1 (Ruling 16)
+
+/** A design with a component "Node" holding a text layer "lbl" and a rect "bg", instanced once as "Step". */
+async function withNode() {
+  const { file, services } = await fresh()
+  const part = (id: string, type: 'rect' | 'text'): Layer =>
+    type === 'text'
+      ? { id, name: id, type, visible: true, locked: false, opacity: 1, blend: 'normal', x: 0, y: 0, width: 100, height: 40, rotation: 0, scaleX: 1, scaleY: 1, mode: 'box', align: 'left', valign: 'top', runs: [{ text: 'Node', font: { family: 'Liberation Sans', weight: 400, style: 'normal' }, size: 16 }] }
+      : { id, name: id, type, visible: true, locked: false, opacity: 1, blend: 'normal', x: 0, y: 0, width: 100, height: 40, rotation: 0, scaleX: 1, scaleY: 1 }
+  const comp = (id: string, name: string, kids: Layer[]) => ({
+    id, name, root: { id: `${id}-root`, name, type: 'group' as const, visible: true, locked: false, opacity: 1, blend: 'normal' as const, x: 0, y: 0, width: 100, height: 40, rotation: 0, scaleX: 1, scaleY: 1, children: kids }
+  })
+  file.design.components.push(comp('node', 'Node', [part('lbl', 'text'), part('bg', 'rect')]), comp('pill', 'Pill', [part('cap', 'text')]))
+  const { file: f } = await run(file, services, { op: 'add', type: 'instance', props: { component: 'Node', name: 'Step' } })
+  return { file: f, services }
+}
+
+test('ungroup refuses while connectors are attached to the group', async () => {
+  const { file, services } = await fresh()
+  const { file: f } = await run(
+    file,
+    services,
+    { op: 'add', type: 'rect', props: { name: 'A' } },
+    { op: 'add', type: 'rect', props: { name: 'B', x: 200 } },
+    { op: 'group', layers: ['A'], name: 'G' },
+    { op: 'add', type: 'connector', props: { name: 'Link', from: 'G', to: 'B' } }
+  )
+  const link = byName(f, 'Link').id
+  await assert.rejects(applyDesignOp(f, { op: 'ungroup', layer: 'G' }, services), { message: `Connectors are attached to G: ${link}. Detach or delete them first.` })
+  const { file: f2 } = await run(f, services, { op: 'delete', layer: 'Link' }, { op: 'ungroup', layer: 'G' })
+  assert.deepEqual(layers(f2).map(l => l.name), ['A', 'B'])
+})
+
+test('overrides are keyed only by the component layers, never reach a prototype, and reset with a new component', async () => {
+  const { file, services } = await withNode()
+  // a __proto__ key, as JSON.parse makes it, is refused like any key that isn't a layer of the component
+  const hostile = JSON.parse('{"__proto__": {"text": "x"}}')
+  await assert.rejects(applyDesignOp(file, { op: 'set', layer: 'Step', props: { overrides: hostile } }, services), { message: 'No layer __proto__ in component Node.' })
+  await assert.rejects(applyDesignOp(file, { op: 'set', layer: 'Step', props: { overrides: { nope: { text: 'x' } } } }, services), { message: 'No layer nope in component Node.' })
+  await assert.rejects(applyDesignOp(file, { op: 'set', layer: 'Step', props: JSON.parse('{"__proto__": {"x": 1}}') }, services), /Unknown property "__proto__"/)
+  assert.equal(({} as Record<string, unknown>).text, undefined, 'no prototype was touched')
+  const ok = await applyDesignOp(file, { op: 'set', layer: 'Step', props: { overrides: { lbl: { text: 'Go' }, bg: { fill: '#ff0000' } } } }, services)
+  const step = byName(ok.file!, 'Step')
+  assert.ok(step.type === 'instance')
+  assert.equal(Object.getPrototypeOf(step.overrides), null)
+  assert.deepEqual({ ...step.overrides }, { lbl: { text: 'Go' }, bg: { fill: { type: 'color', color: '#ff0000' } } })
+  // another component: the old overrides go, and the reply says so; overrides given with it are checked against it
+  const swapped = await applyDesignOp(ok.file!, { op: 'set', layer: 'Step', props: { component: 'Pill' } }, services)
+  const pill = byName(swapped.file!, 'Step')
+  assert.ok(pill.type === 'instance')
+  assert.deepEqual([pill.component, Object.keys(pill.overrides)], ['pill', []])
+  assert.equal((swapped.result as { note?: string }).note, 'The overrides were reset for the new component.')
+  const both = await applyDesignOp(ok.file!, { op: 'set', layer: 'Step', props: { component: 'Pill', overrides: { cap: { text: 'Hi' } } } }, services)
+  const capped = byName(both.file!, 'Step')
+  assert.deepEqual(capped.type === 'instance' && { ...capped.overrides }, { cap: { text: 'Hi' } })
+  assert.equal((both.result as { note?: string }).note, undefined)
+  await assert.rejects(applyDesignOp(ok.file!, { op: 'set', layer: 'Step', props: { component: 'Pill', overrides: { lbl: { text: 'x' } } } }, services), { message: 'No layer lbl in component Pill.' })
+})
+
+test('apply refuses more than 1,000 ops, nested applies and ops that are not ops', async () => {
+  const { file, services } = await fresh()
+  const many = Array.from({ length: 1001 }, () => ({ op: 'add', type: 'rect' }))
+  await assert.rejects(applyDesignOp(file, { op: 'apply', ops: many }, services), /at most 1,000 ops/)
+  const thousand = await applyDesignOp(file, { op: 'apply', ops: many.slice(1) }, services)
+  assert.equal(layers(thousand.file!).length, 1000)
+  await assert.rejects(applyDesignOp(file, { op: 'apply', ops: [{ op: 'add', type: 'rect' }, { op: 'apply', ops: [] }] }, services), { message: "op 2: apply can't hold another apply" })
+  for (const bad of [null, 7, 'add', ['add'], { type: 'rect' }, { op: 5 }]) {
+    await assert.rejects(applyDesignOp(file, { op: 'apply', ops: [{ op: 'add', type: 'rect' }, bad] }, services), { message: 'op 2: each op needs an op name' }, JSON.stringify(bad))
+  }
+  // hostile shapes in an op's own fields
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'rect', props: [1, 2] }, services), /props must be an object/)
+  await assert.rejects(applyDesignOp(file, { op: 'set', layer: 5, props: { x: 1 } }, services), /Name a layer/)
+  await assert.rejects(applyDesignOp(file, { op: 'group', layers: { a: 1 } }, services), /needs layers/)
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'rect', props: { timing: [1, 2] } }, services), /timing must be/)
+})
+
+test('a group never moves inside itself', async () => {
+  const { file, services } = await fresh()
+  const { file: f } = await run(
+    file,
+    services,
+    { op: 'add', type: 'rect', props: { name: 'A' } },
+    { op: 'group', layers: ['A'], name: 'Inner' },
+    { op: 'group', layers: ['Inner'], name: 'Outer' }
+  )
+  await assert.rejects(applyDesignOp(f, { op: 'move', layer: 'Outer', to: { parent: 'Inner' } }, services), { message: "A group can't go inside itself" })
+  await assert.rejects(applyDesignOp(f, { op: 'move', layer: 'Inner', to: { parent: 'Inner' } }, services), { message: "A group can't go inside itself" })
+})
+
+test('timing keeps only start and end, coordinates and sizes are clamped, and summaries cut long names', async () => {
+  const { file, services } = await fresh()
+  const t = await applyDesignOp(file, { op: 'add', type: 'rect', props: { name: 'T', timing: { start: 1, end: 3, tracks: [1], in: 'x' } } }, services)
+  assert.deepEqual(byName(t.file!, 'T').timing, { start: 1, end: 3 })
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'rect', props: { timing: { start: 4, end: 2 } } }, services), { message: 'timing start must be at or before its end' })
+  const far = await run(
+    file,
+    services,
+    { op: 'add', type: 'rect', props: { name: 'Far', x: 1e9, y: -1e12, width: 1e9, height: 5, strokeWidth: 1e9 } },
+    { op: 'add', type: 'text', props: { name: 'Big', text: 'Hi', size: 1e9 } }
+  )
+  const r = byName(far.file, 'Far')
+  assert.deepEqual([r.x, r.y, r.width, r.height, r.strokeWidth], [1e7, -1e7, 1e5, 5, 1e5])
+  const big = byName(far.file, 'Big')
+  assert.equal(big.type === 'text' && big.runs[0].size, 1e5)
+  const long = 'A very long layer name that keeps going and going'
+  const s = await applyDesignOp(file, { op: 'add', type: 'rect', props: { name: long } }, services)
+  assert.equal(s.summary, `added ${long.slice(0, 37)}...`)
+  const a = await applyDesignOp(file, { op: 'artboard', action: 'add', name: long }, services)
+  assert.equal(a.summary, `added artboard ${long.slice(0, 37)}...`)
+})
+
+test('JPEG, GIF and WebP headers are read for their size, and a truncated header is refused', async () => {
+  const { file, services } = await fresh()
+  const b64 = (b: Uint8Array) => Buffer.from(b).toString('base64')
+  const jpeg = (w: number, h: number) => {
+    const b = new Uint8Array(32)
+    b.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, h >> 8, h & 255, w >> 8, w & 255, 3])
+    return b
+  }
+  const gif = (w: number, h: number) => {
+    const b = new Uint8Array(16)
+    b.set([...'GIF89a'].map(c => c.charCodeAt(0)))
+    b.set([w & 255, w >> 8, h & 255, h >> 8], 6)
+    return b
+  }
+  const webp = (w: number, h: number) => {
+    const b = new Uint8Array(32)
+    b.set([...'RIFF'].map(c => c.charCodeAt(0)))
+    b.set([...'WEBPVP8X'].map(c => c.charCodeAt(0)), 8)
+    b.set([(w - 1) & 255, ((w - 1) >> 8) & 255, (w - 1) >> 16, (h - 1) & 255, ((h - 1) >> 8) & 255, (h - 1) >> 16], 24)
+    return b
+  }
+  for (const [label, bytes, ext, w, h] of [['jpeg', jpeg(640, 480), 'jpg', 640, 480], ['gif', gif(32, 16), 'gif', 32, 16], ['webp', webp(300, 200), 'webp', 300, 200]] as const) {
+    const r = await applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(bytes) } }, services)
+    const img = layers(r.file!)[0]
+    assert.ok(img.type === 'image', label)
+    assert.match(img.asset, new RegExp(`^assets/[0-9a-f]{64}\\.${ext}$`), label)
+    assert.deepEqual([img.width, img.height], [w, h], label)
+  }
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(jpeg(9000, 9000)) } }, services), { message: "Images over 50 megapixels can't be placed." })
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(webp(16384, 16384)) } }, services), /50 megapixels/)
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(pngHeader(10, 10).slice(0, 20)) } }, services), /PNG, JPEG, GIF or WebP/)
+  await assert.rejects(applyDesignOp(file, { op: 'add', type: 'image', props: { data: b64(gif(10, 10).slice(0, 8)) } }, services), /PNG, JPEG, GIF or WebP/)
 })
 
 test('designOps works on a design payload and refuses others', async () => {

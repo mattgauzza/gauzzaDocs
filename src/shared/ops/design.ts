@@ -8,8 +8,8 @@ import { cleanText, num as fmt, textReport } from '../design/text'
 import type { Artboard, BlendMode, Component, Design, DesignFile, Layer, Override, Paint, TextRun } from '../design/types'
 import type { AgentOp } from '../types'
 import {
-  DEFAULT_FONT, type DesignDoc, type GroupLayer, boundsOf, boundsOfLayers, componentOf, contains, endOf, fontOf, hexColor, hits,
-  layerOn, list, locate, nameOf, nextName, number, oneOf, overrideOf, paintOf, propsOf, refit, shift, writeProps
+  DEFAULT_FONT, type DesignDoc, type GroupLayer, MAX_SIZE, boundsOf, boundsOfLayers, componentOf, contains, coord, endOf, fontOf,
+  hexColor, hits, layerOn, list, locate, nameOf, nextName, number, oneOf, overrideOf, paintOf, propsOf, refit, shift, writeProps
 } from './designLayers'
 import { OpError, type OpHandler, type OpServices, str } from './types'
 
@@ -108,6 +108,12 @@ async function runOp(d: Draft, op: AgentOp): Promise<unknown> {
 /** strokeWidth as "stroke width". */
 const words = (key: string): string => key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
 
+/** A name as a summary shows it: at most 40 characters, on one line. */
+const named = (name: string): string => {
+  const s = String(name ?? '').replace(/\s+/g, ' ').trim()
+  return s.length > 40 ? s.slice(0, 37) + '...' : s
+}
+
 /** The changes as one plain past-tense phrase: "added 3 layers", "set fill on Logo and moved Title". */
 function describe(changes: Change[]): string {
   const merged: Change[] = []
@@ -118,7 +124,7 @@ function describe(changes: Change[]): string {
   }
   const phrases = merged.map(c => {
     if (!c.names.length) return c.verb
-    const subject = c.names.length === 1 ? c.names[0] : `${c.names.length} layers`
+    const subject = c.names.length === 1 ? named(c.names[0]) : `${c.names.length} layers`
     return c.what ? `${c.verb} ${c.what} on ${subject}` : `${c.verb} ${subject}`
   })
   const parts = [...new Set(phrases)]
@@ -328,17 +334,19 @@ function pathBox(dpath: string): Box {
 function setOp(d: Draft, op: AgentOp): unknown {
   const found = targets(d, op)
   let what: string[] = []
+  const notes: string[] = []
   for (const { board, layer } of found) {
     if (op.part !== undefined) what = setPart(d, layer, op)
     else {
       const props = propsOf(op, layer.type)
       if (!Object.keys(props).length) throw new OpError('"set" needs props (what to change)')
-      what = writeProps(d, board, layer, props)
+      what = writeProps(d, board, layer, props, notes)
       refit(board, new Set([layer.id]))
     }
   }
   d.changes.push({ verb: 'set', names: found.map(f => f.layer.name), what: what.length > 3 ? `${what.length} properties` : list(what.map(words)) })
-  return { ids: found.map(f => f.layer.id) }
+  const ids = found.map(f => f.layer.id)
+  return notes.length ? { ids, note: [...new Set(notes)].join(' ') } : { ids }
 }
 
 /** Writes an instance's override for one of its component's layers. */
@@ -439,6 +447,12 @@ function ungroupOp(d: Draft, op: AgentOp): unknown {
   const board = boardOf(d, op)
   const g = layerOn(board, op.layer)
   if (g.type !== 'group') throw new OpError(`"${g.name}" isn't a group`)
+  // the group goes, so a connector joining it would join nothing
+  const attached: string[] = []
+  walk(board.layers, l => {
+    if (l.type === 'connector' && (l.from?.layer === g.id || l.to?.layer === g.id)) attached.push(l.id)
+  })
+  if (attached.length) throw new OpError(`Connectors are attached to ${g.name}: ${attached.join(', ')}. Detach or delete them first.`)
   const at = locate(board, g.id)
   const kids = g.children
   // what the group did to its children, carried onto them: rotation and scale about its center, opacity, hiding
@@ -528,7 +542,7 @@ function duplicateOp(d: Draft, op: AgentOp): unknown {
     if (l.from && map.has(l.from.layer)) l.from = { ...l.from, layer: map.get(l.from.layer)! }
     if (l.to && map.has(l.to.layer)) l.to = { ...l.to, layer: map.get(l.to.layer)! }
   })
-  shift(copy, op.dx === undefined ? 0 : number('dx', op.dx), op.dy === undefined ? 0 : number('dy', op.dy))
+  shift(copy, op.dx === undefined ? 0 : coord('dx', op.dx), op.dy === undefined ? 0 : coord('dy', op.dy))
   const at = locate(board, src.id)
   at.list.splice(at.index + 1, 0, copy)
   if (at.parent) refit(board, new Set([at.parent.id]))
@@ -574,22 +588,22 @@ function artboardOp(d: Draft, op: AgentOp): unknown {
       id: newId(d.taken), name: op.name === undefined ? `Artboard ${n}` : fresh(op.name), ...size, background: { type: 'color', color: '#ffffff' }, layers: []
     }
     boards.push(board)
-    d.changes.push({ verb: `added artboard ${board.name}`, names: [] })
+    d.changes.push({ verb: `added artboard ${named(board.name)}`, names: [] })
     return { id: board.id }
   }
   const board = boardOf(d, op)
   if (action === 'resize') {
     const size = sizeOf(op.size)
     Object.assign(board, size)
-    d.changes.push({ verb: `resized ${board.name} to ${fmt(size.width)}x${fmt(size.height)}`, names: [] })
+    d.changes.push({ verb: `resized ${named(board.name)} to ${fmt(size.width)}x${fmt(size.height)}`, names: [] })
   } else if (action === 'rename') {
     const old = board.name
     board.name = fresh(op.name)
-    d.changes.push({ verb: `renamed ${old} to ${board.name}`, names: [] })
+    d.changes.push({ verb: `renamed ${named(old)} to ${named(board.name)}`, names: [] })
   } else {
     if (boards.length === 1) throw new OpError('A design needs at least one artboard')
     boards.splice(boards.indexOf(board), 1)
-    d.changes.push({ verb: `deleted artboard ${board.name}`, names: [] })
+    d.changes.push({ verb: `deleted artboard ${named(board.name)}`, names: [] })
   }
   return { id: board.id }
 }
@@ -614,14 +628,14 @@ function styleOp(d: Draft, op: AgentOp): unknown {
     const had = styles.colors.find(c => c.name === name)
     if (had) had.color = color
     else styles.colors.push({ name, color })
-    d.changes.push({ verb: `${had ? 'changed' : 'added'} style ${name}`, names: [] })
+    d.changes.push({ verb: `${had ? 'changed' : 'added'} style ${named(name)}`, names: [] })
   }
   if (op.text !== undefined) {
     if (!op.text || typeof op.text !== 'object') throw new OpError('text must be { name, run: { font, size } }')
     const t = op.text as Record<string, unknown>
     const name = nameOf('style name', t.name)
     const r = (t.run ?? {}) as Record<string, unknown>
-    const run: Omit<TextRun, 'text'> = { font: fontOf(r.font ?? DEFAULT_FONT.family), size: number('size', r.size ?? 24, 0.1) }
+    const run: Omit<TextRun, 'text'> = { font: fontOf(r.font ?? DEFAULT_FONT.family), size: Math.min(MAX_SIZE, number('size', r.size ?? 24, 0.1)) }
     if (r.color !== undefined) {
       const p = paintOf(d, 'color', r.color)
       if (p) run.color = p
@@ -631,17 +645,39 @@ function styleOp(d: Draft, op: AgentOp): unknown {
     const had = styles.text.find(s => s.name === name)
     if (had) had.run = run
     else styles.text.push({ name, run })
-    d.changes.push({ verb: `${had ? 'changed' : 'added'} style ${name}`, names: [] })
+    d.changes.push({ verb: `${had ? 'changed' : 'added'} style ${named(name)}`, names: [] })
   }
   if (op.remove !== undefined) {
     const name = nameOf('style name', op.remove)
-    const before = styles.colors.length + styles.text.length
+    if (!styles.colors.some(c => c.name === name) && !styles.text.some(s => s.name === name)) throw new OpError(`No style "${name}"`)
+    const users = styleUsers(d.design, name)
+    if (users.length) {
+      const shown = users.length > 20 ? `${users.slice(0, 20).join(', ')} and ${users.length - 20} more` : users.join(', ')
+      throw new OpError(`Layers use the style "${name}": ${shown}. Change their colors first.`)
+    }
     styles.colors = styles.colors.filter(c => c.name !== name)
     styles.text = styles.text.filter(s => s.name !== name)
-    if (styles.colors.length + styles.text.length === before) throw new OpError(`No style "${name}"`)
-    d.changes.push({ verb: `removed style ${name}`, names: [] })
+    d.changes.push({ verb: `removed style ${named(name)}`, names: [] })
   }
   return { colors: styles.colors.map(c => c.name), text: styles.text.map(s => s.name) }
+}
+
+/**
+ * The ids of every layer that paints with the color style `name`: its fill or stroke, a text run's color, or an
+ * instance's override of one, on any artboard or in a component.
+ */
+function styleUsers(design: Design, name: string): string[] {
+  const uses = (p: unknown): boolean => !!p && typeof p === 'object' && (p as Paint).type === 'style' && (p as { ref?: unknown }).ref === name
+  const out: string[] = []
+  const roots = [...design.artboards.flatMap(a => a.layers), ...(design.components ?? []).flatMap(c => (c.root ? [c.root] : []))]
+  walk(roots, l => {
+    const overrides = l.type === 'instance' ? Object.values(l.overrides ?? {}) : []
+    if (
+      uses(l.fill) || uses(l.stroke) || (l.type === 'text' && (l.runs ?? []).some(r => uses(r?.color))) ||
+      overrides.some(o => uses(o?.fill) || uses(o?.stroke))
+    ) out.push(l.id)
+  })
+  return out
 }
 
 function svgOp(d: Draft, op: AgentOp): unknown {
@@ -658,20 +694,24 @@ function svgOp(d: Draft, op: AgentOp): unknown {
   const r = importSvg(op.svg, name, { fonts: d.services.fonts, taken: d.taken })
   Object.assign(d.assets, r.assets)
   const g = r.group
-  shift(g, op.x === undefined ? 0 : number('x', op.x) - g.x, op.y === undefined ? 0 : number('y', op.y) - g.y)
+  shift(g, op.x === undefined ? 0 : coord('x', op.x) - g.x, op.y === undefined ? 0 : coord('y', op.y) - g.y)
   insert(board, g, op.parent, op.index)
   refit(board, new Set([g.id]))
-  d.changes.push({ verb: `imported SVG as ${name}`, names: [] })
+  d.changes.push({ verb: `imported SVG as ${named(name)}`, names: [] })
   return { id: g.id, removed: r.removed, kept: r.kept }
 }
 
+/** Most ops one apply batch may hold. */
+export const MAX_BATCH = 1000
+
 async function applyOp(d: Draft, op: AgentOp): Promise<unknown> {
   if (!Array.isArray(op.ops)) throw new OpError('apply needs ops (a list of ops)')
+  if (op.ops.length > MAX_BATCH) throw new OpError(`apply takes at most ${MAX_BATCH.toLocaleString('en-US')} ops at once; send the rest in another batch`)
   const results: unknown[] = []
   for (let i = 0; i < op.ops.length; i++) {
     const sub = op.ops[i] as AgentOp
     try {
-      if (!sub || typeof sub !== 'object' || typeof sub.op !== 'string') throw new OpError('each op needs an op name')
+      if (!sub || typeof sub !== 'object' || Array.isArray(sub) || typeof sub.op !== 'string') throw new OpError('each op needs an op name')
       if (sub.op === 'apply') throw new OpError("apply can't hold another apply")
       // the batch's artboard is each op's default
       results.push(await runOp(d, op.artboard !== undefined && sub.artboard === undefined ? { ...sub, artboard: op.artboard } : sub))

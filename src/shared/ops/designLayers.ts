@@ -181,6 +181,11 @@ const BY_TYPE: Record<string, string[]> = {
 const ALIASES: Record<string, string> = { w: 'width', h: 'height' }
 /** The font a new text layer or run gets when none is named: installed on Windows and macOS, and metric twins elsewhere. */
 export const DEFAULT_FONT: FontRef = { family: 'Arial', weight: 400, style: 'normal' }
+/** Coordinates an op writes are clamped to +/- this, and sizes (width, height, font size, stroke width) to MAX_SIZE. */
+export const MAX_COORD = 1e7
+export const MAX_SIZE = 1e5
+export const coord = (key: string, v: unknown): number => Math.min(MAX_COORD, Math.max(-MAX_COORD, number(key, v)))
+const size = (key: string, v: unknown, min: number): number => Math.min(MAX_SIZE, number(key, v, min))
 
 export const number = (key: string, v: unknown, min?: number, max?: number): number => {
   const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v
@@ -318,12 +323,15 @@ function shadowOf(v: unknown): Shadow | undefined {
   return { x: number('shadow x', s.x ?? 0), y: number('shadow y', s.y ?? 0), blur: number('shadow blur', s.blur ?? 0, 0), color }
 }
 
+/** A layer's start and end in seconds (nothing else is kept), the start at or before the end. */
 function timingOf(v: unknown): Timing | undefined {
   if (v === null || v === 'none') return undefined
-  if (!v || typeof v !== 'object') throw new OpError('timing must be { start?, end? } in seconds, or none')
-  const t = { ...(v as Timing) }
-  if (t.start !== undefined) t.start = number('timing start', t.start, 0)
-  if (t.end !== undefined) t.end = number('timing end', t.end, 0)
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new OpError('timing must be { start?, end? } in seconds, or none')
+  const given = v as Record<string, unknown>
+  const t: Timing = {}
+  if (given.start !== undefined) t.start = number('timing start', given.start, 0)
+  if (given.end !== undefined) t.end = number('timing end', given.end, 0)
+  if (t.start !== undefined && t.end !== undefined && t.start > t.end) throw new OpError('timing start must be at or before its end')
   return t
 }
 
@@ -347,11 +355,17 @@ export function overrideOf(doc: DesignDoc, props: Record<string, unknown>, o: Ov
   return out
 }
 
-/** A whole set of overrides, keyed by inner layer id; {} resets them. */
-function overridesOf(doc: DesignDoc, v: unknown): Record<string, Override> {
+/**
+ * A whole set of overrides for an instance of `comp`, keyed by the ids of the component's own layers; {} resets them.
+ * Built without a prototype, so no key (__proto__ included) can reach one.
+ */
+function overridesOf(doc: DesignDoc, comp: Component, v: unknown): Record<string, Override> {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new OpError('overrides must be an object keyed by inner layer id')
-  const out: Record<string, Override> = {}
+  const inner = new Set<string>()
+  if (comp.root) walk([comp.root], l => inner.add(l.id))
+  const out = Object.create(null) as Record<string, Override>
   for (const [id, o] of Object.entries(v as Record<string, unknown>)) {
+    if (!inner.has(id)) throw new OpError(`No layer ${id} in component ${comp.name}.`)
     if (!o || typeof o !== 'object' || Array.isArray(o)) throw new OpError(`The override for ${id} must be an object`)
     out[id] = overrideOf(doc, o as Record<string, unknown>)
   }
@@ -390,9 +404,10 @@ export function propsOf(op: AgentOp, type: string): Record<string, unknown> {
 
 /**
  * Writes props onto a layer. Text props reach every run; a new size of a path scales its data, and of a group its
- * children; x and y move a group's children with it. Returns the names of what was written, for the summary.
+ * children; x and y move a group's children with it. Coordinates are clamped to +/- MAX_COORD and sizes to MAX_SIZE.
+ * Returns the names of what was written, for the summary; `notes` hears of anything else that changed with them.
  */
-export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Record<string, unknown>): string[] {
+export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Record<string, unknown>, notes: string[] = []): string[] {
   const L = l as Layer & Record<string, unknown>
   const runs = (f: (r: TextRun) => void) => {
     if (l.type === 'text') for (const r of l.runs) f(r)
@@ -407,24 +422,26 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
         l.name = nameOf('name', v)
         break
       case 'x':
-        dx = number('x', v) - fin(l.x, 0)
+        dx = coord('x', v) - fin(l.x, 0)
         break
       case 'y':
-        dy = number('y', v) - fin(l.y, 0)
+        dy = coord('y', v) - fin(l.y, 0)
         break
       case 'width':
-        w = number('width', v, 0)
+        w = size('width', v, 0)
         break
       case 'height':
-        h = number('height', v, 0)
+        h = size('height', v, 0)
         break
       case 'rotation':
       case 'scaleX':
       case 'scaleY':
         L[key] = number(key, v)
         break
-      case 'blur':
       case 'strokeWidth':
+        L[key] = size(key, v, 0)
+        break
+      case 'blur':
       case 'radius':
         L[key] = number(key, v, 0)
         break
@@ -484,7 +501,7 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
         runs(r => (r.font = fontOf(v, r.font)))
         break
       case 'size': {
-        const n = number('size', v, 0.1)
+        const n = size('size', v, 0.1)
         runs(r => (r.size = n))
         break
       }
@@ -520,8 +537,8 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
         const img = imageAsset(doc, v)
         L.asset = img.asset
         if (props.width === undefined && props.height === undefined) [w, h] = [img.width, img.height]
-        else if (props.width === undefined) w = (img.width * number('height', props.height, 0)) / img.height
-        else if (props.height === undefined) h = (img.height * number('width', props.width, 0)) / img.width
+        else if (props.width === undefined) w = (img.width * size('height', props.height, 0)) / img.height
+        else if (props.height === undefined) h = (img.height * size('width', props.width, 0)) / img.width
         break
       }
       case 'asset':
@@ -530,12 +547,17 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
       case 'fit':
         L.fit = oneOf('fit', v, ['fill', 'contain', 'cover'] as const)
         break
-      case 'component':
-        L.component = componentOf(doc, v).id
+      case 'component': {
+        // overrides are keyed by the old component's layers, so another component starts without them
+        const id = componentOf(doc, v).id
+        const had = L.overrides && typeof L.overrides === 'object' && Object.keys(L.overrides).length > 0
+        if (id !== L.component && had && props.overrides === undefined) notes.push('The overrides were reset for the new component.')
+        if (id !== L.component) L.overrides = {}
+        L.component = id
         break
+      }
       case 'overrides':
-        L.overrides = overridesOf(doc, v)
-        break
+        break // after the loop, against the component the layer ends up with
       case 'from':
       case 'to':
         L[key] = endOf(board, key, v)
@@ -551,12 +573,16 @@ export function writeProps(doc: DesignDoc, board: Artboard, l: Layer, props: Rec
         break
       case 'points':
         if (v === null || v === 'none') delete L.points
-        else if (Array.isArray(v)) L.points = v.map((p, i) => [number(`point ${i + 1} x`, (p as unknown[])?.[0]), number(`point ${i + 1} y`, (p as unknown[])?.[1])])
+        else if (Array.isArray(v)) L.points = v.map((p, i) => [coord(`point ${i + 1} x`, (p as unknown[])?.[0]), coord(`point ${i + 1} y`, (p as unknown[])?.[1])])
         else throw new OpError('points must be a list of [x, y]')
         break
     }
   }
-  if (w !== undefined || h !== undefined) resize(l, w ?? fin(l.width, 0), h ?? fin(l.height, 0))
+  if (props.overrides !== undefined) {
+    if (l.type !== 'instance') throw new OpError('Only an instance has overrides')
+    L.overrides = overridesOf(doc, componentOf(doc, l.component), props.overrides)
+  }
+  if (w !== undefined || h !== undefined) resize(l, Math.min(MAX_SIZE, w ?? fin(l.width, 0)), Math.min(MAX_SIZE, h ?? fin(l.height, 0)))
   shift(l, dx, dy)
   if (l.type === 'text') fitText(doc, l, props)
   return Object.keys(props)
