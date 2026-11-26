@@ -18,8 +18,52 @@ function facesOf(parsed: any): any[] {
   return Array.isArray(parsed?.fonts) ? parsed.fonts : [parsed]
 }
 
-const isItalic = (f: any): boolean => !!f.italicAngle || !!f.head?.macStyle?.italic || /italic|oblique/i.test(f.subfamilyName || '')
-const weightOf = (f: any): number => f['OS/2']?.usWeightClass || 400
+/** Most faces a collection may hold; larger ones are refused. */
+export const MAX_COLLECTION_FACES = 256
+
+/** True when the bytes are a collection with more faces than we accept. */
+export function collectionTooBig(bytes: Uint8Array): boolean {
+  if (bytes.length < 12) return false
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  return v.getUint32(0) === 0x74746366 && v.getUint32(8) > MAX_COLLECTION_FACES
+}
+
+/** Italic from OS/2 fsSelection (bit 0 italic, bit 9 oblique); the italic angle only when there is no OS/2 table. */
+export function isItalic(f: any): boolean {
+  const os2 = f?.['OS/2']
+  if (os2) {
+    const s = os2.fsSelection
+    if (typeof s === 'number') return !!(s & 1) || !!(s & 512)
+    if (s && typeof s === 'object') return !!s.italic || !!s.oblique
+  }
+  return !!f?.italicAngle
+}
+
+/** A weight in 1..1000, else 400. */
+export const normWeight = (w: unknown): number => (typeof w === 'number' && w >= 1 && w <= 1000 ? w : 400)
+export const weightOf = (f: any): number => normWeight(f?.['OS/2']?.usWeightClass)
+
+/** The item with the weight CSS font matching prefers for `target`. The first of equal weights wins. */
+export function closestWeight<T>(items: T[], target: number, weight: (t: T) => number): T | undefined {
+  const t = normWeight(target)
+  const w = (x: T) => normWeight(weight(x))
+  const asc = (a: T, b: T) => w(a) - w(b)
+  const desc = (a: T, b: T) => w(b) - w(a)
+  let order: T[]
+  if (t < 400) order = [...items.filter(x => w(x) <= t).sort(desc), ...items.filter(x => w(x) > t).sort(asc)]
+  else if (t <= 500)
+    order = [...items.filter(x => w(x) >= t && w(x) <= 500).sort(asc), ...items.filter(x => w(x) < t).sort(desc), ...items.filter(x => w(x) > 500).sort(asc)]
+  else order = [...items.filter(x => w(x) >= t).sort(asc), ...items.filter(x => w(x) < t).sort(desc)]
+  return order[0]
+}
+
+/** Same style first, by CSS weight order; when that style has no face, the nearest weight in the other style. */
+export function pickStyled<T>(
+  items: T[], style: 'normal' | 'italic', target: number, weight: (t: T) => number, italic: (t: T) => boolean
+): T | undefined {
+  const same = items.filter(x => italic(x) === (style === 'italic'))
+  return closestWeight(same.length ? same : items, target, weight)
+}
 
 /** True when the font's OS/2 fsType is 0 or 8 (installable or editable embedding). A font with no OS/2 table is not. */
 export function canPack(bytes: Uint8Array): boolean {
@@ -29,6 +73,7 @@ export function canPack(bytes: Uint8Array): boolean {
     if (tag === 0x74746366) {
       // ttcf: every face in the collection must allow packing
       const n = v.getUint32(8)
+      if (n > MAX_COLLECTION_FACES) return false
       for (let i = 0; i < n; i++) if (!tableAllows(v, bytes, v.getUint32(12 + i * 4))) return false
       return n > 0
     }
@@ -55,24 +100,22 @@ export function packedFamily(assetName: string): string {
   return 'gd-' + base.slice(0, 12).toLowerCase()
 }
 
-/** The face of a parsed font or collection that a reference asks for. */
-function pickFace(parsed: any, ref: FontRef): any {
+/** The face of a parsed font or collection that a reference asks for, or null when a collection has no such face. */
+function pickFace(parsed: any, ref: FontRef): any | null {
   const faces = facesOf(parsed)
-  let face = faces.length > 1 ? faces.find(f => ref.postscript && f.postscriptName === ref.postscript) : faces[0]
-  if (!face) {
+  let face: any
+  if (Array.isArray(parsed?.fonts)) {
     const fam = faces.filter(f => (f.familyName || '').toLowerCase() === ref.family.toLowerCase())
-    const pool = fam.length ? fam : faces
-    const same = pool.filter(f => isItalic(f) === (ref.style === 'italic'))
-    const c = same.length ? same : pool
-    face = c.reduce((a, b) => (Math.abs(weightOf(b) - ref.weight) < Math.abs(weightOf(a) - ref.weight) ? b : a))
-  }
-  const wght = face.variationAxes?.wght
-  if (wght && typeof face.getVariation === 'function') {
-    try {
-      return face.getVariation({ wght: Math.min(wght.max, Math.max(wght.min, ref.weight)) })
-    } catch {
-      return face
+    face = ref.postscript ? fam.find(f => f.postscriptName === ref.postscript) : pickStyled(fam, ref.style, ref.weight, weightOf, isItalic)
+    if (!face) return null
+  } else face = faces[0]
+  try {
+    const wght = face.variationAxes?.wght
+    if (wght && typeof face.getVariation === 'function') {
+      return face.getVariation({ wght: Math.min(wght.max, Math.max(wght.min, normWeight(ref.weight))) })
     }
+  } catch {
+    // an unreadable variation table: use the default instance
   }
   return face
 }
@@ -104,9 +147,16 @@ export async function fontsFor(
   fallbackBytes: Uint8Array
 ): Promise<FontSource> {
   const fk = await fontkit()
+  const parsedBytes = new WeakMap<Uint8Array, any>() // a collection is parsed once per buffer, not once per ref
   const parse = (bytes: Uint8Array, ref: FontRef): any | null => {
     try {
-      return pickFace(fk.create(bytes), ref)
+      let parsed = parsedBytes.get(bytes)
+      if (!parsed) {
+        if (collectionTooBig(bytes)) return null
+        parsed = fk.create(bytes)
+        parsedBytes.set(bytes, parsed)
+      }
+      return pickFace(parsed, ref)
     } catch {
       return null
     }

@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { test } from 'node:test'
 import { assetName } from '../src/core/formats/design'
 import { fontFaceBytes, listFontFaces } from '../src/core/systemFonts'
-import { canPack, fontsFor, packedFamily } from '../src/shared/design/fonts'
+import { canPack, closestWeight, fontsFor, isItalic, normWeight, packedFamily } from '../src/shared/design/fonts'
 import { newDesign } from '../src/shared/design/model'
 import type { Design, FontRef, Layer } from '../src/shared/design/types'
 
@@ -77,7 +77,115 @@ test('fontFaceBytes returns null for an unknown family', async () => {
   assert.equal(await fontFaceBytes({ family: 'No Such Font Anywhere', weight: 400, style: 'normal' }), null)
 })
 
-const cambria = 'C:/Windows/Fonts/cambria.ttc'
+const bold = new Uint8Array(fs.readFileSync(dir + 'LiberationSans-Bold.ttf'))
+const italic = new Uint8Array(fs.readFileSync(dir + 'LiberationSans-Italic.ttf'))
+
+/** A .ttc holding the fonts, with each font's table offsets rebased to file positions. */
+function makeTtc(fonts: Uint8Array[]): Uint8Array {
+  const starts: number[] = []
+  let pos = 12 + fonts.length * 4
+  for (const f of fonts) {
+    starts.push(pos)
+    pos += (f.length + 3) & ~3
+  }
+  const out = new Uint8Array(pos)
+  const v = new DataView(out.buffer)
+  out.set([0x74, 0x74, 0x63, 0x66]) // ttcf
+  v.setUint32(4, 0x00010000)
+  v.setUint32(8, fonts.length)
+  fonts.forEach((f, i) => {
+    v.setUint32(12 + i * 4, starts[i])
+    out.set(f, starts[i])
+    const n = v.getUint16(starts[i] + 4)
+    for (let t = 0; t < n; t++) {
+      const rec = starts[i] + 12 + t * 16
+      v.setUint32(rec + 8, v.getUint32(rec + 8) + starts[i])
+    }
+  })
+  return out
+}
+const ttc = makeTtc([regular, bold])
+const ref = (over: Partial<FontRef>): FontRef => ({ family: 'Liberation Sans', weight: 400, style: 'normal', ...over })
+
+test('a collection: pick by postscript and by weight, and it can be packed', async () => {
+  assert.equal(canPack(ttc), true)
+  const r = ref({ weight: 700 })
+  const asset = assetName(ttc, 'ttc')
+  const d = designWith(r)
+  d.artboards[0].layers.push({ ...textLayer(ref({ postscript: 'LiberationSans' })), id: 't2' })
+  d.artboards[0].layers.push({ ...textLayer(ref({})), id: 't3' })
+  const src = await fontsFor(d, {}, async () => ttc, regular)
+  assert.equal(src.get(r).font.postscriptName, 'LiberationSans-Bold')
+  assert.equal(src.get(ref({ postscript: 'LiberationSans' })).font.postscriptName, 'LiberationSans')
+  assert.equal(src.get(ref({})).font.postscriptName, 'LiberationSans')
+  assert.ok(asset.endsWith('.ttc'))
+})
+
+test('a packed face beats a fetched one of the same family', async () => {
+  const asset = assetName(bold, 'ttf')
+  const r = ref({ weight: 700, asset })
+  const src = await fontsFor(designWith(r), { [asset]: bold }, async () => regular, regular)
+  const got = src.get(r)
+  assert.equal(got.font.postscriptName, 'LiberationSans-Bold')
+  assert.equal(got.packedFamily, packedFamily(asset))
+})
+
+test('a packed collection with no matching family or postscript is skipped for fetch', async () => {
+  const asset = assetName(ttc, 'ttc')
+  const wrongFamily = ref({ family: 'Other Family', asset })
+  const wrongPs = ref({ asset: asset + 'x', postscript: 'Nope' })
+  const d = designWith(wrongFamily)
+  d.artboards[0].layers.push({ ...textLayer(wrongPs), id: 't2' })
+  const src = await fontsFor(d, { [asset]: ttc, [asset + 'x']: ttc }, async () => italic, regular)
+  for (const r of [wrongFamily, wrongPs]) {
+    const got = src.get(r)
+    assert.equal(got.packedFamily, undefined)
+    assert.equal(got.font.postscriptName, 'LiberationSans-Italic')
+  }
+  const none = await fontsFor(designWith(wrongFamily), { [asset]: ttc }, async () => null, regular)
+  assert.equal(none.get(wrongFamily).missing, true)
+})
+
+test('an italic that does not exist gives the nearest upright weight', async () => {
+  const src = await fontsFor(designWith(ref({ style: 'italic', weight: 700 })), {}, async () => ttc, regular)
+  assert.equal(src.get(ref({ style: 'italic', weight: 700 })).font.postscriptName, 'LiberationSans-Bold')
+  const it = await fontsFor(designWith(ref({ style: 'italic' })), {}, async () => makeTtc([regular, italic]), regular)
+  assert.equal(it.get(ref({ style: 'italic' })).font.postscriptName, 'LiberationSans-Italic')
+})
+
+test('weights follow CSS font matching order and bad weights count as 400', () => {
+  const pick = (ws: number[], t: number) => closestWeight(ws, t, w => w)
+  assert.equal(pick([100, 300, 500, 700], 350), 300)
+  assert.equal(pick([100, 300, 500, 700], 250), 100)
+  assert.equal(pick([200, 300, 600], 400), 300)
+  assert.equal(pick([200, 450, 600], 400), 450)
+  assert.equal(pick([200, 300, 800], 600), 800)
+  assert.equal(pick([200, 300, 500], 600), 500)
+  assert.equal(normWeight(0), 400)
+  assert.equal(normWeight(5000), 400)
+  assert.equal(normWeight(NaN), 400)
+  assert.equal(isItalic({ 'OS/2': { fsSelection: { italic: true } } }), true)
+  assert.equal(isItalic({ 'OS/2': { fsSelection: 512 }, italicAngle: 0 }), true)
+  assert.equal(isItalic({ 'OS/2': { fsSelection: 0 }, italicAngle: -12 }), false)
+  assert.equal(isItalic({ italicAngle: -12 }), true)
+})
+
+test('canPack refuses a collection with too many faces', () => {
+  const big = new Uint8Array(ttc)
+  new DataView(big.buffer).setUint32(8, 257)
+  assert.equal(canPack(big), false)
+})
+
+const bahn = 'C:/Windows/Fonts/bahnschrift.ttf'
+test('a variable font lists several weights', { skip: !fs.existsSync(bahn) }, async () => {
+  const faces = (await listFontFaces()).filter(f => f.family === 'Bahnschrift')
+  assert.ok(new Set(faces.map(f => f.weight)).size >= 3)
+  assert.ok(faces.every(f => f.postscript.startsWith('Bahnschrift-')))
+  const bytes = await fontFaceBytes({ family: 'Bahnschrift', weight: 700, style: 'normal' })
+  assert.ok(bytes && bytes.length > 1000)
+})
+
+const cambria ='C:/Windows/Fonts/cambria.ttc'
 test('listFontFaces lists the faces inside a collection', { skip: !fs.existsSync(cambria) }, async () => {
   const faces = await listFontFaces()
   const cam = faces.find(f => f.family === 'Cambria' && f.file.toLowerCase().endsWith('cambria.ttc'))
