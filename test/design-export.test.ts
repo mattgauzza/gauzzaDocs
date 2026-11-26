@@ -251,7 +251,7 @@ test('--out ending in a path separator is a folder, made when it is not there', 
   assert.deepEqual(s.files, [path.join(base, 'solo', 'Solo.svg')])
 })
 
-test('every layer drawn gets room in the clean: 30,000 plain layers export, and svg --get of their group works', async () => {
+test('the clean allows what the renderer drew: 30,000 plain layers export, and svg --get of their group works', async () => {
   const design = newDesign('1000x1000')
   const children: Layer[] = Array.from({ length: 30_000 }, (_, i) => ({
     ...base, id: `r${i}`, name: `Dot ${i}`, type: 'rect', x: i % 1000, y: Math.floor(i / 1000) * 10, width: 1, height: 1,
@@ -271,6 +271,57 @@ test('every layer drawn gets room in the clean: 30,000 plain layers export, and 
   const whole = (await applyDesignOp(file, { op: 'svg', get: true }, { fonts })).result as { svg: string }
   assert.ok(elements(whole.svg) > 60_000)
   assert.ok(Date.now() - t0 < 15_000, `took ${Date.now() - t0} ms`)
+})
+
+test('the clean allows what the renderer drew: text of 5,000 lines and many 256-stop gradients export', async () => {
+  const lines = Array.from({ length: 5000 }, (_, i) => `Line ${i + 1}`).join('\n')
+  const text = (id: string, x: number): Layer => ({
+    ...base, id, name: id, type: 'text', x, y: 0, width: 80, height: 60_000, mode: 'point', align: 'left', valign: 'top',
+    runs: [{ text: lines, font: { family: 'Liberation Sans', weight: 400, style: 'normal' }, size: 10 }]
+  })
+  // one text layer of 5,000 lines, then eleven on one artboard: past the outside limit and any fixed allowance a layer
+  for (const count of [1, 11]) {
+    const design = newDesign('1000x1000')
+    for (let i = 0; i < count; i++) design.artboards[0].layers.push(text(`t${i}`, i * 90))
+    const r = await exportDesign(path.join(folder(), 'Lines.gdesign'), { format: 'svg' }, await inMemory({ design, assets: {} }))
+    assert.deepEqual(r.leftOut, [])
+    assert.ok(elements(fs.readFileSync(r.files[0], 'utf8')) > 5000 * count)
+  }
+  // a rect filled with a 256-stop gradient, 300 times: 257 elements of gradient each
+  const design = newDesign('1000x1000')
+  const stops = Array.from({ length: 256 }, (_, i) => ({ offset: i / 255, color: i % 2 ? '#1a73e8' : '#f4b400' }))
+  for (let i = 0; i < 300; i++) {
+    design.artboards[0].layers.push({ ...base, id: `g${i}`, name: `G${i}`, type: 'rect', x: i, y: i, width: 100, height: 100, fill: { type: 'linear', angle: 30, stops } })
+  }
+  const r = await exportDesign(path.join(folder(), 'Stops.gdesign'), { format: 'svg' }, await inMemory({ design, assets: {} }))
+  assert.ok(elements(fs.readFileSync(r.files[0], 'utf8')) > 300 * 257)
+})
+
+test('the renderer counts its own elements and paintings the way the clean does', async () => {
+  const { elementCount } = await import('../src/shared/design/svgClean')
+  const { layoutDiagram } = await import('../src/core/design/layout')
+  let f: DesignFile = { design: newDesign('1000x1000'), assets: {} }
+  const services = { fonts: await fontsOf(f.design), layout: layoutDiagram }
+  const ops: AgentOp[] = [
+    { op: 'diagram', name: 'Flow', text: 'node a: Start\nnode b: Next\nbox x: Group\nnode c: In the box in x\na -> b : yes\nb -> c' },
+    { op: 'add', type: 'rect', props: { name: 'A', x: 600, width: 50, height: 50 } },
+    { op: 'add', type: 'rect', props: { name: 'B', x: 900, width: 50, height: 50 } },
+    { op: 'add', type: 'connector', props: { from: 'A', to: 'B', label: 'both ways', arrow: 'both' } },
+    { op: 'add', type: 'ellipse', props: { name: 'Mask', x: 600, y: 600, width: 100, height: 100 } },
+    { op: 'add', type: 'rect', props: { name: 'Fill', x: 600, y: 600, width: 200, height: 80, fill: '#ff6600' } },
+    { op: 'group', layers: ['Mask', 'Fill'], name: 'Clipped' },
+    { op: 'set', layer: 'Clipped', props: { clip: true } },
+    { op: 'add', type: 'text', props: { name: 'Word', text: 'Clip', x: 100, y: 800, size: 80 } },
+    { op: 'add', type: 'rect', props: { name: 'Behind', x: 100, y: 800, width: 300, height: 100, fill: '#3366cc' } },
+    { op: 'group', layers: ['Word', 'Behind'], name: 'Lettered' },
+    { op: 'set', layer: 'Lettered', props: { clip: true } }
+  ]
+  for (const op of ops) f = (await applyDesignOp(f, op, services)).file ?? f
+  const counts = { svg: 0, fragmentElements: 0, paints: 0 }
+  const raw = designToSvg(f.design, f.design.artboards[0].id, { fonts: services.fonts, assets: {}, mode: 'export', counts })
+  assert.ok(counts.paints >= 5, `${counts.paints} paintings`)
+  assert.equal(cleanSvg(raw).painted, counts.paints)
+  assert.equal(elementCount(raw), elements(raw))
 })
 
 test('raster mode, which PNG draws without cleaning, holds an svg layer only as a data URI image', async () => {
@@ -389,9 +440,14 @@ test('the thumbnail is 512 px on its long side', async () => {
   assert.deepEqual(thumbnailSize(8192, 1), { width: 512, height: 1 })
 })
 
-test('a printed page may load only what a data URL page could: data and blob images, inline styles, data fonts', async () => {
+test('a printed page may load only what a data URL page could: data, blob and web images, inline styles, data fonts', async () => {
   const { PRINT_POLICY, withPrintPolicy } = await import('../src/shared/convert')
-  assert.equal(PRINT_POLICY, "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:")
+  assert.equal(PRINT_POLICY, "default-src 'none'; img-src data: blob: http: https:; style-src 'unsafe-inline'; font-src data:")
+  // images: embedded and from the web, never a local file (nothing else falls back to anything but 'none')
+  const directive = (name: string) => PRINT_POLICY.split(';').map(d => d.trim().split(/\s+/)).find(d => d[0] === name)?.slice(1) ?? []
+  assert.deepEqual(directive('img-src'), ['data:', 'blob:', 'http:', 'https:'])
+  assert.ok(!PRINT_POLICY.includes('file:') && !PRINT_POLICY.includes('*') && !PRINT_POLICY.includes("'self'"))
+  assert.deepEqual(directive('default-src'), ["'none'"])
   const page = withPrintPolicy('<!doctype html><html><head><meta charset="utf-8"><title>T</title></head><body><img src="file:///C:/secret.png"></body></html>')
   assert.ok(page.startsWith(`<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${PRINT_POLICY}"><meta charset="utf-8">`))
   assert.ok(withPrintPolicy('<HTML><HEAD lang="en"><title>T</title></HEAD></HTML>').includes(`<HEAD lang="en"><meta http-equiv`))

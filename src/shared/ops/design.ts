@@ -329,7 +329,7 @@ function exportSize(board: Artboard, format: 'svg' | 'png', op: AgentOp): { widt
  * The artboard as a standalone SVG, drawn by designToSvg. For svg, in export mode (fonts are never embedded), its root
  * sized by `width` with the view box kept. For png, as the editor draws it (raster mode), its root sized to the PNG's
  * pixels for the app's window to draw (exportSize). Layers the drawing leaves out are listed in `leftOut`, and `drawn`
- * says how many layers and svg layers it drew (what cleaning allows for them, exportLimits). With `plan`, nothing is
+ * is what the renderer counted (DrawCounts: what cleaning allows the drawing, exportLimits). With `plan`, nothing is
  * drawn: it gives every artboard (or the one `artboard` names) with the size its export comes out at, checking each
  * PNG's against the limits first, so an export of several refuses before drawing any.
  */
@@ -349,7 +349,7 @@ function exportOp(d: Draft, op: AgentOp): unknown {
   if (!fonts) throw new OpError('Exporting needs fonts to measure text, and none were given')
   const { width, height, size } = exportSize(board, format, op)
   const downgrades: Downgrade[] = []
-  const drawn = { svg: 0, layers: 0 }
+  const drawn = { svg: 0, fragmentElements: 0, paints: 0 }
   const mode = format === 'png' ? 'raster' : 'export'
   const svg = designToSvg(d.design, board.id, { fonts, assets: d.assets, mode, downgrades, size, counts: drawn })
   const result: Record<string, unknown> = { svg, artboard: { id: board.id, name: board.name }, width, height, drawn }
@@ -850,9 +850,9 @@ function svgOp(d: Draft, op: AgentOp): unknown {
     if (!fonts) throw new OpError('Getting SVG needs fonts to measure text, and none were given')
     const opts = { fonts, assets: d.assets, mode: 'export' as const }
     if (op.get === true || op.get === '') {
-      const counts = { svg: 0, layers: 0 }
+      const counts = { svg: 0, fragmentElements: 0, paints: 0 }
       const whole = designToSvg(d.design, board.id, { ...opts, counts })
-      return { svg: cleanSvg(whole, exportLimits(counts)).svg }
+      return { svg: cleanSvg(whole, exportLimits(whole, counts)).svg }
     }
     return { svg: layerAsSvg(d.design, layerOn(board, op.get), opts) }
   }

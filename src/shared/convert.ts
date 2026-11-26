@@ -188,10 +188,10 @@ export function bodyOf(html: string): string {
 
 /**
  * What a page printed to PDF may load: what a data: URL page could load from our print HTML, so it's the same whether
- * the page is printed from a data: URL or from a file (a long one): embedded images, inline styles and embedded fonts.
- * Never a local file or anything from the network.
+ * the page is printed from a data: URL or from a file (a long one): embedded images and images from the web (a doc's
+ * remote pictures), inline styles and embedded fonts. Never a local file, and nothing else from the network.
  */
-export const PRINT_POLICY = "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:"
+export const PRINT_POLICY = "default-src 'none'; img-src data: blob: http: https:; style-src 'unsafe-inline'; font-src data:"
 
 /** A page with PRINT_POLICY as the first thing in its head (or first of all, when it has no head). */
 export function withPrintPolicy(page: string): string {

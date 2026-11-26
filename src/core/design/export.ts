@@ -159,7 +159,7 @@ export async function exportDesign(file: string, o: ExportOptions, deps: ExportD
     for (const l of r.leftOut ?? []) out.leftOut.push({ artboard: r.artboard.name, ...l })
     let data: string | Uint8Array
     if (format === 'svg') {
-      const clean = cleanSvg(r.svg, exportLimits(r.drawn ?? { svg: 0, layers: 0 }))
+      const clean = cleanSvg(r.svg, exportLimits(r.svg, r.drawn ?? { svg: 0, fragmentElements: 0, paints: 0 }))
       for (const n of svgNotes(clean.svg)) notes.add(n)
       if (clean.removed.length) notes.add(`Cleaning removed ${list(clean.removed)}.`)
       data = clean.svg

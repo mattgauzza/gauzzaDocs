@@ -1477,27 +1477,34 @@ export const CLEAN_LIMITS: CleanLimits = {
 }
 
 /**
- * Elements a drawing may hold for each layer it draws: the most an ordinary layer writes, measured in export mode, with
- * room to spare. A text of four runs wrapped over several lines, one run a gradient, with a shadow, writes 26; a shape
- * with a gradient fill and stroke, a dash, a shadow and a blur, 17; a connector with a label, arrows at both ends and a
- * gradient, 14; a diagram, 2.5 a layer.
+ * How many elements SVG text written by the renderer or serializeSvg holds: its start tags, which is what a parse
+ * finds, since both escape every `<` in a value or in text.
  */
-export const ELEMENTS_PER_LAYER = 64
+export function elementCount(svg: string): number {
+  let n = 0
+  for (let i = svg.indexOf('<'); i !== -1; i = svg.indexOf('<', i + 1)) {
+    const c = svg.charCodeAt(i + 1) | 0x20 // a letter in either case
+    if (c >= 0x61 && c <= 0x7a) n++
+  }
+  return n
+}
 
 /**
- * The limits for cleaning a drawing of our own (an export, or svg --get) that draws `drawn.layers` layers and inlines
- * `drawn.svg` svg layers. Each svg layer was held to CLEAN_LIMITS when it came in and is cleaned again on every read,
- * so the drawing may hold that much again for each one, and ELEMENTS_PER_LAYER for each layer drawn, on top of the
- * outside limits. Painted elements and paint steps grow in the same proportion, so the ceiling stays real. Bytes are
- * bounded by the renderer itself (its 128 MB of characters, at most 3 UTF-8 bytes each), since embedded images alone
- * pass 5 MB, and nesting gets room for the groups and instances a fragment sits in.
+ * The limits for cleaning a drawing of our own (an export, or svg --get), from what the renderer wrote: `svg` is the
+ * whole drawing and `drawn` what designToSvg or layerToSvg counted (DrawCounts). Its own elements (all of them but its
+ * svg layers' fragments) and its own paintings are allowed exactly, so no layer it can draw is refused. Each svg layer
+ * was held to CLEAN_LIMITS when it came in and is cleaned again on every read, so it gets that much again, on top of
+ * the outside limits: the ceiling stays the renderer's own budget plus each fragment's caps. Bytes are bounded by the
+ * renderer itself (its 128 MB of characters, at most 3 UTF-8 bytes each), since embedded images alone pass 5 MB, and
+ * nesting gets room for the groups and instances a fragment sits in.
  */
-export function exportLimits(drawn: { svg: number; layers: number }): CleanLimits {
+export function exportLimits(svg: string, drawn: { svg: number; fragmentElements: number; paints: number }): CleanLimits {
   const whole = (n: number): number => Math.max(0, Math.floor(n) || 0)
-  const elements = MAX_SVG_ELEMENTS * (1 + whole(drawn.svg)) + ELEMENTS_PER_LAYER * whole(drawn.layers)
-  const grow = elements / MAX_SVG_ELEMENTS
+  const k = 1 + whole(drawn.svg)
+  const own = Math.max(0, elementCount(svg) - whole(drawn.fragmentElements))
+  const paints = whole(drawn.paints)
   return {
-    elements, painted: Math.ceil(MAX_PAINTS * grow), paintSteps: Math.ceil(MAX_PAINT_STEPS * grow), bytes: 3 * 128 * 1024 * 1024,
-    depth: 2 * MAX_NESTING
+    elements: MAX_SVG_ELEMENTS * k + own, painted: MAX_PAINTS * k + paints, paintSteps: MAX_PAINT_STEPS * k + paints,
+    bytes: 3 * 128 * 1024 * 1024, depth: 2 * MAX_NESTING
   }
 }

@@ -1,7 +1,7 @@
 import type { FontSource } from './fonts'
 import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, layerIndex, midpoint, transformedBounds, union } from './geometry'
 import { artboardOf, walk } from './model'
-import { escapedLength, shortKey } from './svgClean'
+import { elementCount, escapedLength, shortKey } from './svgClean'
 import { type InlineCaches, cachedInline, inlineCaches, inlineSvg } from './svgFragment'
 import {
   type GlyphCosts, OutlinesTooLong, cleanText, layoutText, num as n, outlineEstimate, runSize, textPaths, textRuns
@@ -34,8 +34,12 @@ export interface RenderOptions {
   counts?: DrawCounts
 }
 
-/** What a drawing holds: svg layers inlined (export mode) and layers drawn (instances' inner layers included). */
-export interface DrawCounts { svg: number; layers: number }
+/**
+ * What a drawing holds beyond its own markup, for the limits cleaning it allows (exportLimits): the svg layers it
+ * inlined (export mode) and how many elements their fragments come to, and how many times its own markers and clip
+ * paths are painted (counted as cleanSvg counts them: once for each use, each holding one element).
+ */
+export interface DrawCounts { svg: number; fragmentElements: number; paints: number }
 
 /**
  * Most characters one drawing may write, over every part (shapes, text, images, names, instances and svg layers) in
@@ -69,8 +73,12 @@ interface Ctx {
   paintLog: string[]
   /** svg layers inlined so far, which numbers each one's id prefix */
   svgs: number
-  /** layers drawn so far (an upper bound: one inside a layer left out later still counts) */
-  drawn: number
+  /**
+   * elements in the svg layer fragments inlined so far, and markers and clip paths painted so far (upper bounds: one
+   * inside a layer left out later still counts)
+   */
+  fragmentElements: number
+  paintings: number
   /** characters written so far, and whether MAX_RENDER_OUTPUT has been reached (after which nothing more is drawn) */
   used: number
   full: boolean
@@ -566,7 +574,6 @@ function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
       if (inner.length < least) ctx.used -= least - inner.length
       else if (!spend(ctx, inner.length - least)) return out(OVER_BUDGET)
     }
-    ctx.drawn++
     return `<g ${a}>${inner}</g>`
   } catch (e) {
     return out(e instanceof OverBudget || e instanceof OutlinesTooLong ? OVER_BUDGET : NOT_DRAWN)
@@ -607,7 +614,9 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
  */
 function exportSvgLayer(ctx: Ctx, l: Layer & { type: 'svg' }): string {
   const out = inlineSvg(typeof l.svg === 'string' ? l.svg : '', boxOf(l), `s${++ctx.svgs}-`, ctx.svgCache, holderOf(l, 'svg') ?? undefined)
-  return out || leftOut(ctx, l, SVG_NOT_CONVERTED)
+  if (!out) return leftOut(ctx, l, SVG_NOT_CONVERTED)
+  if (ctx.opts.counts) ctx.fragmentElements += elementCount(out)
+  return out
 }
 
 /** A rect, ellipse, line or path element; painted, or bare geometry for a clip path. */
@@ -714,6 +723,7 @@ function groupSvg(ctx: Ctx, g: Layer & { type: 'group' }, key: string, scope: Sc
     const holder = `<g ${layerAttrs(maskKey, mask.name)}><clipPath id="${id}">${clipShape(ctx, mask, maskKey, scope)}</clipPath></g>`
     if (holder.length < least) ctx.used -= least - holder.length
     else if (!spend(ctx, holder.length - least)) throw new OverBudget('The clip mask does not fit.')
+    ctx.paintings++ // the clip path is painted once, for the group that uses it
     return holder + `<g clip-path="url(#${id})">${kids.slice(1).map(k => renderLayer(ctx, k, inner)).join('')}</g>`
   }
   return kids.map(k => renderLayer(ctx, k, inner)).join('')
@@ -771,6 +781,7 @@ function endsIndex(ends: Ends): Map<string, Layer> {
 /** An arrowhead as m-<key>-<n>, pointing along the line at the end (or back along it at the start). */
 function marker(ctx: Ctx, key: string, hex: string, start: boolean): string {
   const id = nextId(ctx, 'm', key)
+  ctx.paintings++ // painted once, at the one end of the line that uses it
   const d = start ? 'M10 0L0 5L10 10Z' : 'M0 0L10 5L0 10Z'
   addDef(
     ctx,
@@ -814,7 +825,7 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
   return {
-    design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, drawn: 0, used: 0, full: false, instances: 0,
+    design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, fragmentElements: 0, paintings: 0, used: 0, full: false, instances: 0,
     svgCache: inlineCaches(), listed: new Set(), compEnds: new Map(), room: MAX_RENDER_OUTPUT, failed: new Map(),
     escLens: { d: new WeakMap(), glyphs: new WeakMap() }, glyphCosts: new WeakMap()
   }
@@ -849,7 +860,7 @@ export function designToSvg(design: Design, artboardId: string, opts: RenderOpti
   const bg = background(ctx, board, W, H)
   const scope: Scope = { prefix: '', overrides: [], top: true, ends: { layers: board.layers }, comps: [] }
   const body = board.layers.map(l => renderLayer(ctx, l, scope)).join('')
-  if (opts.counts) Object.assign(opts.counts, { svg: ctx.svgs, layers: ctx.drawn })
+  if (opts.counts) Object.assign(opts.counts, { svg: ctx.svgs, fragmentElements: ctx.fragmentElements, paints: ctx.paintings })
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
     `xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" ${shown} viewBox="0 0 ${W} ${H}">` +
@@ -874,7 +885,7 @@ export function layerToSvg(design: Design, layer: Layer, opts: RenderOptions): s
   }
   const ctx = newCtx(design, opts)
   const out = renderLayer(ctx, layer, { prefix: '', overrides: [], top, ends: { layers: board.layers }, comps: [] })
-  if (opts.counts) Object.assign(opts.counts, { svg: ctx.svgs, layers: ctx.drawn })
+  if (opts.counts) Object.assign(opts.counts, { svg: ctx.svgs, fragmentElements: ctx.fragmentElements, paints: ctx.paintings })
   if (!out || !ctx.defs.length) return out
   const at = out.indexOf('>') + 1
   return out.slice(0, at) + `<defs>${ctx.defs.join('')}</defs>` + out.slice(at)
