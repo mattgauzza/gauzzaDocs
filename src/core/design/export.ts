@@ -1,12 +1,14 @@
 // Exporting a design's artboards as SVG or PNG files. The drawing always comes from the design op `export`
 // (shared/ops/design.ts), run through whatever runs ops on the file: in the open editor when the app has it open, so
 // unsaved changes are in it, and on disk otherwise. This module takes it from there: one artboard or each in turn, the
-// cleaning, the file names, what the format can't hold and the writing. SVG works anywhere; a PNG needs a window to
-// draw it in (the app's), which `rasterize` stands for.
+// cleaning, the file names, what the format can't hold and the writing. designImage makes one artboard the same way
+// for a document (Insert > Design) and writes nothing. SVG works anywhere; a PNG needs a window to draw it in (the
+// app's), which `rasterize` stands for.
 import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { DrawCounts, Downgrade } from '../../shared/design/render'
+import { INSERT_SCALE } from '../../shared/design/insert'
 import { cleanSvg, exportLimits } from '../../shared/design/svgClean'
 import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../../shared/ops/design'
 import { list } from '../../shared/ops/designLayers'
@@ -93,6 +95,59 @@ function svgNotes(svg: string): string[] {
 }
 
 /**
+ * One artboard's drawing (what the `export` op gave) made into the format's bytes, for a file or a document alike.
+ * SVG is cleaned, with room for what it draws (exportLimits), and what it can't hold is added to `notes`. A PNG is
+ * drawn by `rasterize` as the editor draws it. It isn't cleaned: the window draws it as an image, which runs no script
+ * and fetches nothing, and its svg layers (drawn as data URI images, which cleaning would drop) were cleaned on import
+ * and again on read.
+ */
+async function artboardBytes(r: Drawn, format: 'svg' | 'png', deps: ExportDeps, notes: Set<string>): Promise<string | Uint8Array> {
+  if (format === 'png') return deps.rasterize!(r.svg, r.width, r.height)
+  const clean = cleanSvg(r.svg, exportLimits(r.svg, r.drawn ?? { svg: 0, fragmentElements: 0, paints: 0 }))
+  for (const n of svgNotes(clean.svg)) notes.add(n)
+  if (clean.removed.length) notes.add(`Cleaning removed ${list(clean.removed)}.`)
+  return clean.svg
+}
+
+/** One artboard drawn for a document (Insert > Design): nothing is written. */
+export interface DesignImage {
+  /** The cleaned SVG, or the PNG's bytes. */
+  data: string | Uint8Array
+  artboard: { id: string; name: string }
+  /** The SVG's size, or the PNG's pixels (INSERT_SCALE times the artboard's). */
+  width: number
+  height: number
+  /** What the format can't hold, in plain sentences. */
+  downgrades: string[]
+  /** Layers the drawing left out, and why. */
+  leftOut: LeftOut[]
+}
+
+/**
+ * One artboard (the one `artboard` names, else the first) as an image for a document, by the same op and the same
+ * code as an export, and written nowhere: SVG cleaned as an export file is, or a PNG at INSERT_SCALE times the
+ * artboard's size, checked against the PNG limits before it's drawn. Refuses as an export does: PNG without a window to
+ * draw in with RENDER_NEEDS_APP, and an artboard that isn't there or a size past the limits in the op's words.
+ */
+export async function designImage(o: { format: 'svg' | 'png'; artboard?: string }, deps: ExportDeps): Promise<DesignImage> {
+  const format = o.format
+  if (format !== 'svg' && format !== 'png') throw new Error('The format must be svg or png.')
+  if (format === 'png' && !deps.rasterize) throw new Error(RENDER_NEEDS_APP)
+  // the op sizes a PNG and refuses one past the limits before it draws anything
+  const r = (await deps.run({ op: 'export', format, scale: format === 'png' ? INSERT_SCALE : undefined, artboard: o.artboard })) as Drawn
+  const notes = new Set<string>()
+  const data = await artboardBytes(r, format, deps, notes)
+  return {
+    data,
+    artboard: { id: r.artboard.id, name: r.artboard.name },
+    width: r.width,
+    height: r.height,
+    downgrades: [...notes],
+    leftOut: (r.leftOut ?? []).map(l => ({ artboard: r.artboard.name, ...l }))
+  }
+}
+
+/**
  * Writes each file whole or not at all: every one goes to a new name beside its target first, and only once all of
  * them are written are they renamed into place, so a failure leaves no file behind and an export already there as it
  * was. `folder`, when given, is made first.
@@ -157,17 +212,7 @@ export async function exportDesign(file: string, o: ExportOptions, deps: ExportD
   for (const a of boards) {
     const r = (await deps.run({ op: 'export', ...given, artboard: a.id })) as Drawn
     for (const l of r.leftOut ?? []) out.leftOut.push({ artboard: r.artboard.name, ...l })
-    let data: string | Uint8Array
-    if (format === 'svg') {
-      const clean = cleanSvg(r.svg, exportLimits(r.svg, r.drawn ?? { svg: 0, fragmentElements: 0, paints: 0 }))
-      for (const n of svgNotes(clean.svg)) notes.add(n)
-      if (clean.removed.length) notes.add(`Cleaning removed ${list(clean.removed)}.`)
-      data = clean.svg
-    } else {
-      // not cleaned: the window draws it as an image, which runs no script and fetches nothing, and its svg layers
-      // (drawn as data URI images, which cleaning would drop) were cleaned on import and again on read
-      data = await deps.rasterize!(r.svg, r.width, r.height)
-    }
+    const data = await artboardBytes(r, format, deps, notes)
     if (o.out === '-') out.content = data as string
     else made.push({ to: target(r.artboard), data })
   }

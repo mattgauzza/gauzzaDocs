@@ -3,7 +3,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { after, test } from 'node:test'
-import { BLEND_NOTE, MAX_PNG_PIXELS, MAX_PNG_SIDE, RENDER_NEEDS_APP, exportDesign, type ExportDeps } from '../src/core/design/export'
+import {
+  BLEND_NOTE, FONTS_NOTE, MAX_PNG_PIXELS, MAX_PNG_SIDE, RENDER_NEEDS_APP, designImage, exportDesign, type ExportDeps
+} from '../src/core/design/export'
+import { insertFormat, insertFormats } from '../src/shared/design/insert'
 import { designZipBytes } from '../src/core/formats/design'
 import { runOffline } from '../src/core/ops'
 import { type FontSource, fontsFor } from '../src/shared/design/fonts'
@@ -472,4 +475,74 @@ test('print puts each artboard on its own page, drawn in raster mode and scaled 
   // fitted: 1000 x 1000 into 7.5 x 10 in (720 x 960 px), 1600 x 900 into 10 x 7.5 in (960 x 720 px)
   assert.match(html, /<svg [^>]*width="720" height="720" viewBox="0 0 1000 1000"/)
   assert.match(html, /<svg [^>]*width="960" height="540" viewBox="0 0 1600 900"/)
+})
+
+// ---------- Task 11: a design into a document ----------
+
+test('insertFormat: png for Word, svg for Markdown and HTML, png for any other document', () => {
+  assert.equal(insertFormat('C:\\Docs\\Report.docx'), 'png')
+  assert.equal(insertFormat('/home/me/notes.md'), 'svg')
+  assert.equal(insertFormat('README.MD'), 'svg')
+  assert.equal(insertFormat('notes.markdown'), 'svg')
+  assert.equal(insertFormat('page.html'), 'svg')
+  assert.equal(insertFormat('page.htm'), 'svg')
+  assert.equal(insertFormat('C:\\site.v2\\Page.HTML'), 'svg')
+  assert.equal(insertFormat('notes.txt'), 'png')
+  assert.equal(insertFormat('no-extension'), 'png')
+})
+
+test('insertFormats: Markdown and HTML offer svg first and png too, Word only png', () => {
+  assert.deepEqual(insertFormats('a.md'), ['svg', 'png'])
+  assert.deepEqual(insertFormats('a.html'), ['svg', 'png'])
+  assert.deepEqual(insertFormats('a.docx'), ['png'])
+  assert.deepEqual(insertFormats('a.txt'), ['png'])
+})
+
+test('designImage: svg comes back as export writes it, cleaned, with its notes, and nothing is written', async () => {
+  const file = await build(
+    { design: newDesign('logo'), assets: {} },
+    { op: 'add', type: 'text', props: { name: 'Word', text: 'Hi', size: 96 } },
+    { op: 'artboard', action: 'add', name: 'Back', size: '400x300' }
+  )
+  const out = folder()
+  const deps = await inMemory(file)
+  const img = await designImage({ format: 'svg', artboard: 'Back' }, deps)
+  assert.deepEqual(img.artboard, { id: file.design.artboards[1].id, name: 'Back' })
+  assert.deepEqual([img.width, img.height], [400, 300])
+  assert.deepEqual(fs.readdirSync(out), [], 'nothing written')
+  // the same bytes an export of that artboard writes
+  const r = await exportDesign(path.join(out, 'Card.gdesign'), { format: 'svg', artboard: 'Back' }, await inMemory(file))
+  assert.equal(img.data, fs.readFileSync(r.files[0], 'utf8'))
+  // the first artboard by default, with the notes an export gives for it
+  const first = await designImage({ format: 'svg' }, deps)
+  assert.equal(first.artboard.name, file.design.artboards[0].name)
+  assert.ok(first.downgrades.includes(FONTS_NOTE), first.downgrades.join('\n'))
+  assert.ok(deps.ops.every(op => op.op === 'export'), 'only the read-only export op')
+})
+
+test('designImage: png is drawn in raster mode at twice the artboard size by the rasterize export uses', async () => {
+  const file = await build({ design: newDesign('400x300'), assets: {} }, { op: 'add', type: 'rect', props: { name: 'Box', width: 100, height: 100 } })
+  const drawn: { svg: string; width: number; height: number }[] = []
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+  const deps = await inMemory(file, { rasterize: async (svg, width, height) => (drawn.push({ svg, width, height }), png) })
+  const img = await designImage({ format: 'png' }, deps)
+  assert.deepEqual(img.data, png)
+  assert.deepEqual([img.width, img.height], [800, 600])
+  assert.deepEqual([drawn[0].width, drawn[0].height], [800, 600])
+  const raster = (await deps.run({ op: 'export', format: 'png', scale: 2 })) as { svg: string }
+  assert.equal(drawn[0].svg, raster.svg, 'the export op in raster mode at scale 2')
+  assert.deepEqual(img.downgrades, [])
+  // an 8192 artboard at 2x is right at the PNG limits and still passes
+  const big = await inMemory({ design: newDesign('8192x8192'), assets: {} }, { rasterize: async () => png })
+  assert.equal((await designImage({ format: 'png' }, big)).width, 16384)
+})
+
+test('designImage: refusals are plain, png needs the app and nothing is drawn', async () => {
+  const file: DesignFile = { design: newDesign('logo'), assets: {} }
+  await assert.rejects(designImage({ format: 'png' }, await inMemory(file)), { message: RENDER_NEEDS_APP })
+  let drew = 0
+  const deps = await inMemory(file, { rasterize: async () => (drew++, new Uint8Array(4)) })
+  await assert.rejects(designImage({ format: 'png', artboard: 'Nope' }, deps), /Nope/)
+  await assert.rejects(designImage({ format: 'gif' as 'png' }, deps), /svg or png/)
+  assert.equal(drew, 0)
 })

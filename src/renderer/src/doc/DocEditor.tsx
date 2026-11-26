@@ -16,6 +16,7 @@ import { flash, outline, replaceRanges, runDocOp, searchDoc } from './live'
 import { FONTS, Toolbar, ZOOMS, applyStyle, currentSize } from './Toolbar'
 import { stepZoom } from '../shell/zoom'
 import { marginPress } from './marginSelect'
+import { InsertDesign } from './InsertDesign'
 import './doc.css'
 import { usePanelSize } from '../shell/resize'
 
@@ -169,6 +170,7 @@ export default function DocEditor(props: EditorProps) {
   const [find, setFind] = useState<null | 'find' | 'replace'>(null)
   const [linkOpen, setLinkOpen] = useState(false)
   const [wc, setWc] = useState(false)
+  const [designOpen, setDesignOpen] = useState(false)
   const [heads, setHeads] = useState<{ level: number; text: string; pos: number }[]>([])
   const [outlineOpen, setOutlineOpen] = useState<boolean | null>(null)
   const [outlineW, outlineHandle] = usePanelSize('outline', 240, { min: 160, max: 480, edge: 'right' })
@@ -411,6 +413,7 @@ export default function DocEditor(props: EditorProps) {
         const r = (fn: (c: ReturnType<Editor['chain']>) => ReturnType<Editor['chain']>) => () => fn(editor.chain().focus()).run()
         const insert: MenuItem[] = [
           { label: 'Image…', run: pickImage },
+          { label: 'Design...', run: () => setDesignOpen(true) },
           { label: 'Table', grid: { rows: 8, cols: 10, pick: (rr, cc) => insertTable(rr, cc) } },
           { label: 'Link', shortcut: 'Ctrl+K', run: () => setLinkOpen(true) },
           { sep: true, label: '' },
@@ -624,6 +627,13 @@ export default function DocEditor(props: EditorProps) {
         {mode === 'source' && <MdSource ref={sourceRef} initial={mdText} onChange={onSourceChange} />}
       </div>
       {wc && <WordCount editor={editor} onClose={() => setWc(false)} />}
+      {designOpen && (
+        <InsertDesign
+          docPath={props.path}
+          onInsert={img => editor.chain().focus().setImage(img).run()}
+          onClose={() => setDesignOpen(false)}
+        />
+      )}
     </div>
   )
 }

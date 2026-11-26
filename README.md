@@ -14,6 +14,8 @@ There's a short tour with screenshots at [mattgauzza.github.io/gauzzaDocs](https
   They open and save as Excel, CSV or TSV.
 - PDFs let you change the text that's already there, fill in forms and sign them. You can also add text, highlights,
   drawing or whiteout. Pages can be rotated, reordered or deleted.
+- Designs (`.gdesign`) hold layered pictures and diagrams that agents build. They export to SVG with the layers or to
+  PNG.
 - Every other file opens in a code editor that works like Notepad++. Plugins add formatters, previews and commands.
 - Files stay normal files on your PC. There's no account and nothing gets uploaded.
 
@@ -235,6 +237,31 @@ there's a `---` line between slides. `gdocs slides from-md deck.pptx --md @outli
 while you watch, and `gdocs slides add`, `update` and `notes` change one slide at a time. A PowerPoint file with charts,
 tables or animations opens with those parts simplified, so it only saves on Ctrl+S and the first save keeps the
 original next to it.
+
+## Designs
+
+I was writing a proposal that needed a workflow diagram. I wanted my agent to draw it as something I could keep
+editing instead of a flat AI picture. A design is a `.gdesign` file with one or more artboards. Each artboard holds
+layers like shapes, text, pictures, groups and connectors. Agents build it a layer at a time with `gdocs design` while
+I watch. I can move, resize and restyle the layers by hand too.
+
+Diagrams start from a list of steps. The agent writes one line per step (`node plan: Plan`) and one per arrow
+(`plan -> build`). The app does the layout.
+
+`gdocs design export` saves each artboard as SVG or PNG. The SVG keeps the layers as named groups, so they're still
+there in Inkscape. Insert > Design in a document puts an artboard in as a picture. Word files get a PNG. Markdown and
+HTML files get an SVG unless you pick PNG. PNG export, `gdocs look` and thumbnails need gauzzaDocs running, since only
+the app can draw a design to pixels. Editing and SVG export work without it.
+
+```
+gdocs new design flow --size letter --dir .      # a letter page, sized for documents
+gdocs design diagram flow.gdesign @steps.txt --name Release --live
+gdocs design add flow.gdesign --type text --text "Release plan" --x 150 --y 400 --size 24
+gdocs design read flow.gdesign                   # the artboards, then every layer
+gdocs design export flow.gdesign                 # flow.svg next to the design
+gdocs design export flow.gdesign --format png --scale 2
+gdocs look flow.gdesign
+```
 
 ## Tabs and saving
 

@@ -45,6 +45,17 @@ export type HistoryDiff = { hunks: Hunk[] } | { tooLarge: true } | { tooMany: tr
 export interface HistoryStats { bytes: number; capBytes: number; overCapBytes?: number; paused?: string; dir?: string }
 /** Who changed a file since its last save, and what the agents did (a save's version authors and summary). */
 export interface SaveContext { authors: Author[]; summary?: string }
+/** A design's artboard, as the design op `read` lists it. */
+export interface DesignArtboard { id: string; name: string; width: number; height: number }
+/** Mirrors core/design/export.ts DesignImage: one artboard drawn for a document, written nowhere. */
+export interface DesignImage {
+  data: string | Uint8Array
+  artboard: { id: string; name: string }
+  width: number
+  height: number
+  downgrades: string[]
+  leftOut: { artboard: string; layer: string; name: string; reason: string }[]
+}
 
 /** Typed wrappers over window.gd.call (main process API in src/main/index.ts). */
 export const api = {
@@ -123,6 +134,11 @@ export const api = {
   fontFaces: () => window.gd.call<FontRef[]>('fontFaces'),
   /** A design's thumbnail as a PNG data URL for its Home card, or null (none, or stale) to show the kind's icon. */
   designThumbnail: (path: string) => window.gd.call<string | null>('designThumbnail', path),
+  /** A design's artboards, from its open tab when it's open (Insert > Design). */
+  designArtboards: (path: string) => window.gd.call<DesignArtboard[]>('designArtboards', path),
+  /** One artboard (the first when left out) drawn for a document as an export draws it: SVG text or PNG bytes at 2x. */
+  designImage: (path: string, artboard: string | undefined, format: 'svg' | 'png') =>
+    window.gd.call<DesignImage>('designImage', path, artboard, format),
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
   openDefaultApps: () => window.gd.call('openDefaultApps'),

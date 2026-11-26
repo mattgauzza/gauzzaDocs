@@ -84,6 +84,12 @@ async function zipOf(files: Record<string, string>): Promise<Uint8Array> {
   return z.generateAsync({ type: 'nodebuffer' })
 }
 
+test('a file that is not a zip at all is refused in plain words', async () => {
+  const plain = { message: "This design file is damaged: it can't be read as a zip file." }
+  await assert.rejects(readDesignZip(new Uint8Array(Buffer.from('this is not a zip'))), plain)
+  await assert.rejects(readDesignZip(new Uint8Array(0)), plain)
+})
+
 test('hostile zips: too many entries', async () => {
   const z = new JSZip()
   z.file('design.json', JSON.stringify(newDesign('x')))

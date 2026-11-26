@@ -115,6 +115,16 @@
 .doc-modal td.num { text-align: right; padding-left: 24px; font-variant-numeric: tabular-nums; }
 .doc-modal-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
 
+/* Insert > Design (InsertDesign.tsx): the shell's dialog, with the home screen's file cards */
+.ins-design h3:first-child { margin-top: 4px; }
+.ins-design .file-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.ins-design .file-card-art { height: 104px; }
+.ins-design .file-card-thumb { max-height: 84px; }
+.ins-design .file-card small { display: block; }
+.ins-board { display: block; border: 1px solid var(--line); border-radius: 2px; background: var(--surface); box-shadow: var(--page-shadow); }
+.ins-format { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+.ins-status { margin: 12px 0 0; }
+
 @media print {
   .doc-toolbar, .doc-outline, .doc-floating { display: none !important; }
   .doc-page { box-shadow: none; padding: 0; width: auto; }

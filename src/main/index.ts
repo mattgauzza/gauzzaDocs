@@ -21,7 +21,7 @@ import { stopWatching, watchFolders } from './folders'
 import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
 import { LOOK_MAX, closeLook, look, rasterize } from './look'
-import { exportDesign } from '../core/design/export'
+import { designImage, exportDesign } from '../core/design/export'
 import { personName } from '../core/person'
 import { mentionsName } from '../shared/mentions'
 import { isReadOp } from '../shared/ops/readOps'
@@ -104,6 +104,20 @@ async function newFilePath(kind: Kind, ext: string | undefined, name: string | u
 const lookPreload = path.join(__dirname, '../preload/index.js')
 const loadLook = (w: BrowserWindow) =>
   process.env.ELECTRON_RENDERER_URL ? w.loadURL(process.env.ELECTRON_RENDERER_URL + '#look') : w.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: 'look' })
+const drawDesign = (svg: string, width: number, height: number) => rasterize(svg, width, height, askWeb, lookPreload, loadLook)
+
+/**
+ * A design op that only looks (isReadOp), for the window itself (Insert > Design): in the design's tab when it's open,
+ * unsaved changes and all, else on disk, as an agent's op would run. It isn't logged, and the tab shows no one reading.
+ */
+async function readDesign(file: string, op: AgentOp): Promise<unknown> {
+  const p = path.resolve(file)
+  if (!isReadOp(op)) throw new Error(`"${op.op}" would change the design`)
+  if (kindOf(p) !== 'design') throw new Error(`${path.basename(p)} isn't a design.`)
+  if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
+  if (isOpen(p)) return askWindow('agent', { path: p, op, agent: { name: userName() }, own: true })
+  return work('runOffline', [p, op])
+}
 
 // ---------- the CLI bridge ----------
 async function rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -217,7 +231,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       }
       return exportDesign(file, opts, {
         run: async op => ((await rpc('op', { ...params, op })) as { result: unknown }).result,
-        rasterize: (svg, width, height) => rasterize(svg, width, height, askWeb, lookPreload, loadLook)
+        rasterize: drawDesign
       })
     }
     case 'close':
@@ -499,6 +513,12 @@ const api: Record<string, (...a: any[]) => unknown> = {
   fontFaces: () => work('fontFaces'),
   /** A design's thumbnail as a PNG data URL for its Home card, or null (none, or stale) for the kind's icon. */
   designThumbnail: (file: string) => work('designThumbnail', [file]),
+  // ---------- a design into a document (Insert > Design): read-only ops, live when the design is open ----------
+  /** A design's artboards, [{ id, name, width, height }]. */
+  designArtboards: async (file: string) => ((await readDesign(file, { op: 'read' })) as { artboards: unknown[] }).artboards,
+  /** One artboard drawn for a document, as an export draws it, written nowhere (designImage in core/design/export.ts). */
+  designImage: (file: string, artboard: string | undefined, format: 'svg' | 'png') =>
+    designImage({ format, artboard }, { run: op => readDesign(file, op), rasterize: drawDesign }),
   /** ctx: who changed it since the last save ({ authors, summary }); the person when the window does not say. */
   save: (file: string, payload: FilePayload, ctx?: WriteContext) => work<number>('saveFile', [file, payload, ctx ?? person()]),
   /** preset: a new design's size (a PRESETS name or <w>x<h>). */

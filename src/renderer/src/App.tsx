@@ -709,7 +709,8 @@ export default function App() {
       }
       return { ok: await close(t.id) }
     })
-    const offAgent = window.gd.serve('agent', async (req: { path: string; op: AgentOp; agent: AgentInfo }) => {
+    // own: the app reading a design for itself (Insert > Design), which no agent does, so no one shows as reading
+    const offAgent = window.gd.serve('agent', async (req: { path: string; op: AgentOp; agent: AgentInfo; own?: boolean }) => {
       const t = tabFor(req.path)
       if (!t) throw new Error('That file is no longer open')
       lastUsed.current.set(t.id, Date.now())
@@ -718,11 +719,13 @@ export default function App() {
       const h = handles.current.get(t.id)!
       // ops that only look show as "reading" and never count as the agent's edits
       const reading = isReadOp(req.op)
-      // Each agent highlights in its own color: set it on this file's editor so other tabs keep theirs.
-      const color = req.agent.color || agentColor(req.agent.name)
-      document.querySelector<HTMLElement>(`.editor-host[data-tab="${t.id}"]`)?.style.setProperty('--agent', color)
-      patch(t.id, { agent: { ...req.agent, color, reading, until: Date.now() + 8000 } })
-      window.setTimeout(() => force(n => n + 1), 8100)
+      if (!req.own || !reading) {
+        // Each agent highlights in its own color: set it on this file's editor so other tabs keep theirs.
+        const color = req.agent.color || agentColor(req.agent.name)
+        document.querySelector<HTMLElement>(`.editor-host[data-tab="${t.id}"]`)?.style.setProperty('--agent', color)
+        patch(t.id, { agent: { ...req.agent, color, reading, until: Date.now() + 8000 } })
+        window.setTimeout(() => force(n => n + 1), 8100)
+      }
       if (req.op.op === 'save') {
         await save(t.id, { explicit: true })
         return { ok: true, path: t.path }

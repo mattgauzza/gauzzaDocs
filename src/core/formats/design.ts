@@ -22,9 +22,17 @@ export function assetName(bytes: Uint8Array, ext: string): string {
   return `assets/${createHash('sha256').update(bytes).digest('hex')}.${clean}`
 }
 
-/** Loads a zip and refuses it from the central directory alone, before anything is inflated. */
+/**
+ * Loads a zip and refuses it from the central directory alone, before anything is inflated. A file that isn't a zip
+ * (or is cut short) is refused in plain words, not the zip library's.
+ */
 async function openChecked(bytes: Uint8Array): Promise<JSZipT> {
-  const zip = await loadZip(bytes)
+  let zip: JSZipT
+  try {
+    zip = await loadZip(bytes)
+  } catch {
+    throw new Error("This design file is damaged: it can't be read as a zip file.")
+  }
   const entries = Object.values(zip.files)
   if (entries.length > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
   let total = 0
