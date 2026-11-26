@@ -8,7 +8,7 @@ import {
 import { type RenderOptions, layerToSvg } from './render'
 import { sharedAssetName } from './sha256'
 import {
-  INKSCAPE_NS, MAX_SVG_BYTES, MAX_SVG_ELEMENTS, MAX_USE_DEPTH, PRESENTATION, SVG_NS, XLINK_NS, allElements, cleanSvg, cleanSvgRoot, dataUriBytes,
+  INKSCAPE_NS, MAX_SVG_BYTES, MAX_SVG_ELEMENTS, MAX_USE_DEPTH, PRESENTATION, SVG_NS, XLINK_NS, allElements, cleanSvg, cleanSvgRoot, dataUriBytes, expandedSizes,
   elementChildren, hrefId, idMap, imageInfo, serializeSvg, urlRefs
 } from './svgClean'
 import { type PaintSpace, type Style, type Viewport, alphaOf, diagonal, len, paintOf, urlId } from './svgPaint'
@@ -38,7 +38,9 @@ export interface ImportResult {
 
 interface Ctx extends Viewport {
   /** Layers made and elements copied into svg layers, and those layers' markup, against the import limits. */
-  budget: { elements: number; bytes: number }
+  budget: { elements: number; bytes: number; json: number }
+  /** How many elements each element draws with its <use> expanded, for what svg layers copy. */
+  sizes: Map<Element, number>
   ids: Map<string, Element>
   taken: Set<string>
   counts: Record<string, number>
@@ -304,27 +306,29 @@ const contains = (outer: Element, inner: Element): boolean => {
  * What an element needs from elsewhere in the document (gradients, filters, use targets), outermost only, and whether
  * anything it refers to can't come along (an id that isn't there, or an ancestor of the element itself).
  */
-function referenced(el: Element, ctx: Ctx): { defs: Element[]; dangling: boolean } {
+function referenced(el: Element, ctx: Ctx, also: string[] = []): { defs: Element[]; dangling: boolean } {
   const found: Element[] = []
   const seen = new Set<Element>()
-  const queue = [el]
+  const queue: Element[] = []
   let dangling = false
-  for (let q = 0; q < queue.length; q++) {
-    for (const e of allElements(queue[q])) {
-      for (const id of refsOf(e)) {
-        const t = ctx.ids.get(id)
-        if (!t) dangling = true
-        if (!t || seen.has(t)) continue
-        seen.add(t)
-        if (contains(el, t)) continue
-        if (contains(t, el)) {
-          dangling = true
-          continue
-        }
-        found.push(t)
-        queue.push(t)
-      }
+  const need = (id: string) => {
+    const t = ctx.ids.get(id)
+    if (!t) dangling = true
+    if (!t || seen.has(t)) return
+    seen.add(t)
+    if (contains(el, t)) return
+    if (contains(t, el)) {
+      dangling = true
+      return
     }
+    found.push(t)
+    queue.push(t)
+  }
+  // what the element refers to, what it inherits a reference to, and what those refer to in turn
+  for (const id of also) need(id)
+  queue.push(el)
+  for (let q = 0; q < queue.length; q++) {
+    for (const e of allElements(queue[q])) for (const id of refsOf(e)) need(id)
   }
   // keep only the outermost: drop any whose ancestor is also needed
   const needed = new Set(found)
@@ -341,6 +345,16 @@ const ESC: Record<string, string> = {
 }
 /** The same escapes as cleanSvg's serializer, so composed markup is already in its form. */
 const escAttr = (s: string): string => cleanText(s).replace(/[&<>"'\t\n\r\u0085\u2028]/g, c => ESC[c])
+
+/** Most JSON the layers of one import may come to. */
+const MAX_LAYER_JSON = 32 * 1024 * 1024
+
+/** Charges a finished layer's JSON (a group without its children, which are charged as they're made). */
+function charge<T extends Layer>(ctx: Ctx, layer: T): T {
+  ctx.budget.json += JSON.stringify(layer.type === 'group' ? { ...layer, children: [] } : layer).length
+  if (ctx.budget.json > MAX_LAYER_JSON) throw new Error('This SVG is too large to convert.')
+  return layer
+}
 
 /** Charges the import's budget: every layer and every element an svg layer copies, and the svg layers' markup. */
 function spend(ctx: Ctx, elements: number, bytes = 0): void {
@@ -393,25 +407,23 @@ function svgLayer(el: Element, ctm: Matrix, inh: Style, s: Style, why: string, c
   if (box && ctx.frame) box = intersect(box, ctx.frame)
   if (!box || !(box.w > 0) || !(box.h > 0)) return null
   box = roundBox(box, r3)
-  const { defs, dangling } = referenced(el, ctx)
-  // what this layer copies counts against the import, before any of it is written out
-  spend(ctx, defs.reduce((a, d) => a + allElements(d).length, allElements(el).length))
-  const inherited = Object.entries(inh)
-    .filter(([p]) => INHERITED.has(p) && PRESENTATION.has(p))
-    .map(([p, v]) => ` ${p}="${escAttr(v)}"`)
-    .join('')
+  const carried = Object.entries(inh).filter(([p]) => INHERITED.has(p) && PRESENTATION.has(p))
+  // an inherited url(#id) (a fill or marker set on an ancestor) brings its definition along
+  const { defs } = referenced(el, ctx, carried.flatMap(([, v]) => urlRefs(v)))
+  // what this layer draws counts against the import with every <use> in it expanded, before any of it is written out
+  spend(ctx, defs.reduce((a, d) => a + (ctx.sizes.get(d) ?? Infinity), ctx.sizes.get(el) ?? Infinity))
+  const inherited = carried.map(([p, v]) => ` ${p}="${escAttr(v)}"`).join('')
   const markup =
     `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" xmlns:inkscape="${INKSCAPE_NS}" width="${num(box.w, 3)}" height="${num(box.h, 3)}" ` +
     `viewBox="${num(box.x, 3)} ${num(box.y, 3)} ${num(box.w, 3)} ${num(box.h, 3)}">` +
     (defs.length ? `<defs>${defs.map(d => serializeSvg(d, false)).join('')}</defs>` : '') +
     `<g transform="matrix(${ctm.map(v => num(v, 6)).join(' ')})"${inherited}>${serializeSvg(el, false)}</g></svg>`
   spend(ctx, 0, markup.length)
-  // Every part is already clean and in cleanSvg's own form, so cleaning again changes nothing, except where a
-  // reference points at something the layer didn't copy (an ancestor of the element); then it's cleaned again.
-  const svg = dangling ? cleanSvg(markup).svg : markup
+  // what is stored is always cleanSvg's own output: composed markup is cleaned again, never trusted as it is
+  const svg = cleanSvg(markup).svg
   const label = name ?? nameOf(el, 'SVG', ctx)
   ctx.kept.push(`${label}: kept as an SVG layer because ${why}`)
-  return { ...base(ctx, label, box, { ...s, opacity: '1' }), type: 'svg', svg }
+  return charge(ctx, { ...base(ctx, label, box, { ...s, opacity: '1' }), type: 'svg', svg })
 }
 const alphaFraction = (v: string): number => {
   const m = /^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*(%?)\s*$/i.exec(v)
@@ -460,7 +472,7 @@ function convert(el: Element, ctm: Matrix, inh: Style, ctx: Ctx, depth: number, 
       return inner
     }
     const b = layersBox([shape, inner])
-    return { ...base(ctx, `${inner.name} clipped`, b, {}), type: 'group', clip: true, children: [shape, inner] }
+    return charge(ctx, { ...base(ctx, `${inner.name} clipped`, b, {}), type: 'group', clip: true, children: [shape, inner] })
   }
   switch (tag) {
     case 'g':
@@ -485,7 +497,7 @@ function groupLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, depth: number, n
     if (l && firstOnly) break
   }
   if (!children.length) return null
-  return { ...base(ctx, name, layersBox(children), s, false), type: 'group', children }
+  return charge(ctx, { ...base(ctx, name, layersBox(children), s, false), type: 'group', children })
 }
 
 function useLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, depth: number, name?: string): Layer | null {
@@ -541,7 +553,7 @@ function clipShape(clip: Element, target: Element, m: Matrix, ctx: Ctx): (Layer 
   }
   const b = pathBounds(segs)
   if (!b) return 'empty'
-  return pathLayer(ctx, 'Clip', segs, b, {}, { type: 'color', color: '#000000' })
+  return charge(ctx, pathLayer(ctx, 'Clip', segs, b, {}, { type: 'color', color: '#000000' }))
 }
 
 function pathLayer(ctx: Ctx, name: string, segs: Seg[], bounds: Box, s: Style, fill: Paint | null): Layer & { type: 'path' } {
@@ -589,7 +601,7 @@ function shapeLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, as?: string): La
     const join = s['stroke-linejoin'] ?? 'miter'
     if (cap !== 'butt' || join !== 'miter') ctx.kept.push(`${name}: its line caps and joins are drawn plain (${cap}, ${join})`)
   }
-  return layer
+  return charge(ctx, layer)
 }
 
 function imageLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, name: string): Layer | null {
@@ -608,7 +620,7 @@ function imageLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, name: string): L
   if (align && align !== 'none' && align !== 'xMidYMid') ctx.kept.push(`${name}: its image alignment (${align}) is drawn centered`)
   const asset = sharedAssetName(data.bytes, info.type)
   ctx.assets[asset] = data.bytes
-  return { ...base(ctx, name, box, s), type: 'image', asset, fit }
+  return charge(ctx, { ...base(ctx, name, box, s), type: 'image', asset, fit })
 }
 
 // Text
@@ -718,7 +730,7 @@ function textLayer(el: Element, m: Matrix, s: Style, ctx: Ctx, name: string): La
     layer.stroke = stroke.paint
     layer.strokeWidth = r6(sw)
   }
-  return layer
+  return charge(ctx, layer)
 }
 
 /** The root's mapping from its viewBox to px, and its size in px when it has one. */
@@ -748,7 +760,8 @@ export function importSvg(svg: string, name: string, opts: ImportOptions = {}): 
   const kept: string[] = []
   applyStyles(root, n => kept.push(n))
   const { m, vp, frame } = rootFrame(root)
-  const ctx: Ctx = { ...vp, budget: { elements: 0, bytes: 0 }, ids: idMap(root), taken: opts.taken ?? new Set(), counts: {}, kept, assets: {}, frame, fonts: opts.fonts }
+  const ctx: Ctx = { ...vp, budget: { elements: 0, bytes: 0, json: 0 }, sizes: new Map(), ids: idMap(root), taken: opts.taken ?? new Set(), counts: {}, kept, assets: {}, frame, fonts: opts.fonts }
+  ctx.sizes = expandedSizes(root, ctx.ids)
   const s = styleOf(root, {})
   const children: Layer[] = []
   for (const c of elementChildren(root)) {
@@ -756,7 +769,7 @@ export function importSvg(svg: string, name: string, opts: ImportOptions = {}): 
     if (l) children.push(l)
   }
   const b = children.length ? layersBox(children) : (frame ?? { x: 0, y: 0, w: 0, h: 0 })
-  const group: GroupLayer = { ...base(ctx, name, b, s, false), type: 'group', children }
+  const group: GroupLayer = charge(ctx, { ...base(ctx, name, b, s, false), type: 'group', children })
   return { group, removed, kept, assets: ctx.assets }
 }
 

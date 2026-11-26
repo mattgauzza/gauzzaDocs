@@ -208,8 +208,10 @@ test('an export inlines svg layers with ids prefixed per layer, and survives cle
   const out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'export' })
   assert.doesNotMatch(out, /svg\+xml|<image/, 'no svg layer is drawn as an image')
   const doc = parse(out)
-  for (const l of [a, b]) {
-    for (const want of [`id="s-${l.id}-g"`, `fill="url(#s-${l.id}-g)"`, `id="s-${l.id}-f"`, `filter="url(#s-${l.id}-f)"`]) {
+  // numbered by drawing order: the first svg layer's ids start s1-, the second's s2-
+  for (const [n, l] of [a, b].entries()) {
+    const p = `s${n + 1}-`
+    for (const want of [`id="${p}g"`, `fill="url(#${p}g)"`, `id="${p}f"`, `filter="url(#${p}f)"`]) {
       assert.ok(out.includes(want), `missing ${want}`)
     }
     const wrapper = doc.getElementsByTagName('g')
@@ -240,7 +242,7 @@ test('layerAsSvg of a group keeps the svg layers inside it', async () => {
   const d = newDesign('instagram')
   d.artboards[0].layers.push(group)
   const svg = layerAsSvg(d, group, { fonts: await fontsOf(d), assets: {}, mode: 'raster' })
-  assert.match(svg, new RegExp(`id="s-${inner.id}-g"`))
+  assert.match(svg, /id="s1-g"/)
   assert.ok(svg.includes(`<svg x="19" y="-1" width="12" height="12" viewBox="-1 -1 12 12" preserveAspectRatio="none">`), svg)
   assert.doesNotMatch(svg, /svg\+xml/)
   assert.deepEqual(cleanSvg(svg).removed, [])
@@ -679,18 +681,23 @@ test('svg layers that would copy too much are refused with a plain message', () 
 })
 
 /**
- * Asserts that `fn` finishes in under a second. The runner runs test files in parallel, which inflates both clocks:
- * wall time counts waiting for other files, and this process's CPU time counts V8's parallel GC threads. The work
- * itself is at most the smaller of the two, so that is what's checked.
+ * Asserts that `fn` finishes in under a second. The runner runs test files in parallel, which inflates the usual
+ * clocks: wall time counts waiting for other files, and the process's CPU time counts V8's parallel GC threads. So
+ * this thread's own CPU time is what's checked (process.threadCpuUsage, Node 22.19 and later), or else the smaller of
+ * wall and process CPU time.
  */
 function underASecond(label: string, fn: () => unknown): void {
+  const thread = (process as { threadCpuUsage?: (prev?: NodeJS.CpuUsage) => NodeJS.CpuUsage }).threadCpuUsage?.bind(process)
+  const t0 = thread?.()
   const cpu = process.cpuUsage()
   const start = performance.now()
   fn()
+  const wallMs = performance.now() - start
   const used = process.cpuUsage(cpu)
   const cpuMs = (used.user + used.system) / 1000
-  const wallMs = performance.now() - start
-  assert.ok(Math.min(cpuMs, wallMs) < 1000, `${label} took ${Math.round(wallMs)} ms (${Math.round(cpuMs)} ms of CPU)`)
+  const own = t0 && thread ? thread(t0) : null
+  const threadMs = own ? (own.user + own.system) / 1000 : Math.min(cpuMs, wallMs)
+  assert.ok(threadMs < 1000, `${label} took ${Math.round(threadMs)} ms of its thread's CPU (${Math.round(wallMs)} ms wall, ${Math.round(cpuMs)} ms process CPU)`)
 }
 
 test('pathological url( values clean in linear time', () => {
@@ -719,4 +726,198 @@ test('15,000 gradient-filled rects in a filtered group import in under a second'
     const { group } = importSvg(svg, 'X')
     assert.equal(kids(group)[0].type, 'svg')
   })
+})
+
+// Fix round 2: one href per element, budgets that follow <use>, composed markup always clean, linear style matching
+
+/**
+ * How many elements a browser draws: every <use> expanded, plain href followed over xlink:href (as Chromium does),
+ * the first element with an id winning, a loop drawing nothing.
+ */
+function browserElements(svg: string): number {
+  const root = parse(svg).documentElement
+  const ids = new Map<string, Element>()
+  const walk = (e: Element, f: (e: Element) => void) => {
+    f(e)
+    for (let n = e.firstChild; n; n = n.nextSibling) if (n.nodeType === 1) walk(n as Element, f)
+  }
+  walk(root, e => {
+    const id = e.getAttribute('id')
+    if (id && !ids.has(id)) ids.set(id, e)
+  })
+  const memo = new Map<Element, number>()
+  const active = new Set<Element>()
+  const size = (e: Element): number => {
+    if (memo.has(e)) return memo.get(e)!
+    if (active.has(e)) return 0
+    active.add(e)
+    let n = 1
+    for (let c = e.firstChild; c; c = c.nextSibling) if (c.nodeType === 1) n += size(c as Element)
+    if (e.localName === 'use') {
+      const h = e.hasAttribute('href') ? e.getAttribute('href') : e.getAttributeNS('http://www.w3.org/1999/xlink', 'href')
+      const t = h && h.startsWith('#') ? ids.get(h.slice(1)) : undefined
+      if (t) n += size(t)
+    }
+    active.delete(e)
+    memo.set(e, n)
+    return n
+  }
+  return size(root)
+}
+
+/** pM: each use names a harmless target in xlink:href and the next level in href, which a browser follows. */
+function doubleHref(levels = 6, fan = 10): string {
+  let body = '<rect id="r" width="1" height="1"/><rect id="l0" width="1" height="1"/>'
+  for (let i = 1; i <= levels; i++) body += `<g id="l${i}">${`<use xlink:href="#r" href="#l${i - 1}"/>`.repeat(fan)}</g>`
+  return svgOf(`<defs>${body}</defs><use xlink:href="#r" href="#l${levels}"/>`)
+}
+
+test('an element keeps one href: two that disagree are both dropped, two that agree become one xlink:href', () => {
+  const bomb = cleanSvg(doubleHref())
+  assert.doesNotMatch(bomb.svg, /<use/)
+  assert.ok(bomb.removed.some(r => /two different references on one element \(#r, #l0\)/.test(r)), JSON.stringify(bomb.removed))
+  assert.ok(browserElements(bomb.svg) < 20)
+  assert.equal(cleanSvg(bomb.svg).svg, bomb.svg)
+  assert.doesNotMatch(cleanSvg(svgOf('<rect id="r" width="1" height="1"/><g id="a"><use xlink:href="#r" href="#a"/></g>')).svg, /<use/)
+  const same = cleanSvg(svgOf('<rect id="r" width="1" height="1"/><use xlink:href="#r" href=" #r "/>'))
+  assert.match(same.svg, /<use xlink:href="#r"\/>/)
+  assert.deepEqual(same.removed, [])
+  // through import (inside a filtered group, so kept as an svg layer) and through export inlining
+  const filtered = svgOf(
+    `<defs><filter id="f"><feGaussianBlur stdDeviation="1"/></filter>${doubleHref().slice(doubleHref().indexOf('<defs>') + 6, doubleHref().indexOf('</defs>'))}</defs>` +
+      '<g filter="url(#f)"><rect width="5" height="5"/><use xlink:href="#r" href="#l6"/></g>',
+    'width="10" height="10"'
+  )
+  const layer = kids(importSvg(filtered, 'D').group)[0]
+  assert.ok(layer.type === 'svg' && browserElements(layer.svg) < 20)
+  assert.ok(browserElements(svgOf(inlineSvg(doubleHref(), { x: 0, y: 0, w: 10, h: 10 }, 's1-'))) < 20)
+})
+
+test("a <use> inside definitions an svg layer copies counts toward the import's 50,000 elements", () => {
+  const fan = (n: number, id: string) => `<use href="#${id}"/>`.repeat(n)
+  // a mask that draws 26,733 elements once its uses expand: one masked shape fits, 900 don't
+  let mask = `<g id="L1">${'<rect width="1" height="1" fill="#fff"/>'.repeat(12)}</g>`
+  for (let i = 2; i <= 4; i++) mask += `<g id="L${i}">${fan(12, `L${i - 1}`)}</g>`
+  const masked = (n: number) =>
+    svgOf(
+      `<defs><mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">${mask}</mask></defs>` +
+        Array.from({ length: n }, (_, i) => `<rect x="${i % 100}" y="${Math.floor(i / 100)}" width="1" height="1" mask="url(#m)"/>`).join(''),
+      'width="100" height="100"'
+    )
+  assert.equal(kids(importSvg(masked(1), 'M').group)[0].type, 'svg')
+  underASecond('refusing 900 masked shapes', () =>
+    assert.throws(() => importSvg(masked(900), 'M'), { message: 'This SVG expands to too much (over 50,000 elements).' })
+  )
+})
+
+test('an import whose layers would come to more than 32 MB of JSON is refused', () => {
+  // one 200-stop gradient shared by thousands of shapes: each shape carries its own copy of the paint
+  const stops = Array.from({ length: 200 }, (_, i) => `<stop offset="${(i / 199).toFixed(4)}" stop-color="#${((i * 1237) % 0xffffff).toString(16).padStart(6, '0')}"/>`).join('')
+  const rects = Array.from({ length: 8000 }, (_, i) => `<rect x="${i % 200}" y="${Math.floor(i / 200)}" width="1" height="1" fill="url(#g)"/>`).join('')
+  // (no time bound: refusing at 32 MB means making 32 MB of layers first)
+  assert.throws(() => importSvg(svgOf(`<linearGradient id="g">${stops}</linearGradient>${rects}`, 'width="200" height="300"'), 'J'), {
+    message: 'This SVG is too large to convert.'
+  })
+})
+
+/** pO: two values that are each an unterminated string, which joined would close each other and let a url through. */
+const STITCH = svgOf(
+  `<style>rect{isolation:'x}</style><style>rect{mix-blend-mode:';filter:url(https://evil.example/f.svg#f);mask-image:url(https://evil.example/m.png)}</style>` +
+    '<rect width="10" height="10"/>',
+  'viewBox="0 0 10 10"'
+)
+
+test('style values are checked one by one, so two can never be stitched into a third', async () => {
+  const clean = cleanSvg(STITCH)
+  assert.doesNotMatch(clean.svg, /evil|<style/)
+  assert.ok(clean.removed.includes('a style value with a string that never ends (2 times)'), JSON.stringify(clean.removed))
+  const d = newDesign('instagram')
+  d.artboards[0].layers.push({ ...base, id: 'a1', name: 'L', type: 'svg', x: 0, y: 0, width: 10, height: 10, svg: STITCH })
+  const out = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' })
+  assert.doesNotMatch(out, /evil|filter|mask/)
+  const again = cleanSvg(out)
+  assert.deepEqual(again.removed, [])
+  assert.equal(again.svg, out, 'the export survives cleanSvg byte for byte')
+  // a rule's quoted font family is applied without its quotes; a value that can't stand alone is dropped
+  const { group } = importSvg(svgOf(`<style>text{font-family:'Liberation Sans', sans-serif}</style><text x="0" y="10">Hi</text>`), 'F')
+  const t = kids(group)[0]
+  assert.ok(t.type === 'text' && t.runs[0].font.family === 'Liberation Sans', JSON.stringify(t))
+})
+
+test('composed svg layers are cleaned again and bring the definitions their inherited paint refers to', () => {
+  const src = svgOf(
+    '<defs><linearGradient id="g"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>' +
+      '<filter id="f"><feGaussianBlur stdDeviation="1"/></filter><marker id="mk"><rect width="1" height="1"/></marker></defs>' +
+      '<g fill="url(#g)" marker-start="url(#mk)"><path d="M0 0L10 0L10 10Z" filter="url(#f)"/></g>',
+    'width="10" height="10"'
+  )
+  const layer = kids(kids(importSvg(src, 'R').group)[0])[0]
+  assert.equal(layer.type, 'svg')
+  if (layer.type !== 'svg') return
+  assert.match(layer.svg, /<linearGradient id="g">/)
+  assert.match(layer.svg, /<marker id="mk">/)
+  assert.match(layer.svg, /fill="url\(#g\)" marker-start="url\(#mk\)"/)
+  const again = cleanSvg(layer.svg)
+  assert.equal(again.svg, layer.svg)
+  assert.deepEqual(again.removed, [])
+})
+
+test('descendant rules over deep nesting and one element with 10,000 classes match in under a second', () => {
+  const css = Array.from({ length: 250 }, (_, i) => `g.zz${i} rect{fill:red}`).join('')
+  const classes = Array.from({ length: 20 }, (_, i) => `c${i}`).join(' ')
+  const deep = svgOf(`<style>${css}</style>${`<g class="${classes}">`.repeat(250)}${'<rect width="1" height="1"/>'.repeat(1000)}${'</g>'.repeat(250)}`, 'width="10" height="10"')
+  underASecond('pQ import', () => importSvg(deep, 'Q'))
+  underASecond('pQ export', () => inlineSvg(cleanSvg(deep).svg, { x: 0, y: 0, w: 10, h: 10 }, 's1-'))
+  const K = 10_000
+  const wide = svgOf(
+    `<style>${Array.from({ length: K }, (_, i) => `.c${i}{fill:red}`).join('')}</style><rect class="${Array.from({ length: K }, (_, i) => `c${i}`).join(' ')}" width="1" height="1"/>`,
+    'width="10" height="10"'
+  )
+  underASecond('pT import', () => importSvg(wide, 'T'))
+  underASecond('pT export', () => inlineSvg(cleanSvg(wide).svg, { x: 0, y: 0, w: 10, h: 10 }, 's1-'))
+})
+
+test('style matching past 2,000,000 steps is refused, fast', () => {
+  // 1,000 rules that all match each of 3,000 rects: 3,000,000 matching steps
+  const css = Array.from({ length: 1000 }, (_, i) => `rect{stroke-width:${i}}`).join('')
+  const svg = svgOf(`<style>${css}</style>${'<rect width="1" height="1"/>'.repeat(3000)}`)
+  underASecond('refusing', () => assert.throws(() => importSvg(svg, 'S'), { message: "This SVG's style rules are too complex to apply." }))
+})
+
+test('svg layers are numbered per render, so ids never collide between them', async () => {
+  const fragment = (body: string) => svgOf(body, 'viewBox="0 0 10 10"')
+  // layer "a" holds id "b-x" and layer "a-b" holds id "x": prefixed by layer id, both would be "s-a-b-x"
+  const one = fragment('<defs><linearGradient id="b-x"><stop offset="0" stop-color="red"/></linearGradient></defs><rect width="5" height="5" fill="url(#b-x)"/>')
+  const two = fragment('<defs><linearGradient id="x"><stop offset="0" stop-color="blue"/></linearGradient></defs><rect width="5" height="5" fill="url(#x)"/>')
+  const svgLayer = (id: string, svg: string): Layer => ({ ...base, id, name: id, type: 'svg', x: 0, y: 0, width: 10, height: 10, svg })
+  for (const [first, second] of [['a', 'a-b'], ['z', 'z']]) {
+    const d = newDesign('instagram')
+    d.artboards[0].layers.push(svgLayer(first, one), svgLayer(second, two))
+    const out = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' })
+    // fragment ids (two layers sharing an id still repeat the renderer's own l-<id>, which layer ids being unique avoids)
+    const ids = Array.from(out.matchAll(/ id="(s[^"]+)"/g), m => m[1])
+    assert.deepEqual(ids, ['s1-b-x', 's2-x'])
+    assert.match(out, /<linearGradient id="s1-b-x">[\s\S]*fill="url\(#s1-b-x\)"[\s\S]*<linearGradient id="s2-x">[\s\S]*fill="url\(#s2-x\)"/)
+    assert.equal(cleanSvg(out).svg, out)
+  }
+})
+
+test("an inlined fragment's root loses its filter, and names are never prefixed", () => {
+  const out = inlineSvg(
+    svgOf(
+      '<defs><filter id="f"><feGaussianBlur stdDeviation="9"/></filter></defs><g id="x" data-name="url(#f)" inkscape:label="url(#f)" filter="url(#f)"><rect width="5" height="5"/></g>',
+      'xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" viewBox="0 0 10 10" filter="url(#f)" style="filter:url(#f);fill:red"'
+    ),
+    { x: 0, y: 0, w: 10, h: 10 },
+    's1-'
+  )
+  assert.match(out, /^<svg [^>]*fill="red">/)
+  assert.doesNotMatch(out.slice(0, out.indexOf('>')), /filter/)
+  assert.match(out, /<g id="s1-x" data-name="url\(#f\)" inkscape:label="url\(#f\)" filter="url\(#s1-f\)">/)
+})
+
+test('a reference to a name SVG does not allow is named plainly', () => {
+  const { removed } = cleanSvg(svgOf('<rect id="9r" width="1" height="1"/><use href="#9r"/><linearGradient id="1g"/><rect width="1" height="1" fill="url(#1g)"/>'))
+  assert.ok(removed.includes("a reference to a name SVG doesn't allow (#9r)"), JSON.stringify(removed))
+  assert.ok(removed.includes("a reference to a name SVG doesn't allow (#1g)"), JSON.stringify(removed))
 })

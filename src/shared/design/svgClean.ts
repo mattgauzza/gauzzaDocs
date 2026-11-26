@@ -97,7 +97,8 @@ const ATTRIBUTES = new Set([
   'systemLanguage', 'requiredFeatures', 'role'
 ])
 /** Free text that is never read as a URL or style. */
-const isFreeText = (name: string): boolean => /^data-[\w.-]+$/.test(name) || /^aria-[a-z]+$/.test(name) || name === 'role'
+const isFreeText = (name: string): boolean =>
+  name === 'role' || ((name[0] === 'd' || name[0] === 'a') && (/^data-[\w.-]+$/.test(name) || /^aria-[a-z]+$/.test(name)))
 
 /** CSS functions a value may use. url() is checked separately and may only point at #id. */
 const FUNCTIONS = new Set([
@@ -138,6 +139,19 @@ const fragment = (v: string): string | null => {
   const t = xmlTrim(v)
   return FRAGMENT.test(t) ? t : null
 }
+/** Characters that don't show: controls, format characters, line and paragraph separators, unpaired surrogates. */
+const HIDDEN = /[\u0000-\u001f\u007f-\u00a0\u00ad\u061c\u1680\u180e\u2000-\u200f\u2028-\u202f\u205f-\u206f\u3000\ufeff\ud800-\udfff]/
+const HIDDEN_ALL = new RegExp(HIDDEN.source, 'g')
+/** A value as it reads on screen: what HIDDEN matches taken out, then trimmed. */
+export const visible = (v: string): string => v.replace(HIDDEN_ALL, '').trim()
+/** How a reference that isn't a plain #name is named in `removed`. */
+function badReference(value: string): string {
+  const t = xmlTrim(value)
+  if (HIDDEN.test(t) && visible(t).startsWith('#')) return `a reference with hidden characters (${short(visible(t))})`
+  if (t.startsWith('#')) return `a reference to a name SVG doesn't allow (${short(t)})`
+  return `a reference outside the file (${short(t)})`
+}
+
 /** The ids a canonical value refers to through url(#id). */
 export function urlRefs(v: string): string[] {
   const out: string[] = []
@@ -166,16 +180,17 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
   if (raw.includes('<')) return { bad: 'a style value with markup' }
   const k = KEYWORD.exec(raw)
   if (k) return { bad: `a style value using ${k[0].toLowerCase().replace(/[:(]$/, '')}` }
-  if (!raw.includes('(')) return { value: raw }
-  const low = raw.replace(/[A-Z]/g, c => c.toLowerCase())
+  if (!/[('"]/.test(raw)) return { value: raw } // no function and no string: nothing more to check
   let out = ''
   let last = 0
   let start = -1 // where the identifier before the current position began
   for (let i = 0; i < raw.length; i++) {
     const ch = raw[i]
     if (ch === '"' || ch === "'") {
+      // a string that never closes would swallow whatever is joined after it, so it can't stay
       const end = raw.indexOf(ch, i + 1)
-      i = end < 0 ? raw.length : end
+      if (end < 0) return { bad: 'a style value with a string that never ends' }
+      i = end
       start = -1
       continue
     }
@@ -187,7 +202,7 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
       start = -1
       continue
     }
-    const name = start < 0 ? '' : low.slice(start, i)
+    const name = start < 0 ? '' : raw.slice(start, i).toLowerCase()
     if (name !== 'url') {
       if (!FUNCTIONS.has(name)) return { bad: `a style function that could load something (${short(name)})` }
       start = -1
@@ -203,12 +218,12 @@ export function cleanValue(raw: string, css: boolean): { value: string } | { bad
       j = end + 1
     } else {
       const from = j
-      while (j < raw.length && !/[)\s'"(]/.test(raw[j])) j++
+      while (j < raw.length && !/[)\t\n\r '"(]/.test(raw[j])) j++ // CSS white space only, so an NBSP stays in view
       arg = raw.slice(from, j)
     }
     while (raw[j] === ' ' || raw[j] === '\t' || raw[j] === '\n' || raw[j] === '\r') j++
     const ref = fragment(arg)
-    if (raw[j] !== ')' || !ref) return { bad: `a reference outside the file (${short(arg)})` }
+    if (raw[j] !== ')' || !ref) return { bad: badReference(arg) }
     out += raw.slice(last, start) + `url(${ref})`
     last = j + 1
     i = j
@@ -500,7 +515,7 @@ function cleanAttributes(el: Element, notes: Notes): void {
       const compact = a.value.replace(/[\s\u0000-\u001f]/g, '')
       if (ref && tag !== 'image') a.value = ref
       else if (ref) drop(`an image that is not an embedded picture (${short(ref)})`)
-      else if (v.startsWith('#')) drop(`a reference with hidden characters (${short(a.value)})`)
+      else if (v.startsWith('#') || visible(a.value).startsWith('#')) drop(badReference(a.value))
       else if (tag === 'image' && IMAGE_TYPES.test(compact.toLowerCase())) {
         const bad = badImage(compact)
         if (bad) drop(bad)
@@ -538,6 +553,15 @@ function cleanAttributes(el: Element, notes: Notes): void {
     const v = cleanValue(a.value, PRESENTATION.has(local))
     if ('bad' in v) drop(v.bad)
     else a.value = v.value
+  }
+  // One reference per element. A browser follows href over xlink:href while a checker might read either, so two
+  // stay only as one xlink:href, and only when they say the same thing.
+  const hrefs = hrefAttrs(el)
+  if (hrefs.length > 1) {
+    const values = new Set(hrefs.map(a => a.value))
+    for (const a of hrefs) el.removeAttributeNode(a)
+    if (values.size === 1) el.setAttributeNS(XLINK_NS, 'xlink:href', hrefs[0].value)
+    else notes.add(`two different references on one element (${[...values].map(short).join(', ')})`)
   }
 }
 
@@ -663,11 +687,32 @@ function overGraph(
   return value
 }
 
+/** For each element, how many elements it draws with every <use> in it expanded (a loop counts as Infinity). */
+export function expandedSizes(root: Element, ids: Map<string, Element>): Map<Element, number> {
+  const all = allElements(root)
+  if (all.some(el => el.localName === 'use')) {
+    const target = (el: Element): Element | null => (el.localName === 'use' ? (ids.get(hrefId(el) ?? '') ?? null) : null)
+    return overGraph(all, target, (_el, kids, via) => 1 + kids.reduce((a, v) => a + v, 0) + (via ?? 0))
+  }
+  // no <use>: each size is just the element count of the subtree, added up children first
+  const size = new Map<Element, number>()
+  for (let i = all.length - 1; i >= 0; i--) {
+    const el = all[i]
+    size.set(el, (size.get(el) ?? 0) + 1)
+    const p = el.parentNode as Element | null
+    if (p && p.nodeType === 1) size.set(p, (size.get(p) ?? 0) + size.get(el)!)
+  }
+  return size
+}
+
 /** Drops the hrefs (outside <use>) that point at an id not in `ids`. */
 function dropMissingHrefs(all: Element[], ids: Map<string, Element>, notes: Notes): void {
   for (const el of all) {
     if (el.localName === 'use' || el.localName === 'image') continue // uses are handled apart; images hold data only
-    for (const a of hrefAttrs(el)) {
+    const attrs = el.attributes
+    for (let i = attrs.length - 1; i >= 0; i--) {
+      const a = attrs[i]
+      if (a.localName !== 'href' || (a.namespaceURI && a.namespaceURI !== XLINK_NS)) continue
       const id = fragment(a.value)?.slice(1)
       if (id !== undefined && ids.has(id)) continue
       notes.add(`a reference to a missing id (#${short(id ?? a.value)})`)

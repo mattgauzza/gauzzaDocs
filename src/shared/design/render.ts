@@ -22,7 +22,11 @@ export interface RenderOptions {
 }
 
 interface Scope { prefix: string; overrides: Record<string, Override>; top: boolean; board: Artboard; comps: string[] }
-interface Ctx { design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string> }
+interface Ctx {
+  design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string>
+  /** svg layers inlined so far, which numbers each one's id prefix */
+  svgs: number
+}
 
 const ENTITIES: Record<string, string> = {
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;', '\t': '&#9;', '\n': '&#10;', '\r': '&#13;',
@@ -262,10 +266,11 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
     case 'paint':
       return imageEl(ctx, l.asset, l.fit, boxOf(l))
     case 'svg':
-      // the window only ever draws outside SVG as an image; an export inlines it, its ids prefixed per layer with
-      // s-<key>- (an id must start with a letter to be referenced, and no id the renderer makes starts with s-)
+      // The window only ever draws outside SVG as an image; an export inlines it. Its ids are prefixed s1-, s2-, ...
+      // by the order svg layers are drawn: the number ends at the dash, so no two prefixes can run into each other
+      // (as layer ids a and a-b would), duplicate layer ids don't matter, and no id the renderer makes starts with s.
       return ctx.opts.mode === 'export'
-        ? inlineSvg(String(l.svg ?? ''), boxOf(l), `s-${key}-`)
+        ? inlineSvg(String(l.svg ?? ''), boxOf(l), `s${++ctx.svgs}-`)
         : imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
     case 'group':
       return groupSvg(ctx, l, key, scope)
@@ -449,7 +454,7 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 }
 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
-  return { design, opts, defs: [], ids: new Map(), paints: new Map() }
+  return { design, opts, defs: [], ids: new Map(), paints: new Map(), svgs: 0 }
 }
 
 /** One artboard as a standalone SVG document. */

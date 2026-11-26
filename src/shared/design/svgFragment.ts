@@ -1,5 +1,5 @@
 import type { Box } from './geometry'
-import { PRESENTATION, XLINK_NS, allElements, cleanSvgRoot, serializeSvg } from './svgClean'
+import { INKSCAPE_NS, PRESENTATION, XLINK_NS, allElements, cleanSvgRoot, cleanValue, serializeSvg } from './svgClean'
 import { len } from './svgPaint'
 import { type Decl, cssBlocks, splitDeclarations } from './svgStyle'
 import { num } from './text'
@@ -36,24 +36,6 @@ function parseSelector(s: string): Selector | null {
   return parts.length ? { parts, spec } : null
 }
 
-const classesOf = (el: Element): Set<string> => new Set((el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean))
-const matches = (c: Compound, el: Element): boolean => {
-  if (c.tag && c.tag !== el.localName) return false
-  if (c.ids.length && !c.ids.every(i => i === el.getAttribute('id'))) return false
-  if (!c.classes.length) return true
-  const cls = classesOf(el)
-  return c.classes.every(x => cls.has(x))
-}
-/** The last compound matches the element; the others match ancestors, nearest first. */
-function matchesAll(sel: Selector, el: Element): boolean {
-  if (!matches(sel.parts[sel.parts.length - 1], el)) return false
-  let j = sel.parts.length - 2
-  for (let n = el.parentNode; n && j >= 0; n = n.parentNode) {
-    if (n.nodeType === 1 && matches(sel.parts[j], n as Element)) j--
-  }
-  return j < 0
-}
-
 /** `font: italic bold 12px/1.2 Arial` as its longhands. */
 function expandFont(v: string): Decl[] {
   const m = /^\s*((?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{3})\s+)*)([\d.]+[a-z%]*)(?:\s*\/\s*\S+)?\s+(.+)$/i.exec(v)
@@ -68,16 +50,49 @@ function expandFont(v: string): Decl[] {
 
 const short = (v: string): string => (v.length > 60 ? v.slice(0, 57) + '...' : v)
 
+/** A font family list with the quotes taken off plain names ('Myriad Pro', Arial), or null when that isn't safe. */
+function plainFamilies(v: string): string | null {
+  const names = v.split(',').map(p => p.trim().replace(/^(['"])(.*)\1$/, '$2').trim())
+  return names.every(n => /^[\w .-]+$/.test(n)) ? names.join(', ') : null
+}
+
+/**
+ * A declaration that can stand alone as an attribute or next to others in a style attribute: no quote, backslash,
+ * semicolon or brace that could reach into a neighbor, and nothing cleanValue would change (so a url() is only ever
+ * the canonical url(#id)). Null when it can't.
+ */
+function safeDecl(d: Decl): Decl | null {
+  const value = d.prop === 'font-family' ? plainFamilies(d.value) : d.value
+  if (!value || /['"\\;{}]/.test(value)) return null
+  const v = cleanValue(value, true)
+  return 'bad' in v || v.value !== value ? null : { ...d, value }
+}
+
+/** (xmldom has no firstElementChild.) */
+function hasElementChild(el: Element): boolean {
+  for (let n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 1) return true
+  return false
+}
+
 interface Rule { sel: Selector; decls: Decl[]; order: number }
-/** Rule checks one import may make; past this, the remaining elements get no style rules (and a note says so). */
-const MAX_RULE_CHECKS = 2_000_000
+/** Facts about an element that rule matching reads, worked out once per element. */
+interface Facts { tag: string; id: string | null; classes: Set<string> }
+/** Steps one style sheet may take to match its rules (candidates checked and ancestors walked). */
+export const MAX_STYLE_STEPS = 2_000_000
+/** Past this many entries, an element's set of ancestor ids, classes and tags isn't kept (matching walks instead). */
+const MAX_ANCESTOR_TOKENS = 10_000
 
 /**
  * Applies the <style> rules as attributes, then drops the style elements. Specificity orders the rules (id, then
  * class, then element, later rules winning ties); rules beat presentation attributes and the inline style attribute
  * beats rules, as in a browser. Element, class and id selectors apply, alone, compounded or joined by descendant
- * spaces; `note` hears about the rest. Rules are indexed by the id, class or element of their last part, so each
- * element only checks the rules that could match it.
+ * spaces; `note` hears about the rest. Every declaration is checked on its own (safeDecl) before it's written, so two
+ * can never be stitched into a third.
+ *
+ * Rules are indexed by the id, class or element of their last part. Each element's id, classes and tag are read once,
+ * and the ids, classes and tags of all its ancestors are gathered top down, so a descendant rule that can't match is
+ * skipped without walking up. Candidates checked and ancestors walked count against MAX_STYLE_STEPS; past it, the
+ * SVG is refused.
  */
 export function applyStyles(root: Element, note: (s: string) => void): void {
   const byId = new Map<string, Rule[]>()
@@ -90,7 +105,9 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
     else m.set(k, [r])
   }
   let order = 0
-  for (const st of allElements(root).filter(e => e.localName === 'style')) {
+  let descendant = false
+  const all = allElements(root)
+  for (const st of all.filter(e => e.localName === 'style')) {
     for (const b of cssBlocks(st.textContent ?? '')) {
       if (b.kind === 'at') {
         if (b.name === 'media') note(`Style rules inside @media were not applied (${short(b.prelude)})`)
@@ -103,6 +120,7 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
           note(`A style rule the converter can't apply was skipped (${short(s.trim())})`)
           continue
         }
+        if (sel.parts.length > 1) descendant = true
         const rule = { sel, decls, order: order++ }
         const last = sel.parts[sel.parts.length - 1]
         if (last.ids.length) add(byId, last.ids[0], rule)
@@ -117,27 +135,100 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
     st.parentNode?.removeChild(st)
   }
   const indexed = byId.size + byClass.size + byTag.size + any.length > 0
-  let work = 0
-  let capped = false
-  for (const el of allElements(root)) {
+
+  const facts = new Map<Element, Facts>()
+  const factsOf = (el: Element): Facts => {
+    let f = facts.get(el)
+    if (!f) {
+      f = { tag: el.localName, id: el.getAttribute('id'), classes: new Set((el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean)) }
+      facts.set(el, f)
+    }
+    return f
+  }
+  // the ids (#), classes (.) and tags (:) of every ancestor of each element, top down; null when too many to keep
+  const above = new Map<Element, Set<string> | null>()
+  const below = new Map<Element, Set<string> | null>() // above, plus the element's own
+  if (indexed && descendant) {
+    let copied = 0 // entries copied into new sets; past the cap, the rest walk instead
+    for (const el of all) {
+      const p = el.parentNode as Element | null
+      const up = p && p.nodeType === 1 ? (below.get(p) ?? null) : new Set<string>()
+      above.set(el, up)
+      if (!hasElementChild(el)) continue // only children read an element's own set
+      const f = factsOf(el)
+      const own = [`:${f.tag}`, ...(f.id ? [`#${f.id}`] : []), ...[...f.classes].map(c => `.${c}`)]
+      if (up === null || up.size + own.length > MAX_ANCESTOR_TOKENS || copied > MAX_STYLE_STEPS) below.set(el, null)
+      else if (own.every(t => up.has(t))) below.set(el, up)
+      else {
+        const s = new Set(up)
+        for (const t of own) s.add(t)
+        copied += s.size
+        below.set(el, s)
+      }
+    }
+  }
+
+  let steps = 0
+  const step = (n = 1) => {
+    steps += n
+    if (steps > MAX_STYLE_STEPS) throw new Error("This SVG's style rules are too complex to apply.")
+  }
+  // every candidate check is a step: count them all first, so a sheet that asks too much is refused before any work
+  if (indexed) {
+    for (const el of all) {
+      if (!el.parentNode) continue
+      const f = factsOf(el)
+      let n = (f.id ? (byId.get(f.id)?.length ?? 0) : 0) + (byTag.get(f.tag)?.length ?? 0) + any.length
+      for (const c of f.classes) n += byClass.get(c)?.length ?? 0
+      step(n)
+    }
+  }
+  // a rule's declarations apply to every element it matches: each is checked once
+  const seenDecls = new Map<Decl, Decl[]>()
+  const checked = (d: Decl): Decl[] => {
+    let out = seenDecls.get(d)
+    if (!out) {
+      out = (d.prop === 'font' ? expandFont(d.value) : [d]).map(safeDecl).filter((x): x is Decl => x !== null)
+      seenDecls.set(d, out)
+    }
+    return out
+  }
+  const matches = (c: Compound, f: Facts): boolean =>
+    (!c.tag || c.tag === f.tag) && c.ids.every(i => i === f.id) && c.classes.every(x => f.classes.has(x))
+  const matchesAll = (sel: Selector, el: Element): boolean => {
+    if (!matches(sel.parts[sel.parts.length - 1], factsOf(el))) return false
+    if (sel.parts.length === 1) return true
+    const up = above.get(el)
+    if (up) {
+      // every part above must find its id, classes and tag somewhere among the ancestors
+      for (let j = 0; j < sel.parts.length - 1; j++) {
+        const c = sel.parts[j]
+        if ((c.tag && !up.has(`:${c.tag}`)) || c.ids.some(i => !up.has(`#${i}`)) || c.classes.some(x => !up.has(`.${x}`))) return false
+      }
+    }
+    let j = sel.parts.length - 2
+    for (let n = el.parentNode; n && j >= 0; n = n.parentNode) {
+      if (n.nodeType !== 1) continue
+      step()
+      if (matches(sel.parts[j], factsOf(n as Element))) j--
+    }
+    return j < 0
+  }
+
+  for (const el of all) {
+    if (!el.parentNode) continue // a style element removed above
     const inline = splitDeclarations(el.getAttribute('style') ?? '')
     const candidates: Rule[] = []
     const take = (list: Rule[] | undefined) => {
       if (!list) return
       for (const r of list) candidates.push(r)
     }
-    if (indexed && !capped) {
-      const id = el.getAttribute('id')
-      if (id) take(byId.get(id))
-      for (const c of classesOf(el)) take(byClass.get(c))
-      take(byTag.get(el.localName))
+    if (indexed) {
+      const f = factsOf(el)
+      if (f.id) take(byId.get(f.id))
+      for (const c of f.classes) take(byClass.get(c))
+      take(byTag.get(f.tag))
       take(any)
-      work += candidates.length
-      if (work > MAX_RULE_CHECKS) {
-        capped = true
-        note('Some style rules were not applied (the style sheet asks for too much matching)')
-        candidates.length = 0
-      }
     }
     const hits = candidates.filter(r => matchesAll(r.sel, el)).sort((a, b) => a.sel.spec - b.sel.spec || a.order - b.order)
     if (!hits.length && !inline.length) continue
@@ -145,8 +236,7 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
     const put = (list: Decl[], important: boolean) => {
       for (const d of list) {
         if (d.important !== important) continue
-        if (d.prop === 'font') for (const x of expandFont(d.value)) final.set(x.prop, x.value)
-        else final.set(d.prop, d.value)
+        for (const safe of checked(d)) final.set(safe.prop, safe.value)
       }
     }
     for (const r of hits) put(r.decls, false)
@@ -164,14 +254,22 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
   }
 }
 
+/** Free text that names things: never rewritten. */
+const isFreeText = (a: Attr): boolean => {
+  const name = a.localName ?? a.name
+  return a.namespaceURI === INKSCAPE_NS || name === 'role' || /^(data|aria)-/.test(name)
+}
+
 /**
  * Prefixes every id and rewrites every reference to one: href and xlink:href "#id", and url(#id) in any attribute or
  * style. Cleaned input only holds the canonical forms; quotes, spaces and upper case are matched as well regardless.
+ * Names (data-name, inkscape:label and the like) are left as they are.
  */
 function prefixIds(root: Element, prefix: string): void {
   for (const el of allElements(root)) {
     for (const a of Array.from(el.attributes)) {
       const name = a.localName ?? a.name
+      if (isFreeText(a)) continue
       if (!a.namespaceURI && name === 'id') a.value = prefix + a.value
       else if (name === 'href' && (!a.namespaceURI || a.namespaceURI === XLINK_NS)) {
         const v = a.value.trim()
@@ -184,17 +282,18 @@ function prefixIds(root: Element, prefix: string): void {
 /**
  * An svg layer's fragment inline, for export: cleaned again (it comes from a file), its style rules applied as
  * attributes, every id prefixed with `prefix`, as a nested <svg> filling `box` and stretched to it the way the layer's
- * image is drawn. An image clips to its box, so the root's own overflow is dropped (a nested svg clips by default).
- * Empty when the fragment can't be read.
+ * image is drawn. An image paints only inside its box, so the root's own overflow and filter are dropped (a nested svg
+ * clips its content by default, but a filter on it could paint outside). Empty when the fragment can't be read, or
+ * its style rules are too complex to apply.
  */
 export function inlineSvg(svg: string, box: Box, prefix: string): string {
   let root: Element
   try {
     root = cleanSvgRoot(svg).root
+    applyStyles(root, () => undefined)
   } catch {
     return ''
   }
-  applyStyles(root, () => undefined)
   let viewBox = root.getAttribute('viewBox')
   if (!viewBox) {
     // as an image, a fragment without a viewBox is stretched from its own size
@@ -205,7 +304,7 @@ export function inlineSvg(svg: string, box: Box, prefix: string): string {
   prefixIds(root, prefix)
   // the placement first, then whatever else the fragment's root carries (inherited paint, its prefixed id)
   const rest = Array.from(root.attributes)
-    .filter(a => a.namespaceURI || !GEOMETRY.has(a.localName ?? a.name))
+    .filter(a => a.namespaceURI || !ROOT_DROPPED.has(a.localName ?? a.name))
     .map(a => ({ ns: a.namespaceURI, name: a.name, value: a.value }))
   for (const a of Array.from(root.attributes)) root.removeAttributeNode(a)
   root.setAttribute('x', num(box.x))
@@ -216,10 +315,11 @@ export function inlineSvg(svg: string, box: Box, prefix: string): string {
   root.setAttribute('preserveAspectRatio', 'none')
   for (const a of rest) {
     if (!a.ns && a.name === 'style') {
-      const kept = splitDeclarations(a.value).filter(d => d.prop !== 'overflow')
+      const kept = splitDeclarations(a.value).filter(d => !ROOT_DROPPED.has(d.prop))
       if (kept.length) root.setAttribute('style', kept.map(d => `${d.prop}:${d.value}${d.important ? ' !important' : ''}`).join(';'))
     } else root.setAttributeNS(a.ns, a.name, a.value)
   }
   return serializeSvg(root, false)
 }
-const GEOMETRY = new Set(['x', 'y', 'width', 'height', 'viewBox', 'preserveAspectRatio', 'overflow'])
+/** What a fragment's root loses inline: its own placement (the layer box replaces it), overflow and filter. */
+const ROOT_DROPPED = new Set(['x', 'y', 'width', 'height', 'viewBox', 'preserveAspectRatio', 'overflow', 'filter'])
