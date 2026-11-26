@@ -107,9 +107,6 @@ const OPS = [
   'svg', 'diagram', 'tidy', 'apply'
 ]
 
-/** The design ops that only look: they never change the design. */
-export const DESIGN_READ_OPS = new Set(['read', 'info', 'export'])
-
 async function runOp(d: Draft, op: AgentOp): Promise<unknown> {
   switch (op.op) {
     case 'read':
@@ -292,18 +289,18 @@ function exportOp(d: Draft, op: AgentOp): unknown {
   if (op.format !== undefined) oneOf('format', op.format, ['svg'] as const)
   const fonts = d.services.fonts
   if (!fonts) throw new OpError('Exporting needs fonts to measure text, and none were given')
-  const downgrades: Downgrade[] = []
-  let svg = designToSvg(d.design, board.id, { fonts, assets: d.assets, mode: 'export', downgrades })
   let width = fin(board.width, 0)
   let height = fin(board.height, 0)
+  let size: { width: number; height: number } | undefined
   if (op.width !== undefined) {
-    const w = number('width', op.width, 1, MAX_SIZE)
-    height = width ? (height * w) / width : height
-    width = w
-    // only the root's own size: designToSvg writes it once, before the view box
-    const end = svg.indexOf('>')
-    svg = svg.slice(0, end).replace(/ width="[^"]*" height="[^"]*"/, ` width="${fmt(width)}" height="${fmt(height)}"`) + svg.slice(end)
+    // rounded as the drawing writes them, so the reply says exactly what the file holds
+    const round = (v: number) => Math.round(v * 100) / 100
+    const w = round(number('width', op.width, 1, MAX_SIZE))
+    size = { width: w, height: round(width ? (height * w) / width : height) }
+    ;({ width, height } = size)
   }
+  const downgrades: Downgrade[] = []
+  const svg = designToSvg(d.design, board.id, { fonts, assets: d.assets, mode: 'export', downgrades, size })
   const result: Record<string, unknown> = { svg, artboard: { id: board.id, name: board.name }, width, height }
   if (downgrades.length) result.leftOut = downgrades
   return result

@@ -80,6 +80,18 @@ function jsonInput(ctx: Ctx, v: string | undefined, what: string): unknown {
   }
 }
 
+/**
+ * A name made safe for a file name on any system: no characters Windows refuses (\ / : * ? " < > | and control
+ * characters), spaces in their place, no dots or spaces at the end, at most 100 characters.
+ */
+const fileNamePart = (name: string): string =>
+  name
+    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 100)
+    .replace(/[\s.]+$/, '')
+    .trim()
+
 function diagramText(r: DiagramResult): string {
   const w = Math.max(0, ...[...Object.keys(r.nodes), ...Object.keys(r.containers)].map(k => k.length))
   const rows = [`Diagram group ${r.id}`]
@@ -135,7 +147,7 @@ export function registerDesignCommands(program: Command, ctx: Ctx) {
         onArtboard(
           d
             .command('set <file>')
-            .description("change a layer's properties")
+            .description("change a layer's properties. To put it in a group, use move --to group --parent <group>")
             .option('--part <inner>', "a layer inside an instance's component: sets its text, fill, stroke or visible for this instance only")
             .option('--all-artboards', 'the layer of that name on every artboard that has one')
         )
@@ -358,23 +370,27 @@ export function registerDesignCommands(program: Command, ctx: Ctx) {
         .option('--format <format>', 'svg or png', 'svg')
         .option('--scale <n>', 'png: 1 or 2')
         .option('--width <px>', 'width of the image, keeping its shape (svg: the size it opens at)')
-        .option('--out <path>', 'where to save it, or "-" to print it (default: <name>.<format> beside the design)')
+        .option('--out <path>', 'where to save it, or "-" to print it (default: beside the design as <name>.svg, or <name> <artboard>.svg with --artboard)')
     )
   ).action(async (file: string, o) => {
     const format = String(o.format).toLowerCase()
     if (format !== 'svg' && format !== 'png') throw new Error('--format must be svg or png')
-    if (o.scale !== undefined && !['1', '2'].includes(String(o.scale))) throw new Error('--scale must be 1 or 2')
     const p = path.resolve(design(file))
     if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
+    // --scale is for png only: svg ignores it
     if (format === 'png') {
+      if (o.scale !== undefined && !['1', '2'].includes(String(o.scale))) throw new Error('--scale must be 1 or 2')
       if (!(await appRunning())) throw new Error(RENDER_NEEDS_APP)
       throw new Error("PNG export isn't available yet.")
     }
     const r = (await ctx.run(p, { op: 'export', format: 'svg', width: o.width, artboard: o.artboard }, o)) as {
-      svg: string; leftOut?: { layer: string; name: string; reason: string }[]
+      svg: string; artboard: { id: string; name: string }; leftOut?: { layer: string; name: string; reason: string }[]
     }
     if (o.out === '-') return ctx.out(r, () => r.svg)
-    const out = path.resolve(o.out ?? path.join(path.dirname(p), `${path.basename(p, path.extname(p))}.svg`))
+    // beside the design, named after it, and after the artboard when one was asked for (so one never replaces another)
+    const stem = path.basename(p, path.extname(p))
+    const named = o.artboard === undefined ? stem : `${stem} ${fileNamePart(r.artboard.name) || r.artboard.id}`
+    const out = path.resolve(o.out ?? path.join(path.dirname(p), `${named}.svg`))
     fs.writeFileSync(out, r.svg)
     const { svg: _svg, ...rest } = r
     // stdout is the path alone; what the drawing left out goes beside it

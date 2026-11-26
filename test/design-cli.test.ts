@@ -111,10 +111,43 @@ test('export --format svg --out x.svg writes a file with inkscape:label', () => 
   assert.match(svg, /^<svg /)
   assert.match(svg, /inkscape:label="Plate"/)
   assert.match(svg, /width="1000" height="1000" viewBox="0 0 1000 1000"/)
-  // without --out it goes beside the design; --width sizes the root and keeps the view box
-  const beside = ok(['design', 'export', file, '--width', '250']).trim()
+  // without --out it goes beside the design; --width sizes the root and keeps the view box; --scale is for png only
+  const beside = ok(['design', 'export', file, '--width', '250', '--scale', '3', '--format', 'svg']).trim()
   assert.equal(beside, path.join(work, 'Badge.svg'))
   assert.match(fs.readFileSync(beside, 'utf8'), /width="250" height="250" viewBox="0 0 1000 1000"/)
+})
+
+test('export --artboard with no --out names the file after the artboard and leaves <name>.svg alone', () => {
+  const file = newDesign('Campaign', 'instagram')
+  ok(['design', 'artboard', 'add', file, '--name', 'Story: v2/final?', '--size', 'story'])
+  const first = ok(['design', 'export', file]).trim()
+  assert.equal(first, path.join(work, 'Campaign.svg'))
+  const before = fs.readFileSync(first, 'utf8')
+  const second = ok(['design', 'export', file, '--artboard', 'Story: v2/final?']).trim()
+  assert.equal(second, path.join(work, 'Campaign Story v2 final.svg'))
+  assert.match(fs.readFileSync(second, 'utf8'), /width="1080" height="1920"/)
+  assert.equal(fs.readFileSync(first, 'utf8'), before, 'the first artboard\'s file is untouched')
+})
+
+test('reads never wait on or touch a lock another writer holds: svg --get, export and info', () => {
+  const file = newDesign('Locked')
+  ok(['design', 'svg', file, '--name', 'Mark', '-'], '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#123456"/></svg>')
+  // a fresh lock from a live program (this test's own process): a writer would wait up to a minute for it
+  const lock = `${file}.lock`
+  const held = JSON.stringify({ pid: process.pid, at: Date.now() })
+  fs.writeFileSync(lock, held)
+  const stamp = fs.statSync(lock).mtimeMs
+  try {
+    const t0 = Date.now()
+    assert.match(ok(['design', 'svg', file, '--get', 'Mark']), /#123456/)
+    assert.match(ok(['design', 'export', file, '--out', '-']), /inkscape:label="Mark"/)
+    assert.equal((JSON.parse(ok(['info', file, '--json'])) as { layers: number }).layers, 2)
+    assert.ok(Date.now() - t0 < 20_000, 'no read waited for the lock')
+    assert.equal(fs.readFileSync(lock, 'utf8'), held, 'the lock is as its writer left it')
+    assert.equal(fs.statSync(lock).mtimeMs, stamp)
+  } finally {
+    fs.rmSync(lock, { force: true })
+  }
 })
 
 test('export --format png fails without the app with the Global Constraints message', () => {

@@ -23,6 +23,7 @@ import { installUpdate, updateReady, watchForUpdates } from './updates'
 import { LOOK_MAX, closeLook, look } from './look'
 import { personName } from '../core/person'
 import { mentionsName } from '../shared/mentions'
+import { isReadOp } from '../shared/ops/readOps'
 
 app.setAppUserModelId('app.gauzzadocs.desktop')
 protocol.registerSchemesAsPrivileged([
@@ -202,7 +203,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'op': {
       const op = params.op as AgentOp
       if (!op?.op) throw new Error('missing op')
-      const edits = !READ_ONLY_OPS.has(op.op) && op.op !== 'save' && !op.dryRun // what goes in the work history
+      const edits = !isReadOp(op) && op.op !== 'save' && !op.dryRun // what goes in the work history
       // --live: open it, or bring its tab to the front, so the person can watch the edit happen.
       // (Just opened counts as open: the window's tab list can arrive a moment after the editor is ready.)
       let opened = false
@@ -219,7 +220,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       // The version this edit keeps is credited to the agent.
       const offline = await work('runOffline', [file, op, { ...asAgent(agent), summary: describeOps([op.op], kindOf(file)) }])
       // Other agents hear about edits made on disk too (live edits are diffed by the window instead).
-      if (!READ_ONLY_OPS.has(op.op)) bridge?.emit({ type: 'edit', by: 'agent', author: agent.name, path: file, summary: `${op.op} (on disk)` })
+      if (!isReadOp(op)) bridge?.emit({ type: 'edit', by: 'agent', author: agent.name, path: file, summary: `${op.op} (on disk)` })
       if (edits) logHistory(file, 'agent-op', agent.name, op.op)
       return { result: offline, live: false }
     }
@@ -241,9 +242,6 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       throw new Error(`Unknown method "${method}"`)
   }
 }
-
-/** Ops that only look, so they're not news to other agents. */
-const READ_ONLY_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets', 'charts', 'rules', 'merges', 'comments', 'export'])
 
 // ---------- subscribed agents ----------
 let runner: AgentRunner | null = null

@@ -2,7 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { Kind } from '../../shared/kinds'
 import { textOps } from '../../shared/ops/text'
-import { DESIGN_READ_OPS, designOps } from '../../shared/ops/design'
+import { designOps } from '../../shared/ops/design'
+import { isReadOp } from '../../shared/ops/readOps'
 import type { OpHandler, OpResult, OpServices } from '../../shared/ops/types'
 import { type FontSource, fontsFor, newFonts } from '../../shared/design/fonts'
 import type { AgentOp, FilePayload } from '../../shared/types'
@@ -104,7 +105,7 @@ async function applyOffline(payload: FilePayload & { kind: 'design' }, op: Agent
 }
 
 /**
- * An op on a design that isn't open in the app. Every op but those that only look (read, info, export) holds the file's
+ * An op on a design that isn't open in the app. Every op but those that only look (isReadOp) holds the file's
  * lock from loading to saving, so two writers take turns instead of losing an op, and the save stops with "Changed by
  * someone else; reload to see it" when the file's size or modified time moved since it was loaded (a writer that
  * doesn't take the lock). Fonts as applyOffline says. The save keeps the old thumbnail and marks it stale: only the app
@@ -124,7 +125,7 @@ async function runDesignOffline(file: string, op: AgentOp, ctx?: WriteContext): 
     await saveFile(p, { ...out, file: { ...out.file, design: { ...out.file.design, thumbnailStale: true } } }, ctx, { locked: true })
     return r.result
   }
-  return DESIGN_READ_OPS.has(op.op) ? go() : withDesignLock(p, go)
+  return isReadOp(op) ? go() : withDesignLock(p, go)
 }
 
 // Ops on presentations that are not open in the app: the same pure ops the slides editor applies live.

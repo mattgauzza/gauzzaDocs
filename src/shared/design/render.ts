@@ -28,6 +28,8 @@ export interface RenderOptions {
   seconds?: number
   /** Each layer the drawing leaves out is added here once, with why. */
   downgrades?: Downgrade[]
+  /** The size the document says it is (its width and height), when not the artboard's. The view box stays the artboard. */
+  size?: { width: number; height: number }
 }
 
 /**
@@ -835,12 +837,13 @@ export function designToSvg(design: Design, artboardId: string, opts: RenderOpti
   const ctx = newCtx(design, opts)
   const W = n(fin(board.width, 0))
   const H = n(fin(board.height, 0))
+  const shown = opts.size ? `width="${n(fin(opts.size.width, 0))}" height="${n(fin(opts.size.height, 0))}"` : `width="${W}" height="${H}"`
   const bg = background(ctx, board, W, H)
   const scope: Scope = { prefix: '', overrides: [], top: true, ends: { layers: board.layers }, comps: [] }
   const body = board.layers.map(l => renderLayer(ctx, l, scope)).join('')
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
-    `xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+    `xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" ${shown} viewBox="0 0 ${W} ${H}">` +
     (ctx.defs.length ? `<defs>${ctx.defs.join('')}</defs>` : '') + bg + body + '</svg>'
   )
 }

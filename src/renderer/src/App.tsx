@@ -12,6 +12,7 @@ import { Connections } from './shell/Connections'
 import { needsYouIn, trackFiles, useNeedsYou, useNeedsYouVersion } from './shell/needsYou'
 import { EditorSkeleton } from './shell/Skeleton'
 import { agentColor } from '../../shared/agentColors'
+import { isReadOp } from '../../shared/ops/readOps'
 import { ToolbarOverflow } from './shell/ToolbarOverflow'
 import { usePanelSize } from './shell/resize'
 import { Onboarding } from './shell/Onboarding'
@@ -51,8 +52,6 @@ const HOME = -1
 /** Save only on Ctrl+S? Word files say so per file (only when they hold things the editor would drop); PDFs always. */
 const isLossy = (t: { path: string; payload: FilePayload | null }) =>
   (t.payload?.kind === 'doc' || t.payload?.kind === 'slides') && t.payload.lossy !== undefined ? t.payload.lossy : lossy(t.path)
-/** Ops that only look: shown as "reading" rather than "editing". */
-const READ_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets', 'export'])
 /** Tabs kept loaded besides the active one (most recently used). The rest sleep once saved, to keep memory low. */
 const WARM = 2
 const SLEEP_AFTER_MS = 45_000
@@ -712,7 +711,8 @@ export default function App() {
       await wake(t.id)
       await readyOrFail(t.id)
       const h = handles.current.get(t.id)!
-      const reading = READ_OPS.has(req.op.op)
+      // ops that only look show as "reading" and never count as the agent's edits
+      const reading = isReadOp(req.op)
       // Each agent highlights in its own color: set it on this file's editor so other tabs keep theirs.
       const color = req.agent.color || agentColor(req.agent.name)
       document.querySelector<HTMLElement>(`.editor-host[data-tab="${t.id}"]`)?.style.setProperty('--agent', color)

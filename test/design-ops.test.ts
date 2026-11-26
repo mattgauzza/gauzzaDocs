@@ -8,6 +8,7 @@ import { designToSvg } from '../src/shared/design/render'
 import type { Design, DesignFile, Layer } from '../src/shared/design/types'
 import { describeOps } from '../src/shared/history/describe'
 import { applyDesignOp, designOps } from '../src/shared/ops/design'
+import { isReadOp } from '../src/shared/ops/readOps'
 import type { AgentOp, FilePayload } from '../src/shared/types'
 
 const liberation = new Uint8Array(fs.readFileSync('node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf'))
@@ -913,7 +914,24 @@ test('info counts artboards and layers; export gives the artboard as SVG, sized 
   const wide = (await applyDesignOp(f, { op: 'export', artboard: 'Wide', width: 400 }, services)).result as { svg: string; width: number; height: number }
   assert.match(wide.svg, /^<svg [^>]* width="400" height="225" viewBox="0 0 1600 900">/)
   assert.deepEqual([wide.width, wide.height], [400, 225])
+  // the reply gives exactly the size the file says, rounded as it's written
+  const odd = (await applyDesignOp(f, { op: 'export', artboard: 'Wide', width: '333.333' }, services)).result as { svg: string; width: number; height: number }
+  assert.deepEqual([odd.width, odd.height], [333.33, 187.5])
+  assert.match(odd.svg, /^<svg [^>]* width="333.33" height="187.5" viewBox="0 0 1600 900">/)
+  assert.equal((odd.svg.match(/ width="333.33"/g) ?? []).length, 1, 'only the root takes the size')
   await assert.rejects(applyDesignOp(f, { op: 'export', format: 'png' }, services), { message: 'format must be svg' })
   await assert.rejects(applyDesignOp(f, { op: 'export', width: 0 }, services), { message: 'width must be 1 or more' })
   await assert.rejects(applyDesignOp(f, { op: 'export' }), /needs fonts/)
+})
+
+test('isReadOp: reads for every kind and svg with get; svg imports and edits are not', () => {
+  for (const op of ['read', 'info', 'export', 'find', 'outline', 'get', 'sheets', 'charts', 'rules', 'merges', 'comments']) {
+    assert.equal(isReadOp({ op }), true, op)
+  }
+  assert.equal(isReadOp({ op: 'svg', get: 'Logo' }), true)
+  assert.equal(isReadOp({ op: 'svg', get: true }), true)
+  assert.equal(isReadOp({ op: 'svg', get: '' }), true, 'an empty get gives the whole artboard')
+  assert.equal(isReadOp({ op: 'svg', get: false }), false)
+  assert.equal(isReadOp({ op: 'svg', svg: '<svg/>' }), false)
+  for (const op of ['add', 'set', 'delete', 'apply', 'diagram', 'tidy', 'style', 'write', 'save']) assert.equal(isReadOp({ op }), false, op)
 })
