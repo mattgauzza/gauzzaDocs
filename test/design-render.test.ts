@@ -254,15 +254,20 @@ test('a component that contains an instance of itself stops instead of recursing
   assert.equal(svg.split('<rect').length - 1, 2, 'the background and the box once')
 })
 
-test('an svg layer is drawn as an image, never inline', async () => {
-  const inner = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5"/></svg>'
+test('an svg layer is an image in raster mode and its cleaned fragment inline in export mode', async () => {
+  const inner = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle id="c" cx="5" cy="5" r="5" onclick="x()"/></svg>'
   const d = designOf({ ...base, ...box(0, 0, 50, 50), id: 's1', name: 'Kept', type: 'svg', svg: inner } as Layer)
-  const svg = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' })
-  const img = parse(svg).getElementsByTagName('image')[0]
+  const fonts = await fontsOf(d)
+  const raster = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'raster' })
+  const img = parse(raster).getElementsByTagName('image')[0]
   assert.ok(img)
   assert.ok(img.getAttribute('xlink:href')!.startsWith('data:image/svg+xml;base64,'))
-  assert.ok(!svg.includes('<circle'))
+  assert.ok(!raster.includes('<circle'))
   assert.equal(new TextDecoder().decode(Uint8Array.from(atob(img.getAttribute('xlink:href')!.split(',')[1]), c => c.charCodeAt(0))), inner)
+  const exported = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'export' })
+  assert.ok(!exported.includes('<image'))
+  assert.ok(exported.includes('<svg x="0" y="0" width="50" height="50" viewBox="0 0 10 10" preserveAspectRatio="none"><circle id="s1-c" cx="5" cy="5" r="5"/></svg>'))
+  assert.ok(!exported.includes('onclick'), 'the fragment is cleaned again on the way out')
 })
 
 test('images embed their asset and a missing asset draws nothing', async () => {
@@ -340,6 +345,16 @@ test('connectors route between boxes and draw markers and a label', async () => 
   assert.equal(label.getElementsByTagName('tspan')[0].getAttribute('font-size'), '14')
   assert.equal(byId(doc, 'l-s')!.getElementsByTagName('rect')[0].getAttribute('fill'), '#ffffff')
   assert.equal(byId(doc, 'l-d')!.childNodes.length, 0, 'and draws nothing')
+})
+
+test("stored glyphs paint a gradient over their own box, not shifted by the box's position", async () => {
+  const fill = { type: 'linear' as const, angle: 0, stops: [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }] }
+  const layer = text('t1', [{ text: 'Hi', font: LIB, size: 32, color: fill }], { ...box(100, 50, 40, 20), glyphs: 'M0 0L10 0L10 10Z' })
+  const d = designOf(layer)
+  const doc = parse(designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d, true), assets: {}, mode: 'export' }))
+  const grad = doc.getElementsByTagName('linearGradient')[0]
+  // the path is translated to (100, 50), so the gradient runs 0..40 in its own space
+  assert.deepEqual(['x1', 'y1', 'x2', 'y2'].map(a => grad.getAttribute(a)), ['0', '10', '40', '10'])
 })
 
 test('a filter region covers the glyphs and their shadow, past the box', async () => {

@@ -570,8 +570,9 @@ function checkReferences(root: Element, notes: Notes): void {
   if ((size.get(root) ?? Infinity) > MAX_SVG_ELEMENTS) throw new Error(TOO_MANY)
 }
 
-const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }
-const escXml = (s: string): string => cleanText(s).replace(/[&<>"]/g, c => ESC[c])
+// the same escapes as the renderer's esc, so cleaning the renderer's output leaves it byte for byte the same
+const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }
+const escXml = (s: string): string => cleanText(s).replace(/[&<>"']/g, c => ESC[c])
 const PREFIX: Record<string, string> = { [XLINK_NS]: 'xlink:', [INKSCAPE_NS]: 'inkscape:', [XML_NS]: 'xml:' }
 
 /** Clean SVG markup for an element. The root form declares the svg, xlink and inkscape namespaces. */

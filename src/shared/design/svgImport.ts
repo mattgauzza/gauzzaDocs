@@ -12,7 +12,8 @@ import {
   elementChildren, hrefId, idMap, imageInfo, serializeSvg
 } from './svgClean'
 import { type PaintSpace, type Style, type Viewport, alphaOf, diagonal, len, paintOf, urlId } from './svgPaint'
-import { type Decl, cssBlocks, splitDeclarations } from './svgStyle'
+import { applyStyles } from './svgFragment'
+import { splitDeclarations } from './svgStyle'
 import { layoutText, num } from './text'
 import type { BlendMode, Design, Layer, Paint, TextLayer, TextRun } from './types'
 
@@ -69,7 +70,6 @@ const r6 = (v: number): number => Math.round(v * 1e6) / 1e6
 const roundBox = (b: Box, f = r6): Box => ({ x: f(b.x), y: f(b.y), w: f(b.w), h: f(b.h) })
 const r3 = (v: number): number => Math.round(v * 1e3) / 1e3
 const transformOf = (el: Element): Matrix => parseTransform(el.getAttribute('transform')) ?? IDENTITY
-const short = (v: string): string => (v.length > 60 ? v.slice(0, 57) + '...' : v)
 
 function boxUnder(b: Box, m: Matrix): Box {
   const pts = [apply(m, b.x, b.y), apply(m, b.x + b.w, b.y), apply(m, b.x, b.y + b.h), apply(m, b.x + b.w, b.y + b.h)]
@@ -90,86 +90,6 @@ const layersBox = (ls: Layer[]): Box => ls.map(l => boxOf(l)).reduce((a, b) => u
 function conformal(m: Matrix): boolean {
   const k = Math.abs(det(m)) || 1
   return Math.abs(m[0] * m[0] + m[1] * m[1] - (m[2] * m[2] + m[3] * m[3])) <= 1e-9 * k && Math.abs(m[0] * m[2] + m[1] * m[3]) <= 1e-9 * k
-}
-
-// Style rules
-
-interface Selector { tag: string | null; ids: string[]; classes: string[]; spec: number }
-
-function parseSelector(s: string): Selector | null {
-  const m = /^(\*|[A-Za-z][\w-]*)?((?:[.#][\w-]+)*)$/.exec(s.trim())
-  if (!m || (!m[1] && !m[2])) return null
-  const parts = m[2].match(/[.#][\w-]+/g) ?? []
-  const ids = parts.filter(p => p[0] === '#').map(p => p.slice(1))
-  const classes = parts.filter(p => p[0] === '.').map(p => p.slice(1))
-  const tag = m[1] && m[1] !== '*' ? m[1] : null
-  return { tag, ids, classes, spec: ids.length * 10000 + classes.length * 100 + (tag ? 1 : 0) }
-}
-
-/** `font: italic bold 12px/1.2 Arial` as its longhands. */
-function expandFont(v: string): Decl[] {
-  const m = /^\s*((?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{3})\s+)*)([\d.]+[a-z%]*)(?:\s*\/\s*\S+)?\s+(.+)$/i.exec(v)
-  if (!m) return []
-  const out: Decl[] = [{ prop: 'font-size', value: m[2], important: false }, { prop: 'font-family', value: m[3], important: false }]
-  for (const w of m[1].trim().split(/\s+/).filter(Boolean)) {
-    if (/^(italic|oblique)$/i.test(w)) out.push({ prop: 'font-style', value: w, important: false })
-    else if (/^(bold|bolder|lighter|\d{3})$/i.test(w)) out.push({ prop: 'font-weight', value: w, important: false })
-  }
-  return out
-}
-
-/**
- * Applies the <style> rules as attributes, then drops the style elements. Specificity orders the rules (id, then
- * class, then element, later rules winning ties); rules beat presentation attributes and the inline style attribute
- * beats rules, as in a browser. Only element, class and id selectors (and compounds of them) apply.
- */
-function applyStyles(root: Element, kept: string[]): void {
-  const rules: { sel: Selector; decls: Decl[]; order: number }[] = []
-  let order = 0
-  for (const st of allElements(root).filter(e => e.localName === 'style')) {
-    for (const b of cssBlocks(st.textContent ?? '')) {
-      if (b.kind === 'at') {
-        if (b.name === 'media') kept.push(`Style rules inside @media were not applied (${short(b.prelude)})`)
-        continue
-      }
-      const decls = splitDeclarations(b.body)
-      for (const s of b.selector.split(',')) {
-        const sel = parseSelector(s)
-        if (sel) rules.push({ sel, decls, order: order++ })
-        else kept.push(`A style rule the converter can't apply was skipped (${short(s.trim())})`)
-      }
-    }
-    st.parentNode?.removeChild(st)
-  }
-  for (const el of allElements(root)) {
-    const cls = new Set((el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean))
-    const id = el.getAttribute('id')
-    const hits = rules
-      .filter(r => (!r.sel.tag || r.sel.tag === el.localName) && r.sel.ids.every(i => i === id) && r.sel.classes.every(c => cls.has(c)))
-      .sort((a, b) => a.sel.spec - b.sel.spec || a.order - b.order)
-    const inline = splitDeclarations(el.getAttribute('style') ?? '')
-    if (!hits.length && !inline.length) continue
-    const final = new Map<string, string>()
-    const put = (list: Decl[], important: boolean) => {
-      for (const d of list) {
-        if (d.important !== important) continue
-        if (d.prop === 'font') for (const x of expandFont(d.value)) final.set(x.prop, x.value)
-        else final.set(d.prop, d.value)
-      }
-    }
-    for (const r of hits) put(r.decls, false)
-    put(inline, false)
-    for (const r of hits) put(r.decls, true)
-    put(inline, true)
-    const rest: string[] = []
-    for (const [p, v] of final) {
-      if (PRESENTATION.has(p)) el.setAttribute(p, v)
-      else if (p === 'transform') el.setAttribute('transform', v.replace(/(px|deg)\b/g, ''))
-      else rest.push(`${p}:${v}`)
-    }
-    if (rest.length) el.setAttribute('style', rest.join(';'))
-    else el.removeAttribute('style')
-  }
 }
 
 /** The element's computed style: what it inherits plus its own presentation attributes and leftover style. */
@@ -785,7 +705,7 @@ function rootFrame(root: Element): { m: Matrix; vp: Viewport; frame: Box | null 
 export function importSvg(svg: string, name: string, opts: ImportOptions = {}): ImportResult {
   const { root, removed } = cleanSvgRoot(svg)
   const kept: string[] = []
-  applyStyles(root, kept)
+  applyStyles(root, n => kept.push(n))
   const { m, vp, frame } = rootFrame(root)
   const ctx: Ctx = { ...vp, ids: idMap(root), taken: opts.taken ?? new Set(), counts: {}, kept, assets: {}, frame, fonts: opts.fonts }
   const s = styleOf(root, {})
@@ -801,7 +721,8 @@ export function importSvg(svg: string, name: string, opts: ImportOptions = {}): 
 
 /**
  * One layer as a standalone, clean SVG in its own coordinates: moved so its box starts at 0,0, with the root sized to
- * the box. An `svg` layer gives its own document at the layer's size.
+ * the box. It renders in export mode, so svg layers inside a group come out inline (as an image they'd be cleaned
+ * away). An `svg` layer gives its own document at the layer's size.
  */
 export function layerAsSvg(design: Design, layer: Layer, opts: RenderOptions): string {
   const b = boxOf(layer)
@@ -817,6 +738,6 @@ export function layerAsSvg(design: Design, layer: Layer, opts: RenderOptions): s
   const move = b.x || b.y ? ` transform="translate(${num(-b.x, 3)} ${num(-b.y, 3)})"` : ''
   const doc =
     `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" xmlns:inkscape="${INKSCAPE_NS}" width="${W}" height="${H}" ` +
-    `viewBox="0 0 ${W} ${H}"><g${move}>${layerToSvg(design, layer, opts)}</g></svg>`
+    `viewBox="0 0 ${W} ${H}"><g${move}>${layerToSvg(design, layer, { ...opts, mode: 'export' })}</g></svg>`
   return cleanSvg(doc).svg
 }

@@ -1,6 +1,7 @@
 import type { FontSource } from './fonts'
 import { type Box, type Point, boundsOf, boxOf, connectorPath, fin, grow, midpoint, transformedBounds, union } from './geometry'
 import { artboardOf, walk } from './model'
+import { inlineSvg } from './svgFragment'
 import { cleanText, layoutText, num as n, runSize, textPaths, textRuns } from './text'
 import type { Artboard, Design, Layer, Override, Paint, TextLayer } from './types'
 
@@ -9,7 +10,8 @@ export { connectorPath } from './geometry'
 // The one renderer. designToSvg is the only code that turns a design into SVG: the editor canvas, `gdocs look`,
 // thumbnails and every export call it. The same input always gives the same bytes: every id comes from a layer id.
 // Raster mode draws text as glyph outlines and skips hidden layers. Export mode keeps text live (naming the family,
-// never embedding the font) unless outlines are asked for, and keeps hidden layers with display="none".
+// never embedding the font) unless outlines are asked for, and keeps hidden layers with display="none". An svg layer
+// is an image in raster mode (the window never inlines outside SVG) and its cleaned fragment inline in export mode.
 
 export interface RenderOptions {
   fonts: FontSource
@@ -254,7 +256,10 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
     case 'paint':
       return imageEl(ctx, l.asset, l.fit, boxOf(l))
     case 'svg':
-      return imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
+      // the window only ever draws outside SVG as an image; an export inlines it, its ids prefixed per layer
+      return ctx.opts.mode === 'export'
+        ? inlineSvg(String(l.svg ?? ''), boxOf(l), key + '-')
+        : imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
     case 'group':
       return groupSvg(ctx, l, key, scope)
     case 'instance':
@@ -311,7 +316,10 @@ function textSvg(ctx: Ctx, l: TextLayer, key: string, fonts: FontSource, overrid
   const fillOf = (i: number): string => paintAttr(ctx, fill ?? runs[i]?.color ?? l.fill ?? BLACK, 'fill', key, b)
   if (typeof l.glyphs === 'string' && l.glyphs && overrideText === undefined && runs.some(r => fonts.get(r.font).missing)) {
     const move = b.x || b.y ? ` transform="translate(${n(b.x)} ${n(b.y)})"` : ''
-    return `<path d="${esc(l.glyphs)}"${move}${fillOf(0)}${stroke}/>`
+    // the glyphs are drawn translated to the box, so their paints live in the box's own space
+    const own: Box = { x: 0, y: 0, w: b.w, h: b.h }
+    const paint = paintAttr(ctx, fill ?? runs[0]?.color ?? l.fill ?? BLACK, 'fill', key, own)
+    return `<path d="${esc(l.glyphs)}"${move}${paint}${strokeAttr(ctx, l, key, own, l.stroke)}/>`
   }
   if (ctx.opts.mode === 'raster' || ctx.opts.outlines || l.outlines) {
     return textPaths(l, fonts, overrideText).map(p => `<path d="${p.d}"${fillOf(p.run)}${stroke}/>`).join('')

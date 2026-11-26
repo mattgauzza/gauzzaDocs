@@ -168,6 +168,7 @@ test("the renderer's own export survives cleanSvg intact", async () => {
   const out = designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: { [asset]: PNG }, mode: 'export' })
   const { svg, removed } = cleanSvg(out)
   assert.deepEqual(removed, [])
+  assert.equal(svg, out, 'cleaning the export changes nothing, byte for byte')
   assert.equal(count(svg), count(out), 'every element stays')
   for (const want of [
     'inkscape:label="Card"', 'data-name="Card"', 'inkscape:groupmode="layer"', 'style="mix-blend-mode:multiply"',
@@ -175,6 +176,72 @@ test("the renderer's own export survives cleanSvg intact", async () => {
     'fill="url(#g-card-1)"', 'xml:space="preserve"', 'data-name="Title &amp; &quot;quotes&quot;"', 'Hello &lt;world&gt;'
   ]) assert.ok(svg.includes(want), `lost ${want}`)
   assert.equal(cleanSvg(svg).svg, svg, 'cleaning twice changes nothing')
+})
+
+/** An imported svg layer: a gradient rect with a filter, its gradient id "g" and filter id "f" the same every time. */
+function blurredSvgLayer(color: string, dx = 0): Layer {
+  const { group } = importSvg(
+    svgOf(
+      `<defs><linearGradient id="g"><stop offset="0" stop-color="${color}"/><stop offset="1" stop-color="#fff"/></linearGradient>` +
+        '<filter id="f"><feGaussianBlur stdDeviation="1"/></filter></defs><rect width="10" height="10" fill="url(#g)" filter="url(#f)"/>'
+    ),
+    'S'
+  )
+  const layer = kids(group)[0]
+  assert.equal(layer.type, 'svg')
+  return { ...layer, x: layer.x + dx }
+}
+
+test('an export inlines svg layers with ids prefixed per layer, and survives cleanSvg unchanged', async () => {
+  const a = blurredSvgLayer('#ff0000')
+  const b = blurredSvgLayer('#0000ff', 50)
+  const styled: Layer = {
+    ...base, id: 'styled', name: 'Styled', type: 'svg', x: 0, y: 100, width: 10, height: 10,
+    svg: svgOf('<style>rect{fill:#00ff00}</style><rect width="10" height="10"/>', 'viewBox="0 0 10 10"')
+  }
+  const own: Layer = { ...base, id: 'own', name: 'Own', type: 'rect', x: 0, y: 200, width: 10, height: 10, fill: { type: 'color', color: '#123456' } }
+  const d = newDesign('instagram')
+  d.artboards[0].layers.push(a, b, styled, own)
+  const fonts = await fontsOf(d)
+  const out = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'export' })
+  assert.doesNotMatch(out, /svg\+xml|<image/, 'no svg layer is drawn as an image')
+  const doc = parse(out)
+  for (const l of [a, b]) {
+    for (const want of [`id="${l.id}-g"`, `fill="url(#${l.id}-g)"`, `id="${l.id}-f"`, `filter="url(#${l.id}-f)"`]) {
+      assert.ok(out.includes(want), `missing ${want}`)
+    }
+    const wrapper = doc.getElementsByTagName('g')
+    const holder = Array.from(wrapper).find(g => g.getAttribute('id') === `l-${l.id}`)!
+    const nested = holder.getElementsByTagName('svg')[0]
+    assert.deepEqual(['x', 'y', 'width', 'height', 'preserveAspectRatio'].map(k => nested.getAttribute(k)), [String(l.x), String(l.y), String(l.width), String(l.height), 'none'])
+    assert.ok(nested.getAttribute('viewBox'), 'keeps the fragment viewBox')
+  }
+  const ids = Array.from(doc.getElementsByTagName('*')).map(e => e.getAttribute('id')).filter(Boolean)
+  assert.equal(new Set(ids).size, ids.length, `ids collide: ${ids.join(' ')}`)
+  // a fragment's style rules become its own attributes and can't restyle the rest of the export
+  assert.doesNotMatch(out, /<style/)
+  assert.match(out, /<rect width="10" height="10" fill="#00ff00"\/>/)
+  assert.match(out, /<rect x="0" y="200" width="10" height="10" fill="#123456"\/>/)
+  const { svg, removed } = cleanSvg(out)
+  assert.deepEqual(removed, [])
+  assert.equal(svg, out)
+  // the window still only ever sees svg layers as images
+  const raster = designToSvg(d, d.artboards[0].id, { fonts, assets: {}, mode: 'raster' })
+  assert.equal(raster.match(/xlink:href="data:image\/svg\+xml;base64,/g)?.length, 3)
+  assert.ok(!raster.includes(`${a.id}-g`))
+})
+
+test('layerAsSvg of a group keeps the svg layers inside it', async () => {
+  const inner = blurredSvgLayer('#ff0000', 20)
+  const dot: Layer = { ...base, id: 'dot', name: 'Dot', type: 'ellipse', x: 0, y: 0, width: 5, height: 5, fill: { type: 'color', color: '#000000' } }
+  const group: Layer = { ...base, id: 'grp', name: 'Group', type: 'group', x: 0, y: -1, width: 31, height: 12, children: [dot, inner] }
+  const d = newDesign('instagram')
+  d.artboards[0].layers.push(group)
+  const svg = layerAsSvg(d, group, { fonts: await fontsOf(d), assets: {}, mode: 'raster' })
+  assert.match(svg, new RegExp(`id="${inner.id}-g"`))
+  assert.ok(svg.includes(`<svg x="19" y="-1" width="12" height="12" viewBox="-1 -1 12 12" preserveAspectRatio="none">`), svg)
+  assert.doesNotMatch(svg, /svg\+xml/)
+  assert.deepEqual(cleanSvg(svg).removed, [])
 })
 
 // importSvg
