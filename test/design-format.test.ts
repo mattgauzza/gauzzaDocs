@@ -213,19 +213,84 @@ test('validateDesign keeps a well-formed design exactly as it is', () => {
   assert.deepEqual(notes, [])
 })
 
-test('validateDesign: unknown fields go, and a wrong type for a required field refuses the file', () => {
+test('validateDesign keeps what a later release wrote: it round-trips through readDesignZip and designZipBytes unchanged', async () => {
+  // timing effects and keyframe tracks, an artboard animation, a diagram, a brand kit, and fields this release doesn't
+  // know on a layer, a run, a paint, an override, the artboard and the design itself
+  const d: any = JSON.parse(JSON.stringify(newDesign('instagram')))
+  d.future = { x: 1 }
+  d.kit = { kitId: 'brand', items: [{ itemId: 'logo', name: 'Logo', copy: { layers: [1, 2] }, later: true }] }
+  d.thumbnailStale = true
+  d.components = [{ id: 'comp', name: 'Card', future: 'c', root: { ...base, id: 'croot', name: 'Card', type: 'group', children: [{ ...base, id: 'ct', name: 'Label', type: 'text', mode: 'box', align: 'left', valign: 'top', runs: [{ text: 'x', font, size: 12 }] }] } }]
+  const board = d.artboards[0]
+  board.animation = { duration: 6, fps: 30, loop: true, easing: 'smooth' }
+  board.diagrams = [{ name: 'Flow', direction: 'right', spacing: 40, nodeComponent: 'comp', nodes: [{ id: 'a', layer: 'r1', pinned: true }], links: [], containers: [], future: 7 }]
+  board.future = [1, 'two']
+  board.layers = [
+    rrect('r1', 'Box', {
+      future: { x: 1 },
+      fill: { type: 'linear', angle: 30, stops: [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff', midpoint: 0.4 }], interpolation: 'oklab' },
+      timing: { start: 0.5, end: 3, in: 'rise', out: 'fade', tracks: [{ prop: 'opacity', keys: [[0, 0], [0.5, 1]], ease: 'out' }], text: { effect: 'word-swap', hold: 1.2 } }
+    }),
+    { ...base, id: 'i1', name: 'Card 1', type: 'instance', component: 'comp', overrides: { ct: { text: 'Hi', future: 'o' } } },
+    { ...base, id: 't1', name: 'T', type: 'text', mode: 'box', align: 'left', valign: 'top', runs: [{ text: 'a', font: { ...font, axes: { wdth: 90 } }, size: 12, effect: 'glow' }] }
+  ]
   const notes: string[] = []
-  const d = validateDesign({ ...rawDesign([rrect('r1', 'A', { evil: 1, __proto__x: 2 })]), extra: { a: 1 } }, notes)
-  assert.deepEqual(Object.keys(d).sort(), ['artboards', 'components', 'format', 'id', 'styles'])
-  assert.deepEqual(Object.keys(d.artboards[0].layers[0]).sort(), [...Object.keys(rrect('r1'))].sort())
-  assert.throws(() => validateDesign(rawDesign([rrect('r1', 'A', { visible: 'yes' })])), damaged("layer r1's visible is not true or false"))
-  assert.throws(() => validateDesign(rawDesign([rrect('r1', 'A', { x: '5' })])), damaged("layer r1's x is not a number"))
+  assert.deepEqual(JSON.parse(JSON.stringify(validateDesign(JSON.parse(JSON.stringify(d)), notes))), d)
+  assert.deepEqual(notes, [])
+  const read = await readDesignZip(await zipOf({ 'design.json': JSON.stringify(d) }))
+  assert.equal(read.notes, undefined)
+  const saved = await JSZip.loadAsync(await designZipBytes(read))
+  assert.deepEqual(JSON.parse(await saved.files['design.json'].async('string')), d)
+})
+
+test('validateDesign repairs simple slips with a note, and refuses only structural damage', () => {
+  // a hand-edited file: "visible": "true", "opacity": "0.5" and no blend
+  const edited = rrect('r1', 'A', { visible: 'true', opacity: '0.5', x: '12', locked: 'false' })
+  delete edited.blend
+  const notes: string[] = []
+  const d = validateDesign(rawDesign([edited]), notes)
+  const r = d.artboards[0].layers[0]
+  assert.deepEqual([r.visible, r.opacity, r.blend, r.x, r.locked], [true, 0.5, 'normal', 12, false])
+  assert.deepEqual(notes.sort(), [
+    'blend mode missing (set to normal)', 'locked written as text (read as false)', 'opacity written as text (read as a number)',
+    'visible written as text (read as true)', 'x written as text (read as a number)'
+  ])
+  // missing or wrong scalars get their defaults
+  const bare: any = { id: 'b', type: 'rect', name: 'B', visible: 'maybe', x: {} }
+  const repaired = validateDesign(rawDesign([bare])).artboards[0].layers[0]
+  assert.deepEqual(
+    [repaired.visible, repaired.locked, repaired.opacity, repaired.blend, repaired.x, repaired.y, repaired.width, repaired.rotation, repaired.scaleX, repaired.scaleY],
+    [true, false, 1, 'normal', 0, 0, 0, 0, 1, 1]
+  )
+  // a text without runs, a group without children, a run without a font: repaired; an image without an asset: dropped
+  const more = validateDesign(rawDesign([
+    { ...rrect('t1'), type: 'text', runs: 'hi' },
+    { ...rrect('g'), type: 'group', children: {} },
+    { ...rrect('t2'), type: 'text', runs: [{ text: 'x', size: '18' }] },
+    { ...rrect('img'), type: 'image' }
+  ]))
+  const [t1, g, t2] = more.artboards[0].layers
+  assert.ok(t1.type === 'text' && t1.runs.length === 0)
+  assert.ok(g.type === 'group' && g.children.length === 0)
+  assert.ok(t2.type === 'text' && t2.runs[0].font.family === 'Arial' && t2.runs[0].size === 18)
+  assert.equal(more.artboards[0].layers.length, 3)
+  // structural damage still refuses the file
   assert.throws(() => validateDesign(rawDesign([5])), damaged('a layer is not an object'))
   assert.throws(() => validateDesign(rawDesign([{ ...rrect('r1'), type: 'star' }])), damaged('a layer has an unknown type (star)'))
-  assert.throws(() => validateDesign(rawDesign([{ ...rrect('t1'), type: 'text', runs: 'hi' }])), damaged('layer t1 has no runs'))
   assert.throws(() => validateDesign({ ...rawDesign([]), artboards: [] }), damaged('it has no artboards'))
+  assert.throws(() => validateDesign({ ...rawDesign([]), artboards: {} }), damaged('it has no artboards'))
+  assert.throws(() => validateDesign({ ...rawDesign([]), artboards: [7] }), damaged('an artboard is not an object'))
   assert.throws(() => validateDesign({ ...rawDesign([]), format: 2 }), /newer version of gauzzaDocs or is damaged/)
-  assert.throws(() => validateDesign(rawDesign([{ ...rrect('g'), type: 'group', children: {} }])), damaged('layer g has no children'))
+  assert.throws(() => validateDesign(rawDesign([], { components: [{ id: 'c', name: 'C', root: rrect('notgroup') }] })), damaged('component c has no group at its root'))
+})
+
+test('the hand-edited file opens through readDesignZip with its repairs noted', async () => {
+  const edited = rrect('r1', 'A', { visible: 'true', opacity: '0.5' })
+  delete edited.blend
+  const f = await readDesignZip(await zipOf({ 'design.json': JSON.stringify(rawDesign([edited])) }))
+  const r = f.design.artboards[0].layers[0]
+  assert.deepEqual([r.visible, r.opacity, r.blend], [true, 0.5, 'normal'])
+  assert.deepEqual(f.notes?.sort(), ['blend mode missing (set to normal)', 'opacity written as text (read as a number)', 'visible written as text (read as true)'])
 })
 
 test('validateDesign: ids are safe and unique, and references follow a rename where they can', () => {

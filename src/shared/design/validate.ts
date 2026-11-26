@@ -1,13 +1,11 @@
 import { MAX_ARTBOARD_SIDE } from './model'
 import { cleanSvg } from './svgClean'
-import type {
-  Artboard, BlendMode, Component, Design, Diagram, End, FontRef, Layer, Override, Paint, Shadow, Styles, TextRun, Timing
-} from './types'
+import type { Design, Layer, Override, Paint } from './types'
 
 // A design read from a file, checked against the schema in types.ts before anything else touches it. design.json is
-// whatever a file holds, so every value is checked for its type and size, ids are made safe and unique, and anything
-// that can't be drawn safely is dropped (and noted) or the file is refused. What comes out is a Design the renderer,
-// the ops and the editor can trust.
+// whatever a file holds, so every field this release knows is checked for its type and size, ids are made safe and
+// unique, simple slips are repaired, and anything that can't be drawn safely is dropped (and noted) or the file is
+// refused. Fields this release doesn't know are kept as they are, so saving never strips what a later release wrote.
 
 /** Most layers one design may hold, counting every artboard and component. */
 export const MAX_LAYERS = 100_000
@@ -34,10 +32,10 @@ const DEFAULT_NAMES: Record<string, string> = {
   rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', path: 'Path', text: 'Text', image: 'Image', paint: 'Paint',
   group: 'Group', instance: 'Instance', connector: 'Connector', svg: 'SVG'
 }
-const BLENDS = new Set([
+const BLENDS = [
   'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light',
   'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'
-])
+] as const
 
 /** Throws "This design file is damaged: <reason>." */
 function damaged(reason: string): never {
@@ -46,9 +44,20 @@ function damaged(reason: string): never {
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
-const has = (o: Obj, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k)
 /** A value for a message, never converted with String() (an object's toString could be anything). */
 const shown = (v: unknown): string => (typeof v === 'string' ? (v.length > 40 ? v.slice(0, 37) + '...' : v) : typeof v)
+const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
+const isColor = (v: unknown): v is string => typeof v === 'string' && COLOR.test(v)
+
+/**
+ * A copy of what the file holds for an object, every field kept as it is (a later release may have written it), so
+ * the checked fields can be set over it. A `__proto__` key is the one thing not kept: it's never data.
+ */
+function kept(o: Obj): Obj {
+  const out: Obj = {}
+  for (const k of Object.keys(o)) if (k !== '__proto__') out[k] = o[k]
+  return out
+}
 
 /** Ids as they're read: the first holder of a valid id keeps it; others get a new one made from it. */
 interface Scope { raw: Map<string, string[]>; ids: Set<string> }
@@ -62,8 +71,8 @@ class Reader {
   layers = 0
   text = 0
   /** references settled once every id is known */
-  connectors: { end: End; scope: Scope }[] = []
-  instances: { layer: Layer & { type: 'instance' }; raw: unknown }[] = []
+  ends: { end: Obj; scope: Scope }[] = []
+  instances: { layer: Obj; raw: unknown }[] = []
   componentScopes = new Map<string, Scope>()
   componentIds = newScope()
 
@@ -93,10 +102,10 @@ class Reader {
     return id
   }
 
-  /** A name on one line of at most MAX_NAME characters; a non-string becomes `fallback`. */
+  /** A name of at most MAX_NAME characters; a missing name or one that isn't text becomes `fallback`. */
   name(raw: unknown, fallback: string): string {
     if (typeof raw !== 'string') {
-      if (raw !== undefined) this.note('a name that was not text (replaced)')
+      this.note(raw === undefined ? 'a missing name (given a default)' : 'a name that was not text (given a default)')
       return fallback
     }
     if (raw.length > MAX_NAME) {
@@ -104,6 +113,86 @@ class Reader {
       return raw.slice(0, MAX_NAME)
     }
     return raw
+  }
+
+  /** A true or false field: "true" and "false" are read as such, anything else missing or wrong becomes `fallback`. */
+  bool(o: Obj, k: string, fallback: boolean): boolean {
+    const v = o[k]
+    if (typeof v === 'boolean') return v
+    if (v === 'true' || v === 'false') {
+      this.note(`${k} written as text (read as ${v})`)
+      return v === 'true'
+    }
+    this.note(v === undefined ? `${k} missing (set to ${fallback})` : `${k} that was not true or false (set to ${fallback})`)
+    return fallback
+  }
+
+  /** A number, clamped: a numeric string is read as one; anything else missing or wrong becomes `fallback`. */
+  num(o: Obj, k: string, fallback: number, lo: number, hi: number): number {
+    const v = this.number(o[k], k)
+    if (v === undefined) {
+      this.note(o[k] === undefined ? `${k} missing (set to ${fallback})` : `${k} that was not a number (set to ${fallback})`)
+      return fallback
+    }
+    return clamp(v, lo, hi)
+  }
+
+  /** The number a value holds (a numeric string read as one, noted), or undefined. */
+  number(v: unknown, k: string): number | undefined {
+    if (typeof v === 'number' && !Number.isNaN(v)) return v
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) {
+      this.note(`${k} written as text (read as a number)`)
+      return Number(v)
+    }
+    return undefined
+  }
+
+  /** An optional number: kept (clamped) when it is one, dropped with a note when it isn't. */
+  optNum(o: Obj, k: string, lo: number, hi: number): void {
+    if (o[k] === undefined) return
+    const v = this.number(o[k], k)
+    if (v === undefined) {
+      this.note(`${k} that was not a number (dropped)`)
+      delete o[k]
+    } else o[k] = clamp(v, lo, hi)
+  }
+
+  /** An optional true or false. */
+  optBool(o: Obj, k: string): void {
+    if (o[k] === undefined || typeof o[k] === 'boolean') return
+    if (o[k] === 'true' || o[k] === 'false') {
+      this.note(`${k} written as text (read as ${o[k]})`)
+      o[k] = o[k] === 'true'
+    } else {
+      this.note(`${k} that was not true or false (dropped)`)
+      delete o[k]
+    }
+  }
+
+  /** One of `options`; anything else missing or unknown becomes `fallback`. */
+  oneOf<T extends string>(v: unknown, options: readonly T[], fallback: T, what: string): T {
+    if (typeof v === 'string' && (options as readonly string[]).includes(v)) return v as T
+    this.note(v === undefined ? `${what} missing (set to ${fallback})` : `an unknown ${what} (${shown(v)}, set to ${fallback})`)
+    return fallback
+  }
+
+  /** An optional field of one of `options`: kept when it is one, dropped with a note when it isn't. */
+  optOneOf(o: Obj, k: string, options: readonly string[]): void {
+    if (o[k] === undefined || (typeof o[k] === 'string' && options.includes(o[k] as string))) return
+    this.note(`an unknown ${k} (${shown(o[k])}, dropped)`)
+    delete o[k]
+  }
+
+  /** An optional string, cut at `most` characters; dropped when it isn't text. */
+  optText(o: Obj, k: string, most = MAX_NAME): void {
+    if (o[k] === undefined) return
+    if (typeof o[k] !== 'string') {
+      this.note(`${k} that was not text (dropped)`)
+      delete o[k]
+    } else if ((o[k] as string).length > most) {
+      this.note(`${k} longer than ${most.toLocaleString('en-US')} characters (cut)`)
+      o[k] = (o[k] as string).slice(0, most)
+    }
   }
 }
 
@@ -116,233 +205,277 @@ function follow(scope: Scope, raw: string): string | undefined {
 
 // ---------- values ----------
 
-function num(v: unknown, lo: number, hi: number, where: string): number {
-  if (typeof v !== 'number' || Number.isNaN(v)) damaged(`${where} is not a number`)
-  return Math.min(hi, Math.max(lo, v))
-}
-const optNum = (o: Obj, k: string, lo: number, hi: number, r: Reader, out: Obj): void => {
-  if (!has(o, k) || o[k] === undefined) return
-  const v = o[k]
-  if (typeof v === 'number' && !Number.isNaN(v)) out[k] = Math.min(hi, Math.max(lo, v))
-  else r.note(`a ${k} that was not a number (dropped)`)
-}
-function bool(v: unknown, where: string): boolean {
-  if (typeof v !== 'boolean') damaged(`${where} is not true or false`)
-  return v
-}
-const optBool = (o: Obj, k: string, r: Reader, out: Obj): void => {
-  if (!has(o, k) || o[k] === undefined) return
-  if (typeof o[k] === 'boolean') out[k] = o[k]
-  else r.note(`a ${k} that was not true or false (dropped)`)
-}
-function oneOf<T extends string>(v: unknown, options: readonly T[], fallback: T, r: Reader, what: string): T {
-  if (typeof v === 'string' && (options as readonly string[]).includes(v)) return v as T
-  if (v !== undefined) r.note(`an unknown ${what} (${shown(v)}, replaced)`)
-  return fallback
-}
-function str(v: unknown, where: string): string {
-  if (typeof v !== 'string') damaged(`${where} is not text`)
-  return v
-}
-const isColor = (v: unknown): v is string => typeof v === 'string' && COLOR.test(v)
-
 /**
  * A paint, or undefined when it can't be one. A gradient keeps at most 256 well-formed stops (offset 0..1, a color),
- * and with fewer than two it falls back to the color of the first (black when none).
+ * and with fewer than two it falls back to the color of the first (black when none). Fields a later release adds to a
+ * paint are kept.
  */
 function paint(v: unknown, r: Reader): Paint | undefined {
   if (!isObj(v)) return undefined
-  if (v.type === 'color') return isColor(v.color) ? { type: 'color', color: v.color } : undefined
-  if (v.type === 'style') return typeof v.ref === 'string' && v.ref.length <= MAX_NAME ? { type: 'style', ref: v.ref } : undefined
+  if (v.type === 'color') return isColor(v.color) ? ({ ...kept(v), type: 'color', color: v.color } as Paint) : undefined
+  if (v.type === 'style') return typeof v.ref === 'string' && v.ref.length <= MAX_NAME ? ({ ...kept(v), type: 'style', ref: v.ref } as Paint) : undefined
   if (v.type !== 'linear' && v.type !== 'radial') return undefined
   const raw = Array.isArray(v.stops) ? v.stops : []
-  const stops: { offset: number; color: string }[] = []
+  const stops: Obj[] = []
   for (const s of raw) {
     if (stops.length >= MAX_STOPS) {
       r.note(`a gradient with more than ${MAX_STOPS} stops (the rest dropped)`)
       break
     }
-    if (!isObj(s) || !isColor(s.color) || typeof s.offset !== 'number' || Number.isNaN(s.offset)) {
+    const offset = isObj(s) ? r.number(s.offset, 'a stop offset') : undefined
+    if (!isObj(s) || !isColor(s.color) || offset === undefined) {
       r.note('a gradient stop that was not well formed (dropped)')
       continue
     }
-    stops.push({ offset: Math.min(1, Math.max(0, s.offset)), color: s.color })
+    stops.push({ ...kept(s), offset: clamp(offset, 0, 1), color: s.color })
   }
   if (stops.length < 2) {
     r.note('a gradient with fewer than two stops (drawn as a color)')
-    return { type: 'color', color: stops[0]?.color ?? '#000000' }
+    return { type: 'color', color: (stops[0]?.color as string | undefined) ?? '#000000' }
   }
-  const out: Paint = { type: v.type, stops }
-  if (typeof v.angle === 'number' && Number.isFinite(v.angle)) out.angle = Math.min(MAX_COORD, Math.max(-MAX_COORD, v.angle))
-  return out
+  const out: Obj = { ...kept(v), type: v.type, stops }
+  if (out.angle !== undefined) {
+    const a = r.number(out.angle, 'a gradient angle')
+    if (a === undefined || !Number.isFinite(a)) delete out.angle
+    else out.angle = clamp(a, -MAX_COORD, MAX_COORD)
+  }
+  return out as unknown as Paint
 }
+
 /** An optional paint field: null stays null (no paint), anything that isn't a paint is dropped. */
-function optPaint(o: Obj, k: string, r: Reader, out: Obj): void {
-  if (!has(o, k) || o[k] === undefined) return
-  if (o[k] === null) {
-    out[k] = null
-    return
-  }
+function optPaint(o: Obj, k: string, r: Reader, nullable = true): void {
+  if (o[k] === undefined) return
+  if (o[k] === null && nullable) return
   const p = paint(o[k], r)
-  if (p) out[k] = p
-  else r.note(`a ${k} that was not a paint (dropped)`)
-}
-
-function font(v: unknown, where: string, r: Reader): FontRef {
-  if (!isObj(v)) damaged(`${where} has no font`)
-  const out: FontRef = {
-    family: r.name(str(v.family, `${where}'s font family`), 'Arial'),
-    weight: num(v.weight ?? 400, 1, 1000, `${where}'s font weight`),
-    style: oneOf(v.style, ['normal', 'italic'] as const, 'normal', r, 'font style')
+  if (p) o[k] = p
+  else {
+    r.note(`a ${k} that was not a paint (dropped)`)
+    delete o[k]
   }
-  if (typeof v.postscript === 'string') out.postscript = v.postscript.slice(0, MAX_NAME)
-  if (typeof v.asset === 'string') out.asset = v.asset
+}
+
+function font(v: unknown, r: Reader): Obj {
+  if (!isObj(v)) {
+    r.note('a text run without a font (given Arial)')
+    return { family: 'Arial', weight: 400, style: 'normal' }
+  }
+  const out = kept(v)
+  if (typeof v.family === 'string' && v.family) out.family = r.name(v.family, 'Arial')
+  else {
+    r.note('a font without a family (given Arial)')
+    out.family = 'Arial'
+  }
+  out.weight = r.num(v, 'weight', 400, 1, 1000)
+  out.style = r.oneOf(v.style, ['normal', 'italic'] as const, 'normal', 'font style')
+  r.optText(out, 'postscript')
+  if (out.asset !== undefined && typeof out.asset !== 'string') {
+    r.note('a font asset that was not text (dropped)')
+    delete out.asset
+  }
   return out
 }
 
-/** A run's style (a text style's run, or a text run without its text). */
-function runStyle(v: Obj, where: string, r: Reader): Omit<TextRun, 'text'> {
-  const out: Omit<TextRun, 'text'> = { font: font(v.font, where, r), size: num(v.size, 0, MAX_SIZE, `${where}'s size`) }
-  const o = out as unknown as Obj
-  optPaint(v, 'color', r, o)
-  if (o.color === null) delete o.color // a run color is a paint or absent
-  optNum(v, 'letterSpacing', -MAX_SIZE, MAX_SIZE, r, o)
-  optNum(v, 'lineHeight', 0, MAX_SIZE, r, o)
+/** A run's style (a text style's run, or a text run beside its text). */
+function runStyle(v: Obj, r: Reader): Obj {
+  const out = kept(v)
+  out.font = font(v.font, r)
+  out.size = r.num(v, 'size', 24, 0, MAX_SIZE)
+  optPaint(out, 'color', r, false)
+  r.optNum(out, 'letterSpacing', -MAX_SIZE, MAX_SIZE)
+  r.optNum(out, 'lineHeight', 0, MAX_SIZE)
   return out
 }
 
-/** A layer's start and end in seconds, as the ops keep them (effects and keyframes come in a later release). */
-function timing(v: unknown, r: Reader): Timing | undefined {
+/**
+ * A layer's timing: start and end in seconds (start at or before end), its entrance and exit effects and its keyframe
+ * tracks and text effects (a later release's), each kept when it has the right type.
+ */
+function timing(v: unknown, r: Reader): Obj | undefined {
   if (!isObj(v)) {
     r.note('a timing that was not well formed (dropped)')
     return undefined
   }
-  const out: Timing = {}
-  if (typeof v.start === 'number' && Number.isFinite(v.start)) out.start = Math.min(MAX_COORD, Math.max(0, v.start))
-  if (typeof v.end === 'number' && Number.isFinite(v.end)) out.end = Math.min(MAX_COORD, Math.max(0, v.end))
-  if (out.start !== undefined && out.end !== undefined && out.start > out.end) {
-    r.note('a timing that ended before it started (dropped)')
-    return undefined
+  const out = kept(v)
+  r.optNum(out, 'start', 0, MAX_COORD)
+  r.optNum(out, 'end', 0, MAX_COORD)
+  if (typeof out.start === 'number' && typeof out.end === 'number' && out.start > out.end) {
+    r.note('a timing that ended before it started (its end dropped)')
+    delete out.end
+  }
+  r.optText(out, 'in')
+  r.optText(out, 'out')
+  if (out.tracks !== undefined && !Array.isArray(out.tracks)) {
+    r.note('timing tracks that were not a list (dropped)')
+    delete out.tracks
   }
   return out
 }
 
-function shadow(v: unknown): Shadow | undefined {
+function shadow(v: unknown, r: Reader): Obj | undefined {
   if (!isObj(v) || !isColor(v.color)) return undefined
-  const n = (x: unknown, lo: number, hi: number) => (typeof x === 'number' && !Number.isNaN(x) ? Math.min(hi, Math.max(lo, x)) : 0)
-  return { x: n(v.x, -MAX_COORD, MAX_COORD), y: n(v.y, -MAX_COORD, MAX_COORD), blur: n(v.blur, 0, MAX_SIZE), color: v.color }
+  const out = kept(v)
+  out.x = r.num(v, 'x', 0, -MAX_COORD, MAX_COORD)
+  out.y = r.num(v, 'y', 0, -MAX_COORD, MAX_COORD)
+  out.blur = r.num(v, 'blur', 0, 0, MAX_SIZE)
+  return out
 }
 
 // ---------- layers ----------
 
+/** A layer, checked and repaired; null when it can't be kept (it's dropped, with a note). */
 function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | null {
   if (!isObj(raw)) damaged('a layer is not an object')
   if (depth > MAX_DEPTH) damaged(`groups are nested more than ${MAX_DEPTH} deep`)
   if (++r.layers > MAX_LAYERS) damaged(`it has more than ${MAX_LAYERS.toLocaleString('en-US')} layers`)
   const type = raw.type
   if (typeof type !== 'string' || !TYPES.has(type)) damaged(`a layer has an unknown type (${shown(type)})`)
-  const id = r.id(raw.id, scope)
-  const where = `layer ${id}`
-  const out: Obj = {
-    id,
-    name: r.name(raw.name, DEFAULT_NAMES[type]),
-    type,
-    visible: bool(raw.visible, `${where}'s visible`),
-    locked: bool(raw.locked, `${where}'s locked`),
-    opacity: num(raw.opacity, 0, 1, `${where}'s opacity`),
-    blend: oneOf(raw.blend, [...BLENDS] as BlendMode[], 'normal', r, 'blend mode'),
-    x: num(raw.x, -MAX_COORD, MAX_COORD, `${where}'s x`),
-    y: num(raw.y, -MAX_COORD, MAX_COORD, `${where}'s y`),
-    width: num(raw.width, -MAX_SIZE, MAX_SIZE, `${where}'s width`),
-    height: num(raw.height, -MAX_SIZE, MAX_SIZE, `${where}'s height`),
-    rotation: num(raw.rotation, -MAX_COORD, MAX_COORD, `${where}'s rotation`),
-    scaleX: num(raw.scaleX, -MAX_SIZE, MAX_SIZE, `${where}'s scaleX`),
-    scaleY: num(raw.scaleY, -MAX_SIZE, MAX_SIZE, `${where}'s scaleY`)
+  const out = kept(raw)
+  out.id = r.id(raw.id, scope)
+  const where = `layer ${out.id}`
+  out.name = r.name(raw.name, DEFAULT_NAMES[type])
+  out.visible = r.bool(raw, 'visible', true)
+  out.locked = r.bool(raw, 'locked', false)
+  out.opacity = r.num(raw, 'opacity', 1, 0, 1)
+  out.blend = r.oneOf(raw.blend, BLENDS, 'normal', 'blend mode')
+  out.x = r.num(raw, 'x', 0, -MAX_COORD, MAX_COORD)
+  out.y = r.num(raw, 'y', 0, -MAX_COORD, MAX_COORD)
+  out.width = r.num(raw, 'width', 0, -MAX_SIZE, MAX_SIZE)
+  out.height = r.num(raw, 'height', 0, -MAX_SIZE, MAX_SIZE)
+  out.rotation = r.num(raw, 'rotation', 0, -MAX_COORD, MAX_COORD)
+  out.scaleX = r.num(raw, 'scaleX', 1, -MAX_SIZE, MAX_SIZE)
+  out.scaleY = r.num(raw, 'scaleY', 1, -MAX_SIZE, MAX_SIZE)
+  optPaint(out, 'fill', r)
+  optPaint(out, 'stroke', r)
+  r.optNum(out, 'strokeWidth', 0, MAX_SIZE)
+  r.optNum(out, 'radius', 0, MAX_SIZE)
+  r.optNum(out, 'blur', 0, MAX_SIZE)
+  if (out.dash !== undefined) {
+    const d = out.dash
+    if (Array.isArray(d) && d.length <= 1000 && d.every(x => r.number(x, 'a dash length') !== undefined)) {
+      out.dash = d.map(x => clamp(r.number(x, 'a dash length') ?? 0, 0, MAX_SIZE))
+    } else {
+      r.note('a dash that was not a list of lengths (dropped)')
+      delete out.dash
+    }
   }
-  optPaint(raw, 'fill', r, out)
-  optPaint(raw, 'stroke', r, out)
-  optNum(raw, 'strokeWidth', 0, MAX_SIZE, r, out)
-  optNum(raw, 'radius', 0, MAX_SIZE, r, out)
-  optNum(raw, 'blur', 0, MAX_SIZE, r, out)
-  if (has(raw, 'dash') && raw.dash !== undefined) {
-    if (Array.isArray(raw.dash) && raw.dash.length <= 1000 && raw.dash.every(d => typeof d === 'number' && Number.isFinite(d))) {
-      out.dash = (raw.dash as number[]).map(d => Math.min(MAX_SIZE, Math.max(0, d)))
-    } else r.note('a dash that was not a list of lengths (dropped)')
-  }
-  if (has(raw, 'shadow') && raw.shadow !== undefined) {
-    const s = shadow(raw.shadow)
+  if (out.shadow !== undefined) {
+    const s = shadow(out.shadow, r)
     if (s) out.shadow = s
-    else r.note('a shadow that was not well formed (dropped)')
+    else {
+      r.note('a shadow that was not well formed (dropped)')
+      delete out.shadow
+    }
   }
-  if (has(raw, 'timing') && raw.timing !== undefined) {
-    const t = timing(raw.timing, r)
+  if (out.timing !== undefined) {
+    const t = timing(out.timing, r)
     if (t) out.timing = t
+    else delete out.timing
   }
   switch (type) {
     case 'path':
-      out.d = str(raw.d, `${where}'s path data`)
+      if (typeof raw.d !== 'string') {
+        r.note('path data that was not text (the path draws nothing)')
+        out.d = ''
+      }
       break
     case 'text': {
-      if (!Array.isArray(raw.runs)) damaged(`${where} has no runs`)
-      if (raw.runs.length > MAX_RUNS) damaged(`${where} has more than ${MAX_RUNS.toLocaleString('en-US')} runs`)
+      let runs = raw.runs
+      if (!Array.isArray(runs)) {
+        r.note('a text layer without runs (left empty)')
+        runs = []
+      }
+      const list = runs as unknown[]
+      if (list.length > MAX_RUNS) damaged(`${where} has more than ${MAX_RUNS.toLocaleString('en-US')} runs`)
       let chars = 0
-      out.runs = raw.runs.map((run, i) => {
-        if (!isObj(run)) damaged(`${where}'s run ${i + 1} is not an object`)
-        const text = str(run.text, `${where}'s run ${i + 1} text`)
-        chars += text.length
-        return { text, ...runStyle(run, `${where}'s run ${i + 1}`, r) }
-      })
+      out.runs = list
+        .filter(run => {
+          if (isObj(run)) return true
+          r.note('a text run that was not an object (dropped)')
+          return false
+        })
+        .map(run => {
+          const o = run as Obj
+          let text = o.text
+          if (typeof text !== 'string') {
+            r.note('run text that was not text (left empty)')
+            text = ''
+          }
+          chars += (text as string).length
+          return { ...runStyle(o, r), text }
+        })
       if (chars > MAX_LAYER_TEXT) damaged(`${where} holds more than ${MAX_LAYER_TEXT.toLocaleString('en-US')} characters`)
       if ((r.text += chars) > MAX_DESIGN_TEXT) damaged(`it holds more than ${MAX_DESIGN_TEXT.toLocaleString('en-US')} characters of text`)
-      out.mode = oneOf(raw.mode, ['box', 'point'] as const, 'box', r, 'text mode')
-      out.align = oneOf(raw.align, ['left', 'center', 'right', 'justify'] as const, 'left', r, 'alignment')
-      out.valign = oneOf(raw.valign, ['top', 'middle', 'bottom'] as const, 'top', r, 'vertical alignment')
-      optBool(raw, 'outlines', r, out)
-      optBool(raw, 'missingFont', r, out)
-      if (typeof raw.glyphs === 'string') out.glyphs = raw.glyphs
+      out.mode = r.oneOf(raw.mode, ['box', 'point'] as const, 'box', 'text mode')
+      out.align = r.oneOf(raw.align, ['left', 'center', 'right', 'justify'] as const, 'left', 'alignment')
+      out.valign = r.oneOf(raw.valign, ['top', 'middle', 'bottom'] as const, 'top', 'vertical alignment')
+      r.optBool(out, 'outlines')
+      r.optBool(out, 'missingFont')
+      if (out.glyphs !== undefined && typeof out.glyphs !== 'string') {
+        r.note('stored glyphs that were not text (dropped)')
+        delete out.glyphs
+      }
       break
     }
     case 'image':
     case 'paint':
-      out.asset = str(raw.asset, `${where}'s asset`)
-      if (raw.fit !== undefined) out.fit = oneOf(raw.fit, ['fill', 'contain', 'cover'] as const, 'fill', r, 'fit')
+      if (typeof raw.asset !== 'string') {
+        r.note('an image without an asset (dropped)')
+        return null
+      }
+      r.optOneOf(out, 'fit', ['fill', 'contain', 'cover'])
       break
     case 'group': {
-      if (!Array.isArray(raw.children)) damaged(`${where} has no children`)
-      out.children = raw.children.map(c => layer(r, c, depth + 1, scope)).filter((c): c is Layer => c !== null)
-      optBool(raw, 'clip', r, out)
+      let children = raw.children
+      if (!Array.isArray(children)) {
+        r.note('a group without children (left empty)')
+        children = []
+      }
+      out.children = (children as unknown[]).map(c => layer(r, c, depth + 1, scope)).filter((c): c is Layer => c !== null)
+      r.optBool(out, 'clip')
       break
     }
     case 'instance':
-      out.component = str(raw.component, `${where}'s component`)
+      if (typeof raw.component !== 'string') {
+        r.note('an instance without a component (it draws nothing)')
+        out.component = ''
+      }
       out.overrides = {}
-      r.instances.push({ layer: out as unknown as Layer & { type: 'instance' }, raw: raw.overrides })
+      r.instances.push({ layer: out, raw: raw.overrides })
       break
     case 'connector': {
       for (const k of ['from', 'to'] as const) {
         const e = raw[k]
-        if (!isObj(e)) damaged(`${where}'s ${k} is not an end`)
-        const end: End = { layer: str(e.layer, `${where}'s ${k} layer`) }
-        if (e.side !== undefined) end.side = oneOf(e.side, ['auto', 'top', 'right', 'bottom', 'left'] as const, 'auto', r, 'side')
+        const end = isObj(e) ? kept(e) : {}
+        if (typeof end.layer !== 'string') {
+          r.note('a connector end without a layer (it joins nothing)')
+          end.layer = ''
+        }
+        r.optOneOf(end, 'side', ['auto', 'top', 'right', 'bottom', 'left'])
         out[k] = end
-        r.connectors.push({ end, scope })
+        r.ends.push({ end, scope })
       }
-      if (raw.label !== undefined) out.label = r.name(raw.label, '')
-      out.route = oneOf(raw.route, ['straight', 'orthogonal'] as const, 'straight', r, 'route')
-      out.arrow = oneOf(raw.arrow, ['end', 'both', 'none'] as const, 'end', r, 'arrow')
-      if (raw.points !== undefined) {
-        const pts = raw.points
+      r.optText(out, 'label')
+      out.route = r.oneOf(raw.route, ['straight', 'orthogonal'] as const, 'straight', 'route')
+      out.arrow = r.oneOf(raw.arrow, ['end', 'both', 'none'] as const, 'end', 'arrow')
+      if (out.points !== undefined) {
+        const pts = out.points
         if (Array.isArray(pts) && pts.length <= 10_000 && pts.every(p => Array.isArray(p) && p.length === 2 && p.every(n => typeof n === 'number' && Number.isFinite(n)))) {
-          out.points = (pts as [number, number][]).map(([px, py]) => [Math.min(MAX_COORD, Math.max(-MAX_COORD, px)), Math.min(MAX_COORD, Math.max(-MAX_COORD, py))])
-        } else r.note("a connector's points that were not well formed (dropped)")
+          out.points = (pts as [number, number][]).map(([px, py]) => [clamp(px, -MAX_COORD, MAX_COORD), clamp(py, -MAX_COORD, MAX_COORD)])
+        } else {
+          r.note("a connector's points that were not well formed (dropped)")
+          delete out.points
+        }
       }
       break
     }
     case 'svg': {
       // an svg layer is drawn and exported, so its markup is cleaned again: a file can hold any SVG
-      const svg = str(raw.svg, `${where}'s svg`)
+      if (typeof raw.svg !== 'string') {
+        r.note('an SVG layer without markup (dropped)')
+        return null
+      }
       try {
-        out.svg = cleanSvg(svg).svg
+        out.svg = cleanSvg(raw.svg).svg
       } catch (e) {
         r.note(`an SVG layer that could not be cleaned (${(e as Error).message.replace(/\.$/, '')}; dropped)`)
         return null
@@ -355,73 +488,60 @@ function layer(r: Reader, raw: unknown, depth: number, scope: Scope): Layer | nu
 
 // ---------- the design ----------
 
-function styles(v: unknown, r: Reader): Styles {
-  const out: Styles = { colors: [], text: [] }
+function styles(v: unknown, r: Reader): Obj {
   if (!isObj(v)) {
     if (v !== undefined) r.note('styles that were not well formed (dropped)')
-    return out
+    return { colors: [], text: [] }
   }
+  const out = kept(v)
+  const colors: Obj[] = []
   for (const c of Array.isArray(v.colors) ? v.colors : []) {
-    if (isObj(c) && typeof c.name === 'string' && isColor(c.color)) out.colors.push({ name: r.name(c.name, ''), color: c.color })
+    if (isObj(c) && typeof c.name === 'string' && isColor(c.color)) colors.push({ ...kept(c), name: r.name(c.name, ''), color: c.color })
     else r.note('a color style that was not well formed (dropped)')
   }
+  const text: Obj[] = []
   for (const t of Array.isArray(v.text) ? v.text : []) {
-    try {
-      if (!isObj(t) || typeof t.name !== 'string' || !isObj(t.run)) throw new Error()
-      out.text.push({ name: r.name(t.name, ''), run: runStyle(t.run, 'a text style', r) })
-    } catch {
-      r.note('a text style that was not well formed (dropped)')
-    }
+    if (isObj(t) && typeof t.name === 'string' && isObj(t.run)) text.push({ ...kept(t), name: r.name(t.name, ''), run: runStyle(t.run, r) })
+    else r.note('a text style that was not well formed (dropped)')
   }
+  out.colors = colors
+  out.text = text
   return out
 }
 
-function diagrams(v: unknown, scope: Scope, r: Reader): Diagram[] | undefined {
-  if (!Array.isArray(v)) return undefined
-  const ref = (x: unknown): string | undefined => (typeof x === 'string' ? follow(scope, x) : undefined)
-  const label = (x: unknown): string | undefined => (typeof x === 'string' ? x.slice(0, MAX_NAME) : undefined)
-  const out: Diagram[] = []
+/** Diagrams as a later release keeps them: each part kept, and the layer each names following any rename. */
+function diagrams(v: unknown, scope: Scope, r: Reader): Obj[] | undefined {
+  if (!Array.isArray(v)) {
+    r.note('diagrams that were not a list (dropped)')
+    return undefined
+  }
+  const parts = (list: unknown, what: string): Obj[] => {
+    if (!Array.isArray(list)) return []
+    const out: Obj[] = []
+    for (const p of list) {
+      if (!isObj(p)) {
+        r.note(`a diagram ${what} that was not an object (dropped)`)
+        continue
+      }
+      const o = kept(p)
+      if (typeof o.layer === 'string') o.layer = follow(scope, o.layer) ?? o.layer
+      out.push(o)
+    }
+    return out
+  }
+  const out: Obj[] = []
   for (const d of v) {
-    if (!isObj(d) || typeof d.name !== 'string') {
-      r.note('a diagram that was not well formed (dropped)')
+    if (!isObj(d)) {
+      r.note('a diagram that was not an object (dropped)')
       continue
     }
-    const nodes: Diagram['nodes'] = []
-    for (const n of Array.isArray(d.nodes) ? d.nodes : []) {
-      const layerId = isObj(n) ? ref(n.layer) : undefined
-      if (!isObj(n) || typeof n.id !== 'string' || !layerId) continue
-      const node: Diagram['nodes'][number] = { id: n.id.slice(0, MAX_NAME), layer: layerId }
-      if (typeof n.container === 'string') node.container = n.container.slice(0, MAX_NAME)
-      if (typeof n.pinned === 'boolean') node.pinned = n.pinned
-      if (typeof n.icon === 'string') node.icon = n.icon.slice(0, MAX_NAME)
-      nodes.push(node)
-    }
-    const links: Diagram['links'] = []
-    for (const l of Array.isArray(d.links) ? d.links : []) {
-      const layerId = isObj(l) ? ref(l.layer) : undefined
-      if (!isObj(l) || typeof l.from !== 'string' || typeof l.to !== 'string' || !layerId) continue
-      const link: Diagram['links'][number] = { from: l.from.slice(0, MAX_NAME), to: l.to.slice(0, MAX_NAME), layer: layerId }
-      const text = label(l.label)
-      if (text !== undefined) link.label = text
-      links.push(link)
-    }
-    const containers: Diagram['containers'] = []
-    for (const c of Array.isArray(d.containers) ? d.containers : []) {
-      const layerId = isObj(c) ? ref(c.layer) : undefined
-      if (!isObj(c) || typeof c.id !== 'string' || !layerId) continue
-      const box: Diagram['containers'][number] = { id: c.id.slice(0, MAX_NAME), layer: layerId }
-      if (typeof c.in === 'string') box.in = c.in.slice(0, MAX_NAME)
-      containers.push(box)
-    }
-    out.push({
-      name: r.name(d.name, 'Diagram'),
-      direction: oneOf(d.direction, ['right', 'down', 'left', 'up'] as const, 'right', r, 'direction'),
-      spacing: typeof d.spacing === 'number' && Number.isFinite(d.spacing) ? Math.min(MAX_SIZE, Math.max(0, d.spacing)) : 40,
-      nodeComponent: typeof d.nodeComponent === 'string' ? (follow(r.componentIds, d.nodeComponent) ?? d.nodeComponent.slice(0, 64)) : '',
-      nodes,
-      links,
-      containers
-    })
+    const o = kept(d)
+    o.name = r.name(d.name, 'Diagram')
+    o.nodes = parts(d.nodes, 'node')
+    o.links = parts(d.links, 'link')
+    o.containers = parts(d.containers, 'container')
+    if (typeof o.nodeComponent === 'string') o.nodeComponent = follow(r.componentIds, o.nodeComponent) ?? o.nodeComponent
+    out.push(o)
   }
   return out
 }
@@ -432,23 +552,69 @@ function reserve(r: Reader, v: unknown, depth = 0): void {
   if (Array.isArray(v)) for (const x of v) reserve(r, x, depth + 1)
   else if (isObj(v)) {
     if (typeof v.id === 'string' && ID.test(v.id)) r.reserved.add(v.id)
-    for (const k of ['artboards', 'layers', 'children', 'components', 'root'] as const) if (has(v, k)) reserve(r, v[k], depth + 1)
+    for (const k of ['artboards', 'layers', 'children', 'components', 'root'] as const) if (k in v) reserve(r, v[k], depth + 1)
   }
 }
 
+function artboard(r: Reader, a: unknown, pending: { board: Obj; raw: unknown; scope: Scope }[]): Obj {
+  if (!isObj(a)) damaged('an artboard is not an object')
+  const out = kept(a)
+  out.id = r.id(a.id)
+  out.name = r.name(a.name, 'Artboard')
+  out.width = r.num(a, 'width', 1080, 1, Infinity)
+  out.height = r.num(a, 'height', 1080, 1, Infinity)
+  if ((out.width as number) > MAX_ARTBOARD_SIDE || (out.height as number) > MAX_ARTBOARD_SIDE) {
+    throw new Error(`Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`)
+  }
+  if (a.background === undefined || a.background === null) out.background = null
+  else {
+    const p = paint(a.background, r)
+    if (!p) r.note('a background that was not a paint (dropped)')
+    out.background = p ?? null
+  }
+  let layers = a.layers
+  if (!Array.isArray(layers)) {
+    r.note('an artboard without layers (left empty)')
+    layers = []
+  }
+  const scope = newScope()
+  out.layers = (layers as unknown[]).map(l => layer(r, l, 1, scope)).filter((l): l is Layer => l !== null)
+  if (out.animation !== undefined) {
+    if (isObj(out.animation)) {
+      const an = kept(out.animation)
+      an.duration = r.num(out.animation, 'duration', 0, 0, MAX_SIZE)
+      an.fps = r.num(out.animation, 'fps', 30, 1, 60)
+      an.loop = r.bool(out.animation, 'loop', false)
+      out.animation = an
+    } else {
+      r.note('an animation that was not well formed (dropped)')
+      delete out.animation
+    }
+  }
+  if (out.diagrams !== undefined) pending.push({ board: out, raw: out.diagrams, scope })
+  return out
+}
+
 /**
- * A design from what a file holds (design.json, parsed), checked against the schema in types.ts. Returns a new Design
- * holding only the fields the schema knows:
- * - wrong types for required fields, unknown layer types, more than 100,000 layers, groups nested past 64, more than
- *   10,000 components, and text past 1,000 runs or 100,000 characters in a layer or 1,000,000 in the design refuse
- *   the file with "This design file is damaged: <reason>." (and an artboard over 8192 px with the usual message);
- * - ids that aren't 1 to 64 of [A-Za-z0-9_-], or repeat one held earlier, are renamed, and connector ends, diagram
- *   nodes, instances' components and override keys follow the rename wherever it's unambiguous;
- * - names past 1,000 characters are cut, and a name that isn't text gets a default;
- * - numbers are clamped as the ops clamp them (coordinates to +/-1e7, sizes to 1e5), gradients keep at most 256
- *   well-formed stops (falling back to a color with fewer than two), override keys that aren't layers of the
- *   instance's component are dropped, and svg layers are cleaned again (one that fails cleaning is dropped).
- * `notes`, when given, hears one plain line per kind of thing repaired or dropped, with a count.
+ * A design from what a file holds (design.json, parsed), checked against the schema in types.ts. Returns a new
+ * Design; `notes`, when given, hears one plain line per kind of thing repaired or dropped, with a count.
+ *
+ * - Kept as they are: every field this release doesn't know, at any level (a later release's data must survive a
+ *   save here), and the known fields of later releases (timing effects and tracks, animation, diagrams, kit).
+ * - Repaired, with a note: "true" and "false" read as booleans and numeric strings as numbers; a missing or wrong
+ *   scalar gets its default (visible true, locked false, opacity 1, blend normal, rotation 0, scale 1, position and
+ *   size 0, and so on); ids that aren't 1 to 64 of [A-Za-z0-9_-], or repeat one held earlier, are renamed, and
+ *   connector ends, diagram layers, instances' components and override keys follow wherever it's unambiguous;
+ *   names past 1,000 characters are cut and one that isn't text gets a default; numbers are clamped as the ops clamp
+ *   them (coordinates to +/-1e7, sizes to 1e5); gradients keep at most 256 good stops, falling back to a color with
+ *   fewer than two.
+ * - Dropped, with a note: optional fields of the wrong type, override keys that aren't layers of the instance's
+ *   component, images without an asset, and svg layers that fail cleaning again.
+ * - Refused ("This design file is damaged: <reason>."): structural damage (no artboards, a layer or artboard that
+ *   isn't an object, a layer of unknown type, a component without a group at its root) and size past the limits
+ *   (100,000 layers, groups 64 deep, 10,000 components, 1,000 runs or 100,000 characters in a layer, 1,000,000 in
+ *   the design). An artboard over 8192 px gets the usual message.
+ *
  * Pure: the same input gives the same design.
  */
 export function validateDesign(raw: unknown, notes?: string[]): Design {
@@ -461,60 +627,37 @@ export function validateDesign(raw: unknown, notes?: string[]): Design {
   if (rawComponents.length > MAX_COMPONENTS) damaged(`it has more than ${MAX_COMPONENTS.toLocaleString('en-US')} components`)
 
   // components first: their ids are what instances refer to
-  const components: Component[] = []
+  const components: Obj[] = []
   for (const c of rawComponents) {
     if (!isObj(c)) damaged('a component is not an object')
-    const id = r.id(c.id, r.componentIds)
+    const out = kept(c)
+    out.id = r.id(c.id, r.componentIds)
     const scope = newScope()
-    r.componentScopes.set(id, scope)
+    r.componentScopes.set(out.id as string, scope)
     const root = layer(r, c.root, 1, scope)
-    if (!root || root.type !== 'group') damaged(`component ${id} has no group at its root`)
-    components.push({ id, name: r.name(c.name, 'Component'), root })
+    if (!root || root.type !== 'group') damaged(`component ${out.id} has no group at its root`)
+    out.root = root
+    out.name = r.name(c.name, 'Component')
+    components.push(out)
   }
 
-  const artboards: Artboard[] = []
-  const pending: { board: Artboard; raw: unknown; scope: Scope }[] = []
-  for (const a of raw.artboards) {
-    if (!isObj(a)) damaged('an artboard is not an object')
-    const id = r.id(a.id)
-    const where = `artboard ${id}`
-    const width = num(a.width, 1, Infinity, `${where}'s width`)
-    const height = num(a.height, 1, Infinity, `${where}'s height`)
-    if (width > MAX_ARTBOARD_SIDE || height > MAX_ARTBOARD_SIDE) throw new Error(`Artboards can be at most ${MAX_ARTBOARD_SIDE} px per side.`)
-    if (!Array.isArray(a.layers)) damaged(`${where} has no layers`)
-    const scope = newScope()
-    let background: Paint | null = null
-    if (a.background !== null && a.background !== undefined) {
-      const p = paint(a.background, r)
-      if (p) background = p
-      else r.note('a background that was not a paint (dropped)')
-    }
-    const board: Artboard = {
-      id, name: r.name(a.name, 'Artboard'), width, height, background,
-      layers: a.layers.map(l => layer(r, l, 1, scope)).filter((l): l is Layer => l !== null)
-    }
-    if (isObj(a.animation)) {
-      const an = a.animation
-      if (typeof an.duration === 'number' && typeof an.fps === 'number' && typeof an.loop === 'boolean' && Number.isFinite(an.duration) && Number.isFinite(an.fps)) {
-        board.animation = { duration: Math.min(MAX_SIZE, Math.max(0, an.duration)), fps: Math.min(60, Math.max(1, an.fps)), loop: an.loop }
-      } else r.note('an animation that was not well formed (dropped)')
-    }
-    artboards.push(board)
-    if (a.diagrams !== undefined) pending.push({ board, raw: a.diagrams, scope })
-  }
+  const pending: { board: Obj; raw: unknown; scope: Scope }[] = []
+  const artboards = raw.artboards.map(a => artboard(r, a, pending))
 
   // references, now that every id is known
   for (const { board, raw: d, scope } of pending) {
     const list = diagrams(d, scope, r)
     if (list) board.diagrams = list
+    else delete board.diagrams
   }
-  for (const { end, scope } of r.connectors) {
-    const to = follow(scope, end.layer)
-    end.layer = to ?? (ID.test(end.layer) ? end.layer : '')
+  for (const { end, scope } of r.ends) {
+    const ref = end.layer as string
+    end.layer = follow(scope, ref) ?? (ID.test(ref) ? ref : '')
   }
   for (const { layer: inst, raw: given } of r.instances) {
-    inst.component = follow(r.componentIds, inst.component) ?? (ID.test(inst.component) ? inst.component : '')
-    const scope = r.componentScopes.get(inst.component)
+    const ref = inst.component as string
+    inst.component = follow(r.componentIds, ref) ?? (ID.test(ref) ? ref : '')
+    const scope = r.componentScopes.get(inst.component as string)
     if (given === undefined) continue
     if (!isObj(given)) {
       r.note('overrides that were not well formed (dropped)')
@@ -527,38 +670,47 @@ export function validateDesign(raw: unknown, notes?: string[]): Design {
         r.note("an override for a layer its component doesn't have (dropped)")
         continue
       }
-      const out: Override = {}
-      if (typeof o.text === 'string') out.text = o.text.length > MAX_LAYER_TEXT ? damaged(`an override holds more than ${MAX_LAYER_TEXT.toLocaleString('en-US')} characters`) : o.text
-      if (out.text !== undefined && (r.text += out.text.length) > MAX_DESIGN_TEXT) damaged(`it holds more than ${MAX_DESIGN_TEXT.toLocaleString('en-US')} characters of text`)
-      for (const k of ['fill', 'stroke'] as const) {
-        if (o[k] === undefined) continue
-        const p = paint(o[k], r)
-        if (p) out[k] = p
-        else r.note(`an override ${k} that was not a paint (dropped)`)
+      const out = kept(o)
+      if (out.text !== undefined) {
+        if (typeof out.text !== 'string') {
+          r.note('override text that was not text (dropped)')
+          delete out.text
+        } else {
+          if (out.text.length > MAX_LAYER_TEXT) damaged(`an override holds more than ${MAX_LAYER_TEXT.toLocaleString('en-US')} characters`)
+          if ((r.text += out.text.length) > MAX_DESIGN_TEXT) damaged(`it holds more than ${MAX_DESIGN_TEXT.toLocaleString('en-US')} characters of text`)
+        }
       }
-      if (typeof o.visible === 'boolean') out.visible = o.visible
-      if (typeof o.asset === 'string') out.asset = o.asset
-      overrides[inner] = out
+      optPaint(out, 'fill', r, false)
+      optPaint(out, 'stroke', r, false)
+      r.optBool(out, 'visible')
+      if (out.asset !== undefined && typeof out.asset !== 'string') {
+        r.note('an override image that was not text (dropped)')
+        delete out.asset
+      }
+      overrides[inner] = out as Override
     }
     inst.overrides = overrides
   }
 
-  const design: Design = {
-    format: 1,
-    id: typeof raw.id === 'string' && ID.test(raw.id) ? raw.id : 'design',
-    artboards,
-    components,
-    styles: styles(raw.styles, r)
+  const design = kept(raw)
+  design.format = 1
+  if (typeof raw.id !== 'string' || !ID.test(raw.id)) {
+    r.note('a design id that was not valid (replaced)')
+    design.id = 'design'
   }
-  if (isObj(raw.kit) && typeof raw.kit.kitId === 'string' && Array.isArray(raw.kit.items)) {
-    design.kit = {
-      kitId: raw.kit.kitId.slice(0, MAX_NAME),
-      items: raw.kit.items
-        .filter((i): i is Obj => isObj(i) && typeof i.itemId === 'string' && typeof i.name === 'string')
-        .map(i => ({ itemId: (i.itemId as string).slice(0, MAX_NAME), name: r.name(i.name, ''), copy: i.copy }))
+  design.artboards = artboards
+  design.components = components
+  design.styles = styles(raw.styles, r)
+  if (design.kit !== undefined) {
+    const k = design.kit
+    if (isObj(k) && typeof k.kitId === 'string' && Array.isArray(k.items) && k.items.every(isObj)) design.kit = kept(k)
+    else {
+      r.note('a brand kit link that was not well formed (dropped)')
+      delete design.kit
     }
   }
-  if (typeof raw.thumbnailStale === 'boolean') design.thumbnailStale = raw.thumbnailStale
+  if (design.thumbnailStale !== undefined) r.optBool(design, 'thumbnailStale')
   if (notes) for (const [s, n] of r.notes) notes.push(n > 1 ? `${s} (${n} times)` : s)
-  return design
+  // every object above was checked field by field against the schema; this is where the result meets its type
+  return design as unknown as Design
 }
