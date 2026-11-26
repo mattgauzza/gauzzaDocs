@@ -4,7 +4,29 @@
 import type { ElkGraph } from '../../shared/design/types'
 
 interface Elk { layout(graph: ElkGraph): Promise<ElkGraph> }
-let engine: Promise<Elk> | null = null
+
+/**
+ * `load` run the first time it's needed and its result kept, except that a failed load is forgotten, so the next call
+ * tries again rather than failing for the life of the process.
+ */
+export function onceRetrying<T>(load: () => Promise<T>): () => Promise<T> {
+  let kept: Promise<T> | null = null
+  return () => {
+    if (kept) return kept
+    const p = load()
+    kept = p
+    p.catch(() => {
+      if (kept === p) kept = null
+    })
+    return p
+  }
+}
+
+const engine = onceRetrying(async (): Promise<Elk> => {
+  // elkjs types its graphs loosely; ElkGraph (types.ts) is the part of them diagrams use
+  const ELK = ((await import('elkjs/lib/elk.bundled.js')) as unknown as { default: new () => Elk }).default
+  return new ELK()
+})
 
 /**
  * What every diagram is laid out with, whatever the graph says: the layered algorithm across boxes and what they
@@ -22,15 +44,10 @@ const FIXED: Record<string, string> = {
 /**
  * Lays out a diagram's graph (diagramGraph makes it from a spec: sizes, direction and spacing are its own layout
  * options) and returns a laid-out copy: every node with x and y, every box sized, and every edge with its sections.
- * ELK is loaded the first time it's needed. The graph given is left as it was.
+ * ELK is loaded the first time it's needed (again after a load that failed). The graph given is left as it was.
  */
 export async function layoutDiagram(graph: ElkGraph): Promise<ElkGraph> {
-  engine ??= import('elkjs/lib/elk.bundled.js').then(m => {
-    // elkjs types its graphs loosely; ElkGraph (types.ts) is the part of them diagrams use
-    const ELK = (m as unknown as { default: new () => Elk }).default
-    return new ELK()
-  })
-  const elk = await engine
+  const elk = await engine()
   const copy = structuredClone(graph)
   copy.layoutOptions = { ...copy.layoutOptions, ...FIXED }
   return elk.layout(copy)

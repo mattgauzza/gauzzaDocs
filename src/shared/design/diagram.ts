@@ -336,6 +336,7 @@ export function diagramGraph(spec: DiagramSpec, sizes: DiagramSizes): ElkGraph {
   const options: Record<string, string> = {
     'elk.direction': (spec.direction ?? 'right').toUpperCase(),
     'elk.spacing.nodeNode': px(spacing),
+    'elk.spacing.componentComponent': px(spacing),
     'elk.layered.spacing.nodeNodeBetweenLayers': px(spacing * 1.5),
     'elk.spacing.edgeNode': px(spacing / 2),
     'elk.layered.spacing.edgeNodeBetweenLayers': px(spacing / 2),
@@ -477,6 +478,107 @@ function nodeComponent(design: Design, ref: unknown, size: Size, taken: Set<stri
   return { comp, label }
 }
 
+/** A node or box while the layout is placed: where it is, what it holds, and whether it's pinned or holds a pinned node. */
+interface Placed {
+  at: Box
+  box: boolean
+  pinned: boolean
+  /** pinned, or holding a pinned node: it doesn't move (a box's frame stretches to what it holds wherever that is) */
+  fixed: boolean
+  /** pushed by this pass, so it must clear everything placed before it, not only what's fixed */
+  pushed: boolean
+  kids: Placed[]
+  /** room above what a box holds, for its label */
+  room: number
+}
+
+/**
+ * Where every node and box goes once pinned nodes are back where they were put (ELK's layered layout can't hold a node
+ * in place). `place` gives ELK's place for an ELK id, already on the artboard; `pins` the pinned nodes' spots.
+ *
+ * Within each box, innermost first, and then at the top: whatever is fixed (a pinned node, or a box holding one, whose
+ * frame stretches to hold it) stays; everything else, taken in the order of the flow, is pushed along it (right for
+ * `right`, down for `down` and so on) until it's `gap` clear of every fixed thing, and of everything already pushed or
+ * placed after a push. A box moves with all it holds. Nothing is checked against what ELK placed itself, so with no
+ * pinned node the layout is ELK's exactly. Each item is pushed past each other one at most once, so a box of k items
+ * takes at most k * k checks. Returns each node's place, each box's frame (holding everything in it, with room for its
+ * label) and, for unpinned nodes, how far each moved from ELK's place.
+ */
+function clearOfPinned(
+  spec: DiagramSpec, place: (elk: string) => Box, pins: Map<string, { x: number; y: number }>, room: (box: string) => number,
+  gap: number, flow: Direction
+): { nodes: Map<string, Box>; frames: Map<string, Box>; shift: Map<string, [number, number]> } {
+  const containers = spec.containers ?? []
+  const item = (at: Box, box: boolean, pinned: boolean, labelRoom = 0): Placed => ({ at: { ...at }, box, pinned, fixed: pinned, pushed: false, kids: [], room: labelRoom })
+  const root = item({ x: 0, y: 0, w: 0, h: 0 }, true, false)
+  const boxes = new Map(containers.map((c, i) => [c.id, item(place(`c${i}`), true, false, room(c.id))]))
+  const nodes = new Map(
+    spec.nodes.map((n, i) => {
+      const b = place(`n${i}`)
+      const pin = pins.get(n.id)
+      return [n.id, item(pin ? { ...b, x: pin.x, y: pin.y } : b, false, !!pin)]
+    })
+  )
+  for (const c of containers) (c.in ? boxes.get(c.in)! : root).kids.push(boxes.get(c.id)!)
+  for (const n of spec.nodes) (n.in ? boxes.get(n.in)! : root).kids.push(nodes.get(n.id)!)
+  const fix = (it: Placed): boolean => {
+    for (const k of it.kids) if (fix(k)) it.fixed = true
+    return it.fixed
+  }
+  fix(root)
+  /** A box's frame: where ELK put it, stretched to hold what it holds with padding and its label's room. */
+  const frame = (it: Placed): Box => {
+    if (!it.box || !it.kids.length) return it.at
+    const inner = it.kids.map(frame).reduce((a, b) => union(a, b))
+    return union(it.at, { x: inner.x - BOX_PAD, y: inner.y - it.room, w: inner.w + 2 * BOX_PAD, h: inner.h + it.room + BOX_PAD })
+  }
+  const shift = (it: Placed, dx: number, dy: number): void => {
+    if (it.pinned) return
+    it.at.x += dx
+    it.at.y += dy
+    for (const k of it.kids) shift(k, dx, dy)
+  }
+  // how far along the flow a box starts, and the push that takes `a` gap past `b`
+  const start = (b: Box): number => (flow === 'right' ? b.x : flow === 'down' ? b.y : flow === 'left' ? -(b.x + b.w) : -(b.y + b.h))
+  const past = (a: Box, b: Box): [number, number] =>
+    flow === 'right' ? [b.x + b.w + gap - a.x, 0] : flow === 'left' ? [b.x - gap - (a.x + a.w), 0] : flow === 'down' ? [0, b.y + b.h + gap - a.y] : [0, b.y - gap - (a.y + a.h)]
+  const EPS = 0.5
+  const close = (a: Box, b: Box): boolean =>
+    a.x < b.x + b.w + gap - EPS && b.x < a.x + a.w + gap - EPS && a.y < b.y + b.h + gap - EPS && b.y < a.y + a.h + gap - EPS
+  const settle = (scope: Placed): void => {
+    for (const k of scope.kids) if (k.box) settle(k)
+    if (!scope.kids.some(k => k.fixed)) return
+    const frames = new Map(scope.kids.map(k => [k, frame(k)]))
+    const placed = scope.kids.filter(k => k.fixed)
+    const free = scope.kids.filter(k => !k.fixed).sort((a, b) => start(frames.get(a)!) - start(frames.get(b)!))
+    for (const k of free) {
+      for (let tries = 0; tries <= placed.length; tries++) {
+        const mine = frames.get(k)!
+        const hit = placed.find(p => (p.fixed || p.pushed || k.pushed) && close(mine, frames.get(p)!))
+        if (!hit) break
+        const [dx, dy] = past(mine, frames.get(hit)!)
+        shift(k, dx, dy)
+        k.pushed = true
+        frames.set(k, { ...mine, x: mine.x + dx, y: mine.y + dy })
+      }
+      placed.push(k)
+    }
+  }
+  settle(root)
+  const shifts = new Map<string, [number, number]>()
+  spec.nodes.forEach((n, i) => {
+    const it = nodes.get(n.id)!
+    if (it.pinned) return
+    const b = place(`n${i}`)
+    shifts.set(n.id, [it.at.x - b.x, it.at.y - b.y])
+  })
+  return {
+    nodes: new Map([...nodes].map(([id, it]) => [id, it.at])),
+    frames: new Map([...boxes].map(([id, it]) => [id, frame(it)])),
+    shift: shifts
+  }
+}
+
 /**
  * Writes a laid-out diagram onto the artboard (`laidOut` is what layoutDiagram made of diagramGraph(spec, sizes)) and
  * returns the design, changed in place. The diagram is a group named after it, holding its boxes (each a group with
@@ -593,19 +695,28 @@ export function applyLayout(
     for (const extras of boxExtras.values()) dropJoined(extras)
   }
 
+  // where everything goes: ELK's places on the artboard, pinned nodes where they were put, and everything else pushed
+  // clear of them along the flow
+  const pins = new Map<string, { x: number; y: number }>()
+  for (const id of pinned) {
+    const l = oldNodes.get(id)!.layer
+    pins.set(id, { x: fin(l.x, 0), y: fin(l.y, 0) })
+  }
+  const labelRoom = (id: string): number => LABEL_TOP + (opts.sizes?.containers?.[id]?.height ?? fin(oldFrames.get(id)?.label?.height, 0)) + LABEL_GAP
+  const plan = clearOfPinned(spec, elk => moved(at(elk)), pins, labelRoom, spec.spacing ?? DEFAULT_SPACING, spec.direction ?? 'right')
+
   // the nodes
   const nodeLayers = new Map<string, InstanceLayer>()
-  spec.nodes.forEach((n, i) => {
+  spec.nodes.forEach(n => {
     const was = oldNodes.get(n.id)?.layer
-    const b = moved(at(`n${i}`))
+    const b = plan.nodes.get(n.id)!
     // a node that isn't an instance of the node component any more becomes one again, keeping its id
     const l: InstanceLayer =
       was?.type === 'instance' && was.component === comp.id
         ? was
         : { ...basics(was?.id ?? newId(taken), oneLine(n.label), b), type: 'instance', component: comp.id, overrides: {} }
-    const spot = pinned.has(n.id) && was ? { x: fin(was.x, 0), y: fin(was.y, 0) } : b
-    l.x = spot.x
-    l.y = spot.y
+    l.x = b.x
+    l.y = b.y
     l.width = size.width
     l.height = size.height
     const had = isObj(l.overrides) ? l.overrides[compLabel.id] : undefined
@@ -618,9 +729,9 @@ export function applyLayout(
 
   // the boxes: each a group with its frame and label, then its inner boxes and nodes, then what the user added
   const boxLayers = new Map<string, GroupLayer>()
-  containers.forEach((c, i) => {
+  containers.forEach(c => {
     const was = oldBoxes.get(c.id)
-    const b = moved(at(`c${i}`))
+    const b = plan.frames.get(c.id)!
     const parts = oldFrames.get(c.id)
     const frame: Layer = parts?.frame ?? { ...basics(newId(taken), 'Frame', b), type: 'rect', radius: 12, fill: color('#f8fafc'), stroke: color('#cbd5e1'), strokeWidth: 1 }
     Object.assign(frame, { x: b.x, y: b.y, width: b.w, height: b.h })
@@ -639,7 +750,7 @@ export function applyLayout(
   for (const n of spec.nodes) if (n.in) boxLayers.get(n.in)!.children.push(nodeLayers.get(n.id)!)
   for (const c of containers) boxLayers.get(c.id)!.children.push(...(boxExtras.get(c.id) ?? []))
 
-  // frames grow to hold a pinned node or an inner box past them, innermost first; labels sit at their top left
+  // labels sit at their frame's top left; groups are fitted innermost first
   const depth = (c: { in?: string }): number => {
     let d = 0
     for (let at = c.in; at; at = containers.find(x => x.id === at)?.in) d++
@@ -648,17 +759,6 @@ export function applyLayout(
   for (const c of [...containers].sort((a, b) => depth(b) - depth(a))) {
     const g = boxLayers.get(c.id)!
     const [frame, text] = g.children as [Layer, TextLayer]
-    const inner = [
-      ...spec.nodes.filter(n => n.in === c.id).map(n => boxOf(nodeLayers.get(n.id)!)),
-      ...containers.filter(x => x.in === c.id).map(x => boxOf(boxLayers.get(x.id)!.children[0]))
-    ]
-    if (inner.length) {
-      const lh = opts.sizes?.containers?.[c.id]?.height ?? fin(text.height, 0)
-      const need = inner.reduce((a, b) => union(a, b))
-      const room = { x: need.x - BOX_PAD, y: need.y - (LABEL_TOP + lh + LABEL_GAP), w: need.w + 2 * BOX_PAD, h: need.h + LABEL_TOP + lh + LABEL_GAP + BOX_PAD }
-      const b = union(boxOf(frame), room)
-      Object.assign(frame, { x: b.x, y: b.y, width: b.w, height: b.h })
-    }
     Object.assign(text, { x: fin(frame.x, 0) + BOX_PAD, y: fin(frame.y, 0) + LABEL_TOP })
     fitGroup(g)
   }
@@ -691,8 +791,11 @@ export function applyLayout(
     c.to = { ...(isObj(c.to) ? c.to : {}), layer: to.id }
     if (k.label) c.label = k.label
     else delete c.label
+    // ELK's route still fits when both ends went where ELK put them, or moved together (in a box pushed clear of a
+    // pinned node); a link to a pinned node, or between nodes pushed apart, is drawn from its ends instead
     const route = routes.get(`e${i}`)
-    if (route && !pinned.has(k.from) && !pinned.has(k.to)) c.points = route.map(([x, y]) => [x + ox, y + oy])
+    const [a, b] = [plan.shift.get(k.from), plan.shift.get(k.to)]
+    if (route && a && b && Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6) c.points = route.map(([x, y]) => [x + ox + a[0], y + oy + a[1]])
     else delete c.points
     fitConnector(c, index)
     return c

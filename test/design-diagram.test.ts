@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { test } from 'node:test'
-import { layoutDiagram } from '../src/core/design/layout'
+import { layoutDiagram, onceRetrying } from '../src/core/design/layout'
 import { designZipBytes, readDesignZip } from '../src/core/formats/design'
 import { parseDiagramText } from '../src/shared/design/diagram'
 import { fontsFor, type FontSource } from '../src/shared/design/fonts'
@@ -97,7 +97,7 @@ function labelOf(f: DesignFile, layer: Layer): string | undefined {
 test("Matt's proposal: 5 nodes in 3 boxes with their links, laid out without overlaps and each node inside its box", async () => {
   const { file, services } = await fresh()
   const r = await applyDesignOp(file, { op: 'diagram', spec: proposal() }, services)
-  assert.equal(r.summary, 'drew diagram Proposal (5 boxes, 4 links)')
+  assert.equal(r.summary, 'drew diagram Proposal (5 nodes, 3 boxes, 4 links)')
   const res = r.result as { id: string; nodes: Record<string, string>; links: string[] }
   const f = r.file!
   // every spec id maps to a layer of its own, though two labels repeat
@@ -158,7 +158,7 @@ test('the same spec run again with one label changed keeps every layer id and ch
   const spec = proposal()
   spec.nodes[0].label = 'helper'
   const again = await applyDesignOp(first.file, { op: 'diagram', spec }, services)
-  assert.equal(again.summary, 'redrew diagram Proposal (5 boxes, 4 links)')
+  assert.equal(again.summary, 'redrew diagram Proposal (5 nodes, 3 boxes, 4 links)')
   assert.deepEqual(again.result, first.result)
   const after = all(again.file!)
   assert.deepEqual(after.map(l => l.id).sort(), [...before.keys()].sort())
@@ -185,7 +185,7 @@ test('running again adds new nodes and removes missing ones with their links, ke
   spec.nodes.push({ id: 'c-job', label: 'job', in: 'c' })
   spec.links.push({ from: 'agent', to: 'c-job' })
   const r = await run(first.file, services, { op: 'diagram', spec })
-  assert.equal(r.summary, 'redrew diagram Proposal (5 boxes, 4 links)')
+  assert.equal(r.summary, 'redrew diagram Proposal (5 nodes, 4 boxes, 4 links)')
   const ids = new Set(all(r.file).map(l => l.id))
   for (const id of ['agent', 'a-job', 'a-deck', 'b-job']) assert.equal(r.result.nodes[id], first.result.nodes[id], `${id} kept its layer`)
   assert.ok(!ids.has(first.result.nodes['b-deck']), 'b-deck is gone')
@@ -207,7 +207,7 @@ test('running again adds new nodes and removes missing ones with their links, ke
   // deleting the diagram's group forgets the diagram, so the same name draws afresh
   const deleted = await run(first.file, services, { op: 'delete', layer: first.result.id })
   assert.deepEqual(deleted.file.design.artboards[0].diagrams, [])
-  assert.equal((await run(deleted.file, services, { op: 'diagram', spec: proposal() })).summary, 'drew diagram Proposal (5 boxes, 4 links)')
+  assert.equal((await run(deleted.file, services, { op: 'diagram', spec: proposal() })).summary, 'drew diagram Proposal (5 nodes, 3 boxes, 4 links)')
   // tidy with every node deleted says so
   const emptied = await run(first.file, services, ...Object.values(first.result.nodes as Record<string, string>).map(id => ({ op: 'delete', layer: id })))
   await assert.rejects(applyDesignOp(emptied.file, { op: 'tidy', diagram: 'Proposal' }, services), {
@@ -246,6 +246,70 @@ test('moving a node with set clears its links\' points and pins it, and tidy kee
   // a fill set on a node moves nothing, so it pins nothing
   const filled = await run(first.file, services, { op: 'set', layer: nodes.agent, part: 'Label', props: { fill: '#ff0000' } })
   assert.ok(diagramOf(filled.file).nodes.every(n => !n.pinned))
+})
+
+/** No two nodes overlap, and no box's frame covers a node it doesn't hold (directly or in an inner box). */
+function assertClear(f: DesignFile, what: string): void {
+  const d = diagramOf(f)
+  const nodes = d.nodes.map(n => ({ id: n.id, in: n.container, box: boxOf(byId(f, n.layer)) }))
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) assert.ok(!overlaps(nodes[i].box, nodes[j].box), `${what}: ${nodes[i].id} and ${nodes[j].id} overlap`)
+  }
+  const parent = new Map(d.containers.map(c => [c.id, c.in]))
+  const holds = (box: string, at: string | undefined): boolean => {
+    for (; at; at = parent.get(at)) if (at === box) return true
+    return false
+  }
+  for (const c of d.containers) {
+    const frame = boxOf((byId(f, c.layer) as Layer & { type: 'group' }).children[0])
+    for (const n of nodes) if (!holds(c.id, n.in)) assert.ok(!overlaps(frame, n.box), `${what}: ${c.id}'s frame covers ${n.id}`)
+  }
+}
+
+test('tidy lays the rest out around pinned nodes: nothing overlaps them, and no frame covers another box\'s nodes', async () => {
+  const { file, services } = await fresh()
+  // a node pinned right on top of its neighbour in the same box
+  const first = await run(file, services, { op: 'diagram', spec: proposal() })
+  const { nodes } = first.result as { nodes: Record<string, string> }
+  const job = byId(first.file, nodes['a-job'])
+  const crowded = await run(first.file, services, { op: 'set', layer: nodes['a-deck'], props: { x: job.x + 30, y: job.y + 20 } })
+  assert.ok(overlaps(boxOf(byId(crowded.file, nodes['a-deck'])), boxOf(job)), 'it starts on top of its neighbour')
+  const tidied = await run(crowded.file, services, { op: 'tidy', diagram: 'Proposal' })
+  assert.deepEqual([byId(tidied.file, nodes['a-deck']).x, byId(tidied.file, nodes['a-deck']).y], [job.x + 30, job.y + 20])
+  assertClear(tidied.file, 'next to a neighbour')
+  assert.match(tidied.result.note, /links are drawn as plain elbows around nodes placed by hand, so they may cross a box\.$/)
+  // a node pinned inside another box's area, in each direction of flow: whatever is in the way is pushed along it
+  for (const direction of ['down', 'right', 'up', 'left'] as const) {
+    const drawn = await run(file, services, { op: 'diagram', spec: { ...proposal(), direction } })
+    const ids = drawn.result.nodes as Record<string, string>
+    const deck = byId(drawn.file, ids['a-deck'])
+    const moved = await run(drawn.file, services, { op: 'set', layer: ids['b-job'], props: { x: deck.x, y: deck.y } })
+    const tidy = await run(moved.file, services, { op: 'tidy', diagram: 'Proposal' })
+    const pinned = byId(tidy.file, ids['b-job'])
+    assert.deepEqual([pinned.x, pinned.y], [deck.x, deck.y], direction)
+    assertClear(tidy.file, direction)
+    // what was in the way moved along the flow
+    const after = boxOf(byId(tidy.file, ids['a-deck']))
+    const along = { down: after.y > deck.y, up: after.y < deck.y, right: after.x > deck.x, left: after.x < deck.x }[direction]
+    assert.ok(along, `${direction}: a-deck moved along the flow`)
+  }
+  // with nothing pinned the layout is ELK's own, so tidy changes nothing
+  const again = await run(first.file, services, { op: 'tidy', diagram: 'Proposal' })
+  for (const l of all(first.file)) assert.deepEqual(boxOf(byId(again.file, l.id)), boxOf(l), l.name)
+  assert.equal(again.result.note, undefined)
+})
+
+test('a failed ELK load is forgotten, so the next layout tries again', async () => {
+  let calls = 0
+  const load = onceRetrying(async () => {
+    calls++
+    if (calls === 1) throw new Error('ELK did not load')
+    return `engine ${calls}`
+  })
+  await assert.rejects(load(), { message: 'ELK did not load' })
+  assert.equal(await load(), 'engine 2')
+  assert.equal(await load(), 'engine 2', 'a load that worked is kept')
+  assert.equal(calls, 2)
 })
 
 test('parseDiagramText reads one node, box or link per line', () => {
@@ -298,7 +362,7 @@ test('the diagram op takes text, and checks the spec before laying anything out'
   const { file, services } = await fresh()
   const text = 'box a: Client A\nnode job: job in a\nnode deck: forecast and deck in a\njob -> deck'
   const r = await run(file, services, { op: 'diagram', name: 'Flow', text })
-  assert.equal(r.summary, 'drew diagram Flow (2 boxes, 1 link)')
+  assert.equal(r.summary, 'drew diagram Flow (2 nodes, 1 box, 1 link)')
   assert.deepEqual(Object.keys(r.result.nodes), ['job', 'deck'])
   const bad: [unknown, string | RegExp][] = [
     [{ nodes: [{ id: 'x', label: 'X' }] }, 'diagram needs a name'],

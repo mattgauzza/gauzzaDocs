@@ -1,5 +1,5 @@
 import { type DiagramSpec, applyLayout, checkSpec, diagramGraph, diagramOn, diagramSizes, parseDiagramText, pinMoved, specOf } from '../design/diagram'
-import { type Box, boxOf, centerOf, fin } from '../design/geometry'
+import { type Box, boxOf, centerOf, fin, layerIndex } from '../design/geometry'
 import { ARTBOARD_TOO_LARGE, MAX_ARTBOARD_SIDE, PRESETS, artboardOf, newId, walk } from '../design/model'
 import { parsePath, pathBounds } from '../design/path'
 import { designToSvg } from '../design/render'
@@ -73,9 +73,12 @@ export async function applyDesignOp(
   return { result, file: { ...file, design: draft.design, assets: draft.assets }, summary }
 }
 
-/** How an op refuses a design past a limit: reading's own sentence where it has one, else why it couldn't open. */
+/**
+ * How an op refuses a design past a limit: what it would have made of the design (a zip or size limit), reading's own
+ * sentence where that reads right for an op, else why the design couldn't open.
+ */
 const refusal = (past: Past): string =>
-  past.svg ? SVG_LAYERS_FULL : past.message ?? `That would leave a design that can't be opened: ${past.reason}.`
+  past.svg ? SVG_LAYERS_FULL : past.op ?? past.message ?? `That would leave a design that can't be opened: ${past.reason}.`
 
 export const designOps: OpHandler = async (payload, op, ctx) => {
   if (payload.kind !== 'design') throw new OpError('not a design')
@@ -341,7 +344,8 @@ function addOp(d: Draft, op: AgentOp): unknown {
       const [a, b] = [from, to].map(e => centerOf(boxOf(layerOn(board, e.layer))))
       layer = {
         ...base, type: 'connector', from, to, route: 'straight', arrow: 'end', fill: null, stroke: black, strokeWidth: 2,
-        x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), width: Math.abs(a[0] - b[0]), height: Math.abs(a[1] - b[1])
+        // its box is only where it runs (drawing follows its ends), so it's held to a size reading keeps
+        x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), width: Math.min(MAX_SIZE, Math.abs(a[0] - b[0])), height: Math.min(MAX_SIZE, Math.abs(a[1] - b[1]))
       }
       break
     }
@@ -359,7 +363,8 @@ function pathBox(dpath: string): Box {
   const segs = parsePath(dpath)
   if (!segs.length) throw new OpError('d must be SVG path data')
   const b = pathBounds(segs)
-  return { x: 0, y: 0, w: b ? Math.max(0, b.x + b.w) : 0, h: b ? Math.max(0, b.y + b.h) : 0 }
+  // sizes are clamped as everywhere else (the data draws where it is, whatever the box says)
+  return { x: 0, y: 0, w: b ? Math.min(MAX_SIZE, Math.max(0, b.x + b.w)) : 0, h: b ? Math.min(MAX_SIZE, Math.max(0, b.y + b.h)) : 0 }
 }
 
 function setOp(d: Draft, op: AgentOp): unknown {
@@ -833,14 +838,26 @@ async function drawDiagram(d: Draft, board: Artboard, spec: DiagramSpec, verb: '
     links: rec.links.map(k => k.layer),
     containers: Object.fromEntries(rec.containers.map(c => [c.id, c.layer]))
   }
+  const notes: string[] = []
   if (group) {
     const b = boundsOf(group)
     const [W, H] = [fin(board.width, 0), fin(board.height, 0)]
     if (b.x < 0 || b.y < 0 || b.x + b.w > W || b.y + b.h > H) {
-      result.note = `The diagram is ${fmt(b.w, 0)}x${fmt(b.h, 0)} px, so it runs past the artboard (${fmt(W, 0)}x${fmt(H, 0)}).`
+      notes.push(`The diagram is ${fmt(b.w, 0)}x${fmt(b.h, 0)} px, so it runs past the artboard (${fmt(W, 0)}x${fmt(H, 0)}).`)
     }
   }
-  const counts = `${plural(spec.nodes.length, 'box', 'boxes')}, ${plural(spec.links.length, 'link', 'links')}`
+  // links the layout couldn't route (to a node placed by hand, or one moved out of its way) are drawn as elbows
+  const index = layerIndex(board.layers)
+  const elbows = rec.links.filter(k => {
+    const c = index.get(k.layer)
+    return c?.type === 'connector' && !c.points
+  }).length
+  if (elbows) {
+    notes.push(`${elbows === 1 ? '1 link is' : `${elbows} links are`} drawn as plain elbows around nodes placed by hand, so ${elbows === 1 ? 'it' : 'they'} may cross a box.`)
+  }
+  if (notes.length) result.note = notes.join(' ')
+  const boxes = spec.containers?.length ?? 0
+  const counts = `${plural(spec.nodes.length, 'node', 'nodes')}, ${plural(boxes, 'box', 'boxes')}, ${plural(spec.links.length, 'link', 'links')}`
   d.changes.push({ verb: verb === 'tidied' ? `tidied diagram ${named(spec.name)}` : `${verb} diagram ${named(spec.name)} (${counts})`, names: [] })
   return result
 }

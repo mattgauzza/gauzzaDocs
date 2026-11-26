@@ -101,6 +101,19 @@ export const MAX_UNCOMPRESSED = 1024 * 1024 * 1024
 export const MAX_DESIGN_JSON = 64 * 1024 * 1024
 export const TOO_MANY_ENTRIES = `This design has too many entries (more than ${count(MAX_ENTRIES)}).`
 export const TOO_LARGE_UNCOMPRESSED = 'This design is too large to open (over 1 GB uncompressed).'
+/** Reading clamps a layer's width and height to this (as the ops clamp sizes), so a larger box isn't kept as it is. */
+export const LAYER_TOO_LARGE = `Layers can be at most ${count(MAX_SIZE)} px per side.`
+
+/**
+ * The zip and size limits as an op refuses them: reading's sentences say what a file is, these say what the op would
+ * have made of the design.
+ */
+export const OP_TOO_LARGE = {
+  entries: `That would give this design too many entries (more than ${count(MAX_ENTRIES)}).`,
+  uncompressed: 'That would make this design too large to open (over 1 GB uncompressed).',
+  svgLayer: 'That would add an SVG layer that is too large (over 5 MB).',
+  layer: `That would make a layer larger than ${count(MAX_SIZE)} px per side.`
+}
 
 /** What a design takes of each limit reading enforces, measured as reading measures it. */
 interface Usage {
@@ -109,13 +122,14 @@ interface Usage {
   runs: number; runsAt: string; layerText: number; layerTextAt: string; overrideText: number; text: number
   /**
    * How many values reading would drop or cut: svg layers over 5 MB, names and connector labels over 1,000
-   * characters, gradients over 256 stops, dashes over 1,000 lengths and connectors over 10,000 points
+   * characters, gradients over 256 stops, dashes over 1,000 lengths, connectors over 10,000 points and layer boxes
+   * over 100,000 px per side
    */
-  bigSvg: number; names: number; labels: number; stops: number; dashes: number; points: number
+  bigSvg: number; names: number; labels: number; stops: number; dashes: number; points: number; wide: number
 }
 const noUsage = (): Usage => ({
   depth: 0, layers: 0, components: 0, svg: 0, side: 0, runs: 0, runsAt: '', layerText: 0, layerTextAt: '', overrideText: 0, text: 0,
-  bigSvg: 0, names: 0, labels: 0, stops: 0, dashes: 0, points: 0
+  bigSvg: 0, names: 0, labels: 0, stops: 0, dashes: 0, points: 0, wide: 0
 })
 
 /** Whether `s` comes to more than `most` bytes as UTF-8 (a lone surrogate as the 3 bytes of U+FFFD), without encoding it. */
@@ -137,6 +151,8 @@ function utf8Over(s: string, most: number): boolean {
 }
 
 const longName = (v: unknown): boolean => typeof v === 'string' && v.length > MAX_NAME
+/** A width or height reading would clamp to +/- 100,000 (a group fitted around layers far apart, say). */
+const tooWide = (v: unknown): boolean => typeof v === 'number' && Math.abs(v) > MAX_SIZE
 /** A gradient past MAX_STOPS stops (reading keeps only the first 256). */
 const manyStops = (p: unknown): boolean => isObj(p) && Array.isArray(p.stops) && p.stops.length > MAX_STOPS
 
@@ -160,6 +176,7 @@ function measure(u: Usage, roots: readonly unknown[]): void {
     if (depth > u.depth) u.depth = depth
     const id = typeof l.id === 'string' ? l.id.slice(0, 64) : ''
     if (longName(l.name)) u.names++
+    if (tooWide(l.width) || tooWide(l.height)) u.wide++
     if (manyStops(l.fill)) u.stops++
     if (manyStops(l.stroke)) u.stops++
     if (Array.isArray(l.dash) && l.dash.length > MAX_DASH) u.dashes++
@@ -242,12 +259,17 @@ export interface Past {
   reason: string
   /** past the 16 MB of svg markup, which the ops and saving each word their own way */
   svg: boolean
-  /** a limit reading words as a sentence of its own: the ops and saving say exactly this */
+  /** a limit reading words as a sentence of its own: saving says exactly this, and so do the ops unless `op` is set */
   message?: string
+  /** how an op says it, where reading's sentence describes a file rather than what the op would do (OP_TOO_LARGE) */
+  op?: string
 }
 
-/** Each limit: what it measures, how far it may go, and reading's reason (damage) or sentence for a design past it. */
-const CHECKS: { key: keyof Usage; most: number; reason?: (u: Usage) => string; message?: string }[] = [
+/**
+ * Each limit: what it measures, how far it may go, and reading's reason (damage) or sentence for a design past it, with
+ * the op's own wording where that differs.
+ */
+const CHECKS: { key: keyof Usage; most: number; reason?: (u: Usage) => string; message?: string; op?: string }[] = [
   { key: 'depth', most: MAX_DEPTH, reason: () => LIMIT.depth },
   { key: 'layers', most: MAX_LAYERS, reason: () => LIMIT.layers },
   { key: 'components', most: MAX_COMPONENTS, reason: () => LIMIT.components },
@@ -256,8 +278,9 @@ const CHECKS: { key: keyof Usage; most: number; reason?: (u: Usage) => string; m
   { key: 'overrideText', most: MAX_LAYER_TEXT, reason: () => LIMIT.overrideText },
   { key: 'text', most: MAX_DESIGN_TEXT, reason: () => LIMIT.text },
   { key: 'svg', most: MAX_SVG_MARKUP, reason: () => LIMIT.svg },
-  { key: 'bigSvg', most: 0, message: SVG_TOO_LARGE },
+  { key: 'bigSvg', most: 0, message: SVG_TOO_LARGE, op: OP_TOO_LARGE.svgLayer },
   { key: 'side', most: MAX_ARTBOARD_SIDE, message: ARTBOARD_TOO_LARGE },
+  { key: 'wide', most: 0, message: LAYER_TOO_LARGE, op: OP_TOO_LARGE.layer },
   { key: 'names', most: 0, message: TOO_LONG.name },
   { key: 'labels', most: 0, message: TOO_LONG.label },
   { key: 'stops', most: 0, message: TOO_LONG.stops },
@@ -270,9 +293,9 @@ const CHECKS: { key: keyof Usage; most: number; reason?: (u: Usage) => string; m
  * past 64, more than 100,000 layers or 10,000 components, a text layer past 1,000 runs or 100,000 characters (an
  * override past 100,000), more than 1,000,000 characters of text, over 16 MB of svg markup (`svg` is then set), all of
  * which reading refuses as damage (`reason`, in its words); and in a sentence of its own (`message`, reading's words
- * where it says one): an artboard over 8192 px, an svg layer over 5 MB, and anything reading would cut or drop (a name
- * or label over 1,000 characters, a gradient over 256 stops, a dash over 1,000 lengths, a connector over 10,000
- * points). Given `before` (the design an op started from, or what limitsOf measured of it), a limit counts only when
+ * where it says one): an artboard over 8192 px, an svg layer over 5 MB, and anything reading would cut, drop or clamp
+ * (a name or label over 1,000 characters, a gradient over 256 stops, a dash over 1,000 lengths, a connector over
+ * 10,000 points, a layer box over 100,000 px per side). Where `op` is set, an op says that instead. Given `before` (the design an op started from, or what limitsOf measured of it), a limit counts only when
  * `design` takes more of it than `before` did, so an op that doesn't make a design worse (a delete, say) is never
  * refused for what it already was.
  */
@@ -283,7 +306,7 @@ export function pastLimit(design: Design, before?: Design | Limits): Past | null
     const v = now[c.key] as number
     if (v <= c.most) continue
     if (before && v <= ((was ??= 'artboards' in before ? usageOf(before) : before.usage)[c.key] as number)) continue
-    if (c.message) return { reason: c.message, svg: false, message: c.message }
+    if (c.message) return { reason: c.message, svg: false, message: c.message, ...(c.op ? { op: c.op } : {}) }
     return { reason: c.reason!(now), svg: c.key === 'svg' }
   }
   return null
@@ -381,8 +404,10 @@ export function pastZipLimit(design: Design, stored: Stored, opts: { json?: numb
   let was: { entries: number; bytes: number } | undefined
   const before = opts.before
   const grew = (k: 'entries' | 'bytes'): boolean => !before || now[k] > (was ??= zipUsage(before.design, before.stored, undefined, exact))[k]
-  if (now.entries > MAX_ENTRIES && grew('entries')) return { reason: TOO_MANY_ENTRIES, svg: false, message: TOO_MANY_ENTRIES }
-  if (now.bytes > MAX_UNCOMPRESSED && grew('bytes')) return { reason: TOO_LARGE_UNCOMPRESSED, svg: false, message: TOO_LARGE_UNCOMPRESSED }
+  if (now.entries > MAX_ENTRIES && grew('entries')) return { reason: TOO_MANY_ENTRIES, svg: false, message: TOO_MANY_ENTRIES, op: OP_TOO_LARGE.entries }
+  if (now.bytes > MAX_UNCOMPRESSED && grew('bytes')) {
+    return { reason: TOO_LARGE_UNCOMPRESSED, svg: false, message: TOO_LARGE_UNCOMPRESSED, op: OP_TOO_LARGE.uncompressed }
+  }
   return null
 }
 

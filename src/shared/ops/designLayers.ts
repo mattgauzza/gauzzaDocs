@@ -632,6 +632,7 @@ function fitText(doc: DesignDoc, l: TextLayer, props: Record<string, unknown>): 
     width = Math.max(...lines.map(s => s.length)) * size * 0.55
     height = lines.length * size * 1.2
   }
-  if (point) l.width = Math.round(width * 100) / 100
-  l.height = Math.round(height * 100) / 100
+  // clamped like every size an op writes (a huge font can measure past it)
+  if (point) l.width = Math.min(MAX_SIZE, Math.round(width * 100) / 100)
+  l.height = Math.min(MAX_SIZE, Math.round(height * 100) / 100)
 }

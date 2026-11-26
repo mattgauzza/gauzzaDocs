@@ -695,8 +695,10 @@ test('designOps works on a design payload and refuses others', async () => {
 
 // Ruling 23: the zip's own limits, values reading would repair, and batches checked as they go
 
-const ENTRIES = 'This design has too many entries (more than 10,000).'
-const UNCOMPRESSED = 'This design is too large to open (over 1 GB uncompressed).'
+// an op says what it would have made of the design; saving and reading say what the file is
+const ENTRIES = 'That would give this design too many entries (more than 10,000).'
+const UNCOMPRESSED = 'That would make this design too large to open (over 1 GB uncompressed).'
+const READ_UNCOMPRESSED = 'This design is too large to open (over 1 GB uncompressed).'
 const at23 = { visible: true, locked: false, opacity: 1, blend: 'normal' as const, x: 0, y: 0, width: 10, height: 10, rotation: 0, scaleX: 1, scaleY: 1 }
 const b64 = (b: Uint8Array): string => Buffer.from(b).toString('base64')
 
@@ -759,7 +761,7 @@ test('a change that would take the zip past 1 GB uncompressed is refused at the 
   // and a save past 1 GB is refused before anything is written
   const over = structuredClone(one.file.design)
   over.artboards[0].layers.push({ ...byName(one.file, 'Long'), id: 'copy' })
-  await assert.rejects(designZipBytes({ ...one.file, design: over }), { message: UNCOMPRESSED })
+  await assert.rejects(designZipBytes({ ...one.file, design: over }), { message: READ_UNCOMPRESSED })
 })
 
 test('no op or save keeps an svg layer over 5 MB, which reading would drop (Ruling 23)', async () => {
@@ -768,7 +770,7 @@ test('no op or save keeps an svg layer over 5 MB, which reading would drop (Ruli
   // 2,700,000 two-byte characters: under 5 MB as characters, over it as UTF-8, which is what reading measures
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!--${'é'.repeat(2_700_000)}--><rect width="1" height="1"/></svg>`
   file.design.artboards[0].layers.push({ ...at23, id: 's', name: 'S', type: 'svg', svg })
-  await assert.rejects(applyDesignOp(file, { op: 'duplicate', layer: 'S' }, services), { message: TOO_LARGE })
+  await assert.rejects(applyDesignOp(file, { op: 'duplicate', layer: 'S' }, services), { message: 'That would add an SVG layer that is too large (over 5 MB).' })
   await run(file, services, { op: 'set', layer: 'S', props: { x: 5 } })
   await assert.rejects(designZipBytes(file), { message: TOO_LARGE })
 })
@@ -841,4 +843,30 @@ test('apply checks the layer count after each op, so a batch that doubles its la
   // would (17 rounds of it would hold 13 billion characters)
   const text: AgentOp[] = [{ op: 'add', type: 'text', props: { name: 'R0', text: 'a'.repeat(100_000), width: 500 } }, ...ops.slice(1)]
   await assert.rejects(applyDesignOp(file, { op: 'apply', ops: text }, {}), { message: "op 9: That would leave a design that can't be opened: it holds more than 1,000,000 characters of text." })
+})
+
+// Ruling 24
+
+test('no op or save keeps a layer box over 100,000 px per side, which reading would clamp (Ruling 24)', async () => {
+  const { file, services } = await fresh()
+  const { file: f } = await run(
+    file,
+    services,
+    { op: 'add', type: 'rect', props: { name: 'A', x: 0, y: 0, width: 10, height: 10 } },
+    { op: 'add', type: 'rect', props: { name: 'B', x: 150_000, y: 0, width: 10, height: 10 } }
+  )
+  // a group fitted around layers 150,000 px apart would be wider than reading keeps
+  await assert.rejects(applyDesignOp(f, { op: 'group', layers: ['A', 'B'], name: 'Wide' }, services), { message: 'That would make a layer larger than 100,000 px per side.' })
+  // and so would moving one of a group's layers that far
+  const near = await run(f, services, { op: 'set', layer: 'B', props: { x: 50 } }, { op: 'group', layers: ['A', 'B'], name: 'Near' })
+  await assert.rejects(applyDesignOp(near.file, { op: 'set', layer: 'B', props: { x: 150_000 } }, services), { message: 'That would make a layer larger than 100,000 px per side.' })
+  // saving one built some other way is refused in a sentence of its own
+  const wide = structuredClone(near.file.design)
+  Object.assign(wide.artboards[0].layers[0], { width: 150_010 })
+  await assert.rejects(designZipBytes({ design: wide, assets: {} }), { message: 'Layers can be at most 100,000 px per side.' })
+  // a box an op measures for itself is held to the limit instead: a connector between them, a text at a huge size
+  const joined = await run(f, services, { op: 'add', type: 'connector', props: { name: 'Far', from: 'A', to: 'B' } }, { op: 'add', type: 'text', props: { name: 'Huge', text: 'Hello', size: 1e5 } })
+  assert.deepEqual([byName(joined.file, 'Far').width, byName(joined.file, 'Huge').width, byName(joined.file, 'Huge').height], [1e5, 1e5, 1e5])
+  const back = await readDesignZip(await designZipBytes(joined.file))
+  assert.deepEqual(back.design.artboards[0].layers, joined.file.design.artboards[0].layers)
 })
