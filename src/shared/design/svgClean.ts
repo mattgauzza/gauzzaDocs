@@ -217,10 +217,11 @@ export function cleanValue(raw: string, css: boolean): { value: string; note?: s
   let start = -1 // where the identifier before the current position began
   let refs = 0
   // A reference was dropped since `out` last grew. What follows it gets a space wherever it would otherwise run into
-  // the name before (a dropped url between "red" and "x" can't leave "redx", nor "red(" a function).
+  // the name before (a dropped url between "red" and "x" can't leave "redx", nor "red(" a function). A name is what
+  // the scan below reads as one, so a letter past ASCII joins like any other (é and rgb( can't make érgb().
   let gap = false
   const add = (text: string) => {
-    if (gap && text && /^[\w(-]/.test(text) && /[\w-]$/.test(out)) out += ' '
+    if (gap && text && (text[0] === '(' || nameChar(text.charCodeAt(0))) && out && nameChar(out.charCodeAt(out.length - 1))) out += ' '
     if (text) gap = false
     out += text
   }
@@ -826,58 +827,90 @@ const MARKABLE = new Set(['path', 'line', 'polyline', 'polygon'])
 const PAINTED = new Set(['path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'tspan', 'textPath'])
 
 /**
- * For each of REPAINT_PROPS, the definitions an element paints through it: those its one winning value names (at most
- * MAX_VALUE_REFS, since a value keeps no more).
+ * For each of REPAINT_PROPS, the definitions an element may paint through it: every one any of its sources names (at
+ * most MAX_VALUE_REFS from each), and its parent's when it may take the parent's.
  */
 type Paints = Readonly<Record<string, readonly Element[]>>
 const NONE: readonly Element[] = []
 const NO_PAINTS: Paints = Object.fromEntries(REPAINT_PROPS.map(p => [p, NONE]))
-/** Most times a chain of paintings that loops back on itself may be followed before the SVG is refused as too slow. */
+/**
+ * Most steps the walk over chains of paintings may take before the SVG is refused as too slow: each definition opened
+ * costs 1 plus the length of the list of what it paints in turn (which the walk goes through), and each such list
+ * made costs its length.
+ */
 const MAX_PAINT_STEPS = 100_000
 
 /** A style rule's selector as the cleaner keeps it (an element, .class or #id, or a chain of them), with its declarations. */
-interface SheetRule { tag: string | null; ids: string[]; classes: string[]; spec: number; order: number; decls: Decl[] }
-/** Where a declaration stands in the cascade: [origin, specificity, rule order, place in its block], compared in order. */
-type Rank = [number, number, number, number]
-const beats = (a: Rank, b: Rank): boolean => {
-  for (let i = 0; i < 4; i++) if (a[i] !== b[i]) return a[i] > b[i]
-  return true // the same place: the later one read
+interface SheetRule { tag: string | null; ids: string[]; classes: string[]; decls: Decl[] }
+
+/** The CSS color keywords, which a browser always accepts as a paint. */
+const COLOR_NAMES = new Set((
+  'aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown burlywood ' +
+  'cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray ' +
+  'darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen ' +
+  'darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue ' +
+  'firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray green greenyellow grey honeydew ' +
+  'hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan ' +
+  'lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen lightskyblue lightslategray ' +
+  'lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon mediumaquamarine mediumblue ' +
+  'mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred ' +
+  'midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid ' +
+  'palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple ' +
+  'rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue ' +
+  'slateblue slategray slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet wheat white ' +
+  'whitesmoke yellow yellowgreen currentcolor transparent'
+).split(' '))
+const isColor = (v: string): boolean => /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v) || COLOR_NAMES.has(v)
+/**
+ * Whether a browser certainly accepts a value of one of REPAINT_PROPS (or marker), so the property doesn't come from
+ * the parent: none, initial, one url(#id) (with a color or none after it for a paint), or for a paint a hex or named
+ * color. Anything else might be dropped as it's parsed (fill:x, two urls, a function this doesn't read), leaving the
+ * property to whatever is under it: another source, or the parent.
+ */
+function surelyValid(prop: string, value: string): boolean {
+  const v = value.trim().toLowerCase()
+  if (v === 'none' || v === 'initial') return true
+  const paint = prop === 'fill' || prop === 'stroke'
+  if (paint && (isColor(v) || v === 'context-fill' || v === 'context-stroke')) return true
+  const m = /^url\(#[^()\s]+\)(?:\s+(\S+))?$/.exec(v)
+  return !!m && (m[1] === undefined || (paint && (m[1] === 'none' || isColor(m[1]))))
 }
-// cascade origins, weakest first
-const ATTRIBUTE = 0
-const SHEET = 1
-const INLINE = 2
-const SHEET_IMPORTANT = 3
-const INLINE_IMPORTANT = 4
+/** Whether a declaration of a style rule can matter to what an element paints. */
+const repaintDecl = (d: Decl): boolean =>
+  (REPAINTS.has(d.prop) || d.prop === 'marker') && (d.value.includes('url(#') || FROM_PARENT.has(d.value.trim().toLowerCase()) || surelyValid(d.prop, d.value))
 
 /**
  * How many elements the SVG's markers, patterns, masks and clip paths paint: the content of each, every time it's
- * painted. Which definitions an element paints follows the one value that wins the cascade among its presentation
- * attributes, its style attribute and the style rules that match it, or inheritance (through a <use> as well). A
- * definition painted inside its own painting paints nothing there (no browser paints that). What one painting of a
- * definition comes to is remembered unless a loop back past it cut it short; a chain that loops may be followed
- * MAX_PAINT_STEPS times. Throws as soon as the count passes MAX_PAINTS. (`sizes` is expandedSizes: what a definition
- * holds counts as it stands, uses expanded.)
+ * painted. A browser drops a value it can't parse and takes the one under it (the next style rule, the presentation
+ * attribute, or the parent's), and the cleaner keeps values it can't tell are invalid (fill:x, clip-path:none none).
+ * So which definitions an element paints is not read from one winning value: it's every definition any of its sources
+ * names (its presentation attributes, each style rule that matches it and its style attribute, up to MAX_VALUE_REFS
+ * from each), together with its parent's when any source takes the parent's (inherit, unset, revert, revert-layer) or,
+ * for a property that inherits, when no source holds a value a browser surely accepts. Counting more is the safe side.
+ * Inheritance runs through a <use> as well. A definition painted inside its own painting paints nothing there (no
+ * browser paints that). What one painting of a definition comes to is remembered unless a loop back past it cut it
+ * short, and the walk over such loops is charged its work against MAX_PAINT_STEPS. Reading which definitions each
+ * element paints is charged too, against MAX_PAINTS (every one read is at least one painting). Throws as soon as the
+ * count passes MAX_PAINTS. (`sizes` is expandedSizes: what a definition holds counts as it stands, uses expanded.)
  */
 function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Element, number>): number {
   const all = allElements(root)
-  // style rules that can name a definition (or take one from the parent), indexed by an id, class or element of their
-  // selector, with what the cascade needs to rank them
+  // style rules that can name a definition, take one from the parent or keep the parent's away, indexed by an id,
+  // class or element of their selector
   const rules = new Map<string, SheetRule[]>()
-  let order = 0
   for (const st of all) {
     if (st.localName !== 'style') continue
     for (const b of cssBlocks(st.textContent ?? '')) {
       if (b.kind !== 'rule') continue
-      const decls = splitDeclarations(b.body).filter(d => (REPAINTS.has(d.prop) || d.prop === 'marker') && (d.value.includes('url(#') || FROM_PARENT.has(d.value.toLowerCase())))
-      order++
+      const decls = splitDeclarations(b.body).filter(repaintDecl)
       if (!decls.length) continue
       for (const s of b.selector.split(',')) {
         const m = SIMPLE.exec(s.trim())
         if (!m || (!m[1] && !m[2])) continue
         const parts = m[2].match(/[.#][\w-]+/g) ?? []
-        const sel = { ids: parts.filter(p => p[0] === '#').map(p => p.slice(1)), classes: parts.filter(p => p[0] === '.').map(p => p.slice(1)) }
-        const rule: SheetRule = { tag: m[1] || null, ...sel, spec: sel.ids.length * 10000 + sel.classes.length * 100 + (m[1] ? 1 : 0), order, decls }
+        const rule: SheetRule = {
+          tag: m[1] || null, ids: parts.filter(p => p[0] === '#').map(p => p.slice(1)), classes: parts.filter(p => p[0] === '.').map(p => p.slice(1)), decls
+        }
         const key = rule.ids.length ? `#${rule.ids[0]}` : rule.classes.length ? `.${rule.classes[0]}` : rule.tag!
         const list = rules.get(key)
         if (list) list.push(rule)
@@ -886,31 +919,36 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     }
   }
   let steps = 0
+  // what reading which definitions elements paint has cost: each one read is at least one painting
+  let read = 0
+  const charge = (n: number) => {
+    if ((read += n) > MAX_PAINTS) throw new Error(TOO_SLOW)
+  }
 
-  // What an element sets itself, by property: the value that wins the cascade (the definitions it names, or that it
-  // takes the parent's). A rule's values that name nothing are left out: they could only take a definition away, so
-  // without them the count can only come out higher.
-  interface Own { refs: readonly Element[]; parent: boolean; rank: Rank }
+  // What an element sets itself, by property, over all its sources: the definitions they name, whether any takes the
+  // parent's, and whether any holds a value a browser surely accepts (which keeps an inherited property's parent value
+  // away). A value that does none of these adds nothing.
+  interface Own { refs: readonly Element[]; parent: boolean; valid: boolean }
   const owns = new Map<Element, Map<string, Own> | null>()
   const ownOf = (el: Element) => {
     if (owns.has(el)) return owns.get(el)!
-    let own: Map<string, Own> | null = null
-    const put = (prop: string, value: string, rank: Rank) => {
+    const found = new Map<string, { refs: Set<Element>; parent: boolean; valid: boolean }>()
+    const put = (prop: string, value: string) => {
       const props = prop === 'marker' ? MARKER_PROPS : REPAINTS.has(prop) ? [prop] : null
       if (!props) return
-      const named = urlRefs(value)
       const parent = FROM_PARENT.has(value.trim().toLowerCase())
-      if ((rank[0] === SHEET || rank[0] === SHEET_IMPORTANT) && !named.length && !parent) return
-      own ??= new Map()
+      const named = parent ? [] : urlRefs(value).slice(0, MAX_VALUE_REFS)
+      const valid = !parent && surelyValid(prop, value)
+      if (!parent && !valid && !named.length) return
       for (const p of props) {
-        const had = own.get(p)
-        if (had && !beats(rank, had.rank)) continue
-        const refs: Element[] = []
+        let o = found.get(p)
+        if (!o) found.set(p, (o = { refs: new Set(), parent: false, valid: false }))
         for (const id of named) {
           const t = ids.get(id)
-          if (t && t.localName === REPAINTS.get(p) && !refs.includes(t)) refs.push(t)
+          if (t && t.localName === REPAINTS.get(p)) o.refs.add(t)
         }
-        own.set(p, { refs, parent, rank })
+        o.parent ||= parent
+        o.valid ||= valid
       }
     }
     const attrs = el.attributes
@@ -918,10 +956,8 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
       const a = attrs[i]
       if (a.namespaceURI) continue
       const name = a.localName ?? a.name
-      if (name === 'style') {
-        let n = 0
-        for (const d of splitDeclarations(a.value)) put(d.prop, d.value, [d.important ? INLINE_IMPORTANT : INLINE, 0, 0, n++])
-      } else put(name, a.value, [ATTRIBUTE, 0, 0, name === 'marker' ? 0 : 1]) // a longhand attribute over the shorthand
+      if (name === 'style') for (const d of splitDeclarations(a.value)) put(d.prop, d.value)
+      else put(name, a.value)
     }
     if (rules.size) {
       const id = el.getAttribute('id')
@@ -932,12 +968,17 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
           steps += 1 + r.decls.length
           if (steps > MAX_STYLE_STEPS) throw new Error(TOO_COMPLEX_STYLES)
           if ((r.tag && r.tag !== el.localName) || !r.ids.every(i => i === id) || !r.classes.every(c => classes.has(c))) continue
-          r.decls.forEach((d, n) => put(d.prop, d.value, [d.important ? SHEET_IMPORTANT : SHEET, r.spec, r.order, n]))
+          for (const d of r.decls) put(d.prop, d.value)
         }
       }
       if (id) check(rules.get(`#${id}`))
       for (const c of classes) check(rules.get(`.${c}`))
       check(rules.get(el.localName))
+    }
+    let own: Map<string, Own> | null = null
+    for (const [p, o] of found) {
+      own ??= new Map()
+      own.set(p, { refs: o.refs.size ? [...o.refs] : NONE, parent: o.parent, valid: o.valid })
     }
     owns.set(el, own)
     return own
@@ -950,8 +991,19 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     const out: Record<string, readonly Element[]> = {}
     for (const p of REPAINT_PROPS) {
       const o = own?.get(p)
-      if (!o) out[p] = INHERITED_REPAINTS.has(p) ? parent[p] : NONE
-      else out[p] = o.parent ? parent[p] : o.refs.length ? o.refs : NONE
+      const inherits = INHERITED_REPAINTS.has(p)
+      if (!o) {
+        out[p] = inherits ? parent[p] : NONE
+        continue
+      }
+      const up = o.parent || (inherits && !o.valid) ? parent[p] : NONE
+      if (!up.length) out[p] = o.refs
+      else if (!o.refs.length) out[p] = up
+      else {
+        const both = new Set([...o.refs, ...up])
+        charge(both.size)
+        out[p] = [...both]
+      }
     }
     return out
   }
@@ -980,6 +1032,8 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
   }
   const tallyPaints = (el: Element, p: Paints, tally: Map<Element, number>) => {
     const add = (defs: readonly Element[], times: number) => {
+      if (!defs.length) return
+      charge(defs.length)
       for (const d of defs) tally.set(d, (tally.get(d) ?? 0) + times)
     }
     add(p.mask, 1)
@@ -1079,12 +1133,27 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
     }
     return c
   }
-  /** What painting `def` once paints in turn: its content's definitions, and its own mask or clip path (a clipped clip). */
+  let walked = 0
+  const chargeWalk = (n: number) => {
+    if ((walked += n) > MAX_PAINT_STEPS) throw new Error(TOO_SLOW)
+  }
+  /**
+   * What painting `def` once paints in turn: its content's definitions, and its own mask or clip path (a clipped clip).
+   * Made once per definition; a list joined from both is charged its length.
+   */
+  const nexts = new Map<Element, [Element, number][]>()
   const nextOf = (def: Element, holder: Element | null): [Element, number][] => {
-    const own = paintsInPlace(def)
-    const next = holder ? contentOf(holder).next : []
-    if (own.mask === NONE && own['clip-path'] === NONE) return next
-    return [...next, ...[...own.mask, ...own['clip-path']].map((x): [Element, number] => [x, 1])]
+    let next = nexts.get(def)
+    if (!next) {
+      const own = paintsInPlace(def)
+      next = holder ? contentOf(holder).next : []
+      if (own.mask !== NONE || own['clip-path'] !== NONE) {
+        next = [...next, ...[...own.mask, ...own['clip-path']].map((x): [Element, number] => [x, 1])]
+        chargeWalk(next.length)
+      }
+      nexts.set(def, next)
+    }
+    return next
   }
 
   const tooSlow = (n: number) => {
@@ -1095,19 +1164,20 @@ function paintedCount(root: Element, ids: Map<string, Element>, sizes: Map<Eleme
    * (not recursed). A definition met again inside its own painting paints nothing there. A definition's total is
    * remembered once worked out, unless that walk was cut by meeting a definition painted further out (its total then
    * depends on where it was reached); a loop back to itself doesn't stop it being remembered. Only paths through such
-   * loops are walked more than once, and at most MAX_PAINT_STEPS steps are taken in all.
+   * loops are walked more than once. Opening a definition costs 1 plus the length of what it paints in turn, since the
+   * walk goes through all of it, and at most MAX_PAINT_STEPS steps are taken in all.
    */
   const totals = new Map<Element, number>()
-  let walked = 0
   const totalOf = (top: Element): number => {
     interface Frame { def: Element; total: number; next: [Element, number][]; i: number; times: number; low: number }
     const frames: Frame[] = []
     const depth = new Map<Element, number>()
     const open = (def: Element, times: number) => {
-      if (++walked > MAX_PAINT_STEPS) throw new Error(TOO_SLOW)
       const holder = holderOf(def)
+      const next = nextOf(def, holder)
+      chargeWalk(1 + next.length)
       depth.set(def, frames.length)
-      frames.push({ def, total: holder ? contentOf(holder).count : 1, next: nextOf(def, holder), i: 0, times, low: frames.length })
+      frames.push({ def, total: holder ? contentOf(holder).count : 1, next, i: 0, times, low: frames.length })
     }
     open(top, 1)
     for (;;) {
@@ -1279,6 +1349,15 @@ const ESC: Record<string, string> = {
   '\u0085': '&#133;', '\u2028': '&#8232;'
 }
 const escAttr = (s: string): string => cleanText(s).replace(/[&<>"'\t\n\r\u0085\u2028]/g, c => ESC[c])
+/** How many characters a value takes once escaped as an attribute (& is 5, a quote 6), so a charge counts what's written. */
+export function escapedLength(s: string): number {
+  let n = s.length
+  for (let i = 0; i < s.length; i++) {
+    const e = ESC[s[i]]
+    if (e) n += e.length - 1
+  }
+  return n
+}
 const escText = (s: string): string => cleanText(s).replace(/[&<>"'\t\r\u0085\u2028]/g, c => ESC[c])
 const PREFIX: Record<string, string> = { [XLINK_NS]: 'xlink:', [INKSCAPE_NS]: 'inkscape:', [XML_NS]: 'xml:' }
 

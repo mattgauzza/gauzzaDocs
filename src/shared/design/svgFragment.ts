@@ -1,7 +1,7 @@
 import type { Box } from './geometry'
 import {
   INKSCAPE_NS, MAX_RULE_DECLARATIONS, MAX_STYLE_STEPS, PRESENTATION, TOO_COMPLEX_STYLES, XLINK_NS, allElements, cleanSvgRoot, cleanValue,
-  serializeSvg, simpleSelector
+  escapedLength, serializeSvg, simpleSelector
 } from './svgClean'
 import { len } from './svgPaint'
 import { type Decl, cssBlocks, splitDeclarations } from './svgStyle'
@@ -139,9 +139,9 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
     return f
   }
   // Every candidate costs a check plus, if it matches, a pass over each of its declarations, and writing their values
-  // (a step per 16 characters, so the budget also bounds the markup a sheet writes to about 8 MB): count it all first,
-  // so a sheet that asks too much is refused before any work. (A declaration applies as at most four attributes: a
-  // font shorthand as its longhands.)
+  // (a step per 16 characters as written, escapes and all, so the budget also bounds the markup a sheet writes to about
+  // 8 MB): count it all first, so a sheet that asks too much is refused before any work. (A declaration applies as at
+  // most four attributes: a font shorthand as its longhands.)
   if (indexed) {
     const costs = new Map<Rule[], number>()
     const cost = (list: Rule[] | undefined): number => {
@@ -151,7 +151,7 @@ export function applyStyles(root: Element, note: (s: string) => void): void {
         c = 0
         for (const r of list) {
           let chars = 0
-          for (const d of r.decls) chars += d.prop.length + d.value.length
+          for (const d of r.decls) chars += d.prop.length + escapedLength(d.value)
           c += 1 + r.decls.length + Math.floor(chars / 16)
         }
         costs.set(list, c)

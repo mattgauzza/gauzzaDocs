@@ -13,19 +13,35 @@ export { connectorPath } from './geometry'
 // never embedding the font) unless outlines are asked for, and keeps hidden layers with display="none". An svg layer
 // is an image in raster mode (the window never inlines outside SVG) and its cleaned fragment inline in export mode.
 
+/** A layer an export drew less faithfully than the editor shows it (an svg layer left out), and why, for the reply. */
+export interface Downgrade { layer: string; name: string; reason: string }
+
 export interface RenderOptions {
   fonts: FontSource
   assets: Record<string, Uint8Array>
   mode: 'raster' | 'export'
   outlines?: boolean
   seconds?: number
+  /** Export mode adds a Downgrade here for each svg layer it leaves out. */
+  downgrades?: Downgrade[]
 }
+
+/**
+ * Most characters the svg layers of one export may add, inlined. Each fragment is bounded on its own, but enough of
+ * them would add up past what one string can hold; once one doesn't fit, it and every later svg layer draw nothing.
+ */
+export const MAX_SVG_OUTPUT = 64 * 1024 * 1024
+export const SVG_NOT_CONVERTED = 'This SVG layer could not be converted for export, so it was left out.'
+export const SVG_OVER_BUDGET = 'The export reached 64 MB of SVG layers, so this one was left out.'
 
 interface Scope { prefix: string; overrides: Record<string, Override>; top: boolean; board: Artboard; comps: string[] }
 interface Ctx {
   design: Design; opts: RenderOptions; defs: string[]; ids: Map<string, number>; paints: Map<string, string>
   /** svg layers inlined so far, which numbers each one's id prefix */
   svgs: number
+  /** characters the inlined svg layers have added, and whether one has found MAX_SVG_OUTPUT reached */
+  svgOutput: number
+  svgFull: boolean
 }
 
 const ENTITIES: Record<string, string> = {
@@ -270,7 +286,7 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
       // by the order svg layers are drawn: the number ends at the dash, so no two prefixes can run into each other
       // (as layer ids a and a-b would), duplicate layer ids don't matter, and no id the renderer makes starts with s.
       return ctx.opts.mode === 'export'
-        ? inlineSvg(String(l.svg ?? ''), boxOf(l), `s${++ctx.svgs}-`)
+        ? exportSvgLayer(ctx, l)
         : imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(String(l.svg ?? '')))
     case 'group':
       return groupSvg(ctx, l, key, scope)
@@ -280,6 +296,27 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
       return connectorSvg(ctx, l, key, pts)
   }
   return ''
+}
+
+/**
+ * An svg layer's fragment inline, within MAX_SVG_OUTPUT for the whole export. One that can't be converted, or doesn't
+ * fit, draws nothing and is listed in opts.downgrades; once one doesn't fit, no later one is tried.
+ */
+function exportSvgLayer(ctx: Ctx, l: Layer & { type: 'svg' }): string {
+  const prefix = `s${++ctx.svgs}-`
+  const left = (reason: string): string => {
+    ctx.opts.downgrades?.push({ layer: String(l.id), name: String(l.name ?? ''), reason })
+    return ''
+  }
+  if (ctx.svgFull) return left(SVG_OVER_BUDGET)
+  const out = inlineSvg(String(l.svg ?? ''), boxOf(l), prefix)
+  if (!out) return left(SVG_NOT_CONVERTED)
+  if (ctx.svgOutput + out.length > MAX_SVG_OUTPUT) {
+    ctx.svgFull = true
+    return left(SVG_OVER_BUDGET)
+  }
+  ctx.svgOutput += out.length
+  return out
 }
 
 /** A rect, ellipse, line or path element; painted, or bare geometry for a clip path. */
@@ -454,7 +491,7 @@ function labelParts(ctx: Ctx, key: string, label: string, [mx, my]: Point, hex: 
 }
 
 function newCtx(design: Design, opts: RenderOptions): Ctx {
-  return { design, opts, defs: [], ids: new Map(), paints: new Map(), svgs: 0 }
+  return { design, opts, defs: [], ids: new Map(), paints: new Map(), svgs: 0, svgOutput: 0, svgFull: false }
 }
 
 /** One artboard as a standalone SVG document. */
