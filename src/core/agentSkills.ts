@@ -160,6 +160,9 @@ gdocs design set post.gdesign --layer Headline --y 140
 gdocs design read post.gdesign
 \`\`\`
 
+Place pictures from files with --image (PNG, JPEG, GIF or WebP; up to 50 megapixels). It comes in at its own size
+unless you give --w or --h: \`gdocs design add post.gdesign --type image --name Photo --image photo.jpg --w 1080\`.
+
 Group related layers, so they move and line up together:
 
 \`\`\`

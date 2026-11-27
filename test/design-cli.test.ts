@@ -212,3 +212,24 @@ test('gdocs info works on a design', () => {
   assert.equal(info.artboards, 2)
   assert.equal(info.layers, 1)
 })
+
+test('add --image and set --image place a picture from a file on disk, as does data "@file"', () => {
+  const file = newDesign('Photo', 'instagram')
+  const icon = path.resolve('resources/icon.png')
+  const png = fs.readFileSync(icon)
+  const [w, h] = [png.readUInt32BE(16), png.readUInt32BE(20)]
+  ok(['design', 'add', file, '--type', 'image', '--name', 'Photo', '--image', icon])
+  const line = layerLines(file).find(l => l.split('  ')[1] === 'Photo') ?? ''
+  assert.match(line, new RegExp(`  image  0,0 ${w}x${h}$`), 'it comes in at its own size')
+  // a 1x1 picture in the work folder, by a relative path, over the first
+  fs.writeFileSync(path.join(work, 'dot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'))
+  ok(['design', 'set', file, '--layer', 'Photo', '--image', 'dot.png'])
+  assert.match(layerLines(file)[0], /  image  0,0 1x1$/)
+  ok(['design', 'add', file, '--type', 'image', '--name', 'Again', '--props', '{"data":"@dot.png","x":5}'])
+  assert.match(layerLines(file)[1], /Again {2}image {2}5,0 1x1$/)
+  const missing = gdocs(['design', 'add', file, '--type', 'image', '--image', 'nope.png'])
+  assert.notEqual(missing.code, 0)
+  assert.match(missing.stderr, /Can't read the image file nope\.png\./)
+  fs.writeFileSync(path.join(work, 'not.png'), 'just text')
+  assert.match(gdocs(['design', 'add', file, '--type', 'image', '--image', 'not.png']).stderr, /An image must be a PNG, JPEG, GIF or WebP/)
+})

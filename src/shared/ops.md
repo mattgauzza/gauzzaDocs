@@ -52,7 +52,7 @@ Paints are `"#rrggbb"`, `"style:<name>"` (a color style), `"none"` or a paint ob
   connector. Props on every layer: name, x, y, width (w), height (h), rotation, scaleX, scaleY, opacity, blend, visible,
   locked, fill, stroke, strokeWidth, dash, shadow `{ x, y, blur, color }`, blur, timing `{ start?, end? }`. Then by type:
   radius (rect); d (path, SVG path data); text, runs, font, size, weight, italic, color, align, valign, mode (box or
-  point), letterSpacing, lineHeight, outlines (text); data (a data URL or base64), asset, fit (image); clip (group);
+  point), letterSpacing, lineHeight, outlines (text); data (a data URL or base64; the CLI reads a file given as --image <path> or "@file"), asset, fit (image); clip (group);
   component, overrides (instance); from, to, label, route, arrow, points (connector)
 - `set { layer, props, part?, allArtboards? }` -> `{ ids, note? }`; `part` names a layer inside an instance's component
   and sets its text, fill, stroke, visible or image for that instance only

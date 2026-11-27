@@ -46,9 +46,24 @@ const propOptions = (c: Command) =>
     .option('--font <family>', 'font family (text layers)')
     .option('--size <px>', 'font size (text layers)')
     .option('--radius <px>', 'corner radius (rectangles)')
+    .option('--image <path>', 'a PNG, JPEG, GIF or WebP file to show (image layers)')
     .option('--props <json>', 'any other properties as a JSON object ("-" = stdin, "@file"), e.g. {"opacity":0.5}')
 
-/** The properties the flags give: --props first, then each flag over it. */
+/**
+ * A picture file as the data an image takes (base64 in a data URL; the op checks what it is and its size). The CLI
+ * reads it, so a photo never has to fit on a command line.
+ */
+function imageFile(file: string): string {
+  let bytes: Buffer
+  try {
+    bytes = fs.readFileSync(path.resolve(file))
+  } catch {
+    throw new Error(`Can't read the image file ${file}.`)
+  }
+  return `data:;base64,${bytes.toString('base64')}`
+}
+
+/** The properties the flags give: --props first, then each flag over it. An image's data may be "@file". */
 function propsFrom(ctx: Ctx, o: Opts): Record<string, unknown> {
   let props: Record<string, unknown> = {}
   if (o.props !== undefined) {
@@ -62,6 +77,8 @@ function propsFrom(ctx: Ctx, o: Opts): Record<string, unknown> {
     props = { ...(v as Record<string, unknown>) }
   }
   for (const [flag, prop] of PROP_FLAGS) if (o[flag] !== undefined) props[prop] = o[flag]
+  if (o.image !== undefined) props.data = imageFile(String(o.image))
+  else if (typeof props.data === 'string' && props.data.startsWith('@')) props.data = imageFile(props.data.slice(1))
   return props
 }
 
