@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FontSource } from '../../../shared/design/fonts'
 import { type Box, type Point, fin } from '../../../shared/design/geometry'
-import { designToSvg } from '../../../shared/design/render'
+import { type RenderOptions, designToSvg } from '../../../shared/design/render'
 import type { Artboard, Design, DesignFile, Layer } from '../../../shared/design/types'
 import { writeProps } from '../../../shared/ops/designLayers'
 import type { AgentOp } from '../../../shared/types'
@@ -18,6 +18,8 @@ export interface Drawn { a: Artboard; svg: string; error?: string }
 interface Props {
   file: DesignFile
   fonts: FontSource
+  /** How this editor draws: its own id prefix and picture URLs (RenderOptions idPrefix and imageUrl). */
+  draw: Pick<RenderOptions, 'idPrefix' | 'imageUrl'>
   boards: Drawn[]
   zoom: number
   /** Hidden until the first fit, so nothing jumps. */
@@ -125,7 +127,7 @@ export function Canvas(p: Props) {
     return m
   }, [design])
   const previewSvg = useMemo(
-    () => (preview ? designToSvg(preview.design, preview.board, { fonts: p.fonts, assets: p.file.assets, mode: 'raster' }) : ''),
+    () => (preview ? designToSvg(preview.design, preview.board, { ...p.draw, fonts: p.fonts, assets: p.file.assets, mode: 'raster' }) : ''),
     [preview]
   )
 

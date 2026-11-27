@@ -78,6 +78,9 @@ function fitZoom(design: Design, width: number, height: number): number {
   return Math.max(0.02, Math.floor(Math.min(1, w, h) * 1000) / 1000)
 }
 
+/** Numbers each editor, so the ids its canvas draws are its own (two tabs can hold copies of one design). */
+let editors = 0
+
 const fontKey = (r: FontRef) => `${r.family.toLowerCase()}|${r.weight}|${r.style}|${r.postscript ?? ''}`
 
 /** The layers and artboards an op's result names ({ ids }, { id }, an apply's results), to flash. */
@@ -408,12 +411,44 @@ export default function DesignEditor(props: EditorProps) {
   }, [zoom])
 
   // ---------- the drawing ----------
+  /**
+   * How this editor's canvas draws: ids of its own, and pictures from blob: URLs made once per asset, so a drawing
+   * never carries a photo as base64. URLs of assets the design no longer holds are let go after each change (an undo
+   * that brings one back makes it again), and all of them when the editor closes.
+   */
+  const blobs = useRef(new Map<Uint8Array, string>())
+  const draw = useMemo(
+    () => ({
+      idPrefix: `e${++editors}-`,
+      imageUrl: (bytes: Uint8Array, mime: string): string => {
+        let url = blobs.current.get(bytes)
+        if (!url) blobs.current.set(bytes, (url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mime }))))
+        return url
+      }
+    }),
+    []
+  )
+  useEffect(() => {
+    const held = new Set(Object.values(file.assets))
+    for (const [bytes, url] of blobs.current) {
+      if (held.has(bytes)) continue
+      URL.revokeObjectURL(url)
+      blobs.current.delete(bytes)
+    }
+  }, [file])
+  useEffect(
+    () => () => {
+      for (const url of blobs.current.values()) URL.revokeObjectURL(url)
+      blobs.current.clear()
+    },
+    []
+  )
   const drawn = useMemo(() => {
     if (!fonts) return null
     const downgrades: Downgrade[] = []
     const boards: Drawn[] = file.design.artboards.map(a => {
       try {
-        return { a, svg: designToSvg(file.design, a.id, { fonts, assets: file.assets, mode: 'raster', downgrades }) }
+        return { a, svg: designToSvg(file.design, a.id, { ...draw, fonts, assets: file.assets, mode: 'raster', downgrades }) }
       } catch (e) {
         return { a, svg: '', error: (e as Error).message }
       }
@@ -657,6 +692,7 @@ export default function DesignEditor(props: EditorProps) {
             <Canvas
               file={file}
               fonts={fonts}
+              draw={draw}
               boards={drawn.boards}
               zoom={z}
               ready={zoom !== null}

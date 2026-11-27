@@ -469,3 +469,59 @@ test('letter breaks keep graphemes, leading spaces wrap, negative boxes flip, si
   const d = designOf(tiny)
   assert.ok(designToSvg(d, d.artboards[0].id, { fonts: await fontsOf(d), assets: {}, mode: 'export' }).includes('font-size="0"'))
 })
+
+/** A design with a picture, a gradient, a shadow, a clip group and an arrowed connector: every kind of id a drawing makes. */
+function idHeavy(): { d: Design; assets: Record<string, Uint8Array> } {
+  const png = new Uint8Array(fs.readFileSync('resources/icon.png'))
+  const asset = 'assets/' + 'b'.repeat(64) + '.png'
+  const grad = { type: 'linear' as const, angle: 45, stops: [{ offset: 0, color: '#ff0000' }, { offset: 1, color: '#0000ff' }] }
+  const d = designOf(
+    rect('r1', 'Grad', { fill: grad, shadow: { x: 2, y: 2, blur: 4, color: '#00000080' } }),
+    { ...base, ...box(200, 10, 80, 80), id: 'img', name: 'Pic', type: 'image', asset, fit: 'cover' } as Layer,
+    { ...base, ...box(10, 200, 100, 100), id: 'g1', name: 'Clip', type: 'group', clip: true, children: [rect('m1', 'Mask'), rect('k1', 'Kid', { fill: grad })] } as Layer,
+    { ...base, ...box(0, 0, 0, 0), id: 'c1', name: 'Link', type: 'connector', from: { layer: 'r1' }, to: { layer: 'img' }, route: 'straight', arrow: 'both', stroke: { type: 'color', color: '#333333' } } as Layer
+  )
+  return { d, assets: { [asset]: png } }
+}
+
+test('two drawings with different id prefixes share no ids, and every url(#...) points inside its own drawing', async () => {
+  const { d, assets } = idHeavy()
+  const fonts = await fontsOf(d)
+  const draw = (idPrefix?: string) => designToSvg(d, d.artboards[0].id, { fonts, assets, mode: 'raster', idPrefix })
+  const ids = (svg: string) => [...svg.matchAll(/\sid="([^"]+)"/g)].map(m => m[1])
+  const refs = (svg: string) => [...svg.matchAll(/url\(#([^)]+)\)/g)].map(m => m[1])
+  const a = draw('e1-')
+  const b = draw('e2-')
+  assert.ok(refs(a).length >= 5, 'gradients, filter, clip and markers are pointed to')
+  for (const [svg, other] of [[a, b], [b, a]]) {
+    const own = new Set(ids(svg))
+    for (const r of refs(svg)) assert.ok(own.has(r), `${r} is in its own drawing`)
+    const theirs = new Set(ids(other))
+    for (const id of own) assert.ok(!theirs.has(id), `${id} is not in the other drawing`)
+  }
+  assert.ok(ids(a).every(id => id.startsWith('e1-')))
+  // without a prefix the drawing is what it always was (exports and look stay the same for the same design)
+  assert.equal(draw(), draw(''))
+  assert.ok(ids(draw()).some(id => id.startsWith('l-')))
+  parse(a)
+})
+
+test('a picture is encoded once however many times its design is drawn, and the editor can draw it from a URL of its own', async () => {
+  const { imageEncodes } = await import('../src/shared/design/render')
+  const { d, assets } = idHeavy()
+  const fonts = await fontsOf(d)
+  const before = imageEncodes.calls
+  const first = designToSvg(d, d.artboards[0].id, { fonts, assets, mode: 'raster' })
+  const second = designToSvg(d, d.artboards[0].id, { fonts, assets, mode: 'raster' })
+  designToSvg(d, d.artboards[0].id, { fonts, assets, mode: 'export' })
+  assert.equal(imageEncodes.calls - before, 1, 'one asset, encoded once')
+  assert.equal(first, second)
+  assert.ok(first.includes('xlink:href="data:image/png;base64,'))
+  const asked: string[] = []
+  const hooked = designToSvg(d, d.artboards[0].id, { fonts, assets, mode: 'raster', imageUrl: (_b, mime) => (asked.push(mime), 'blob:gd/1') })
+  assert.deepEqual(asked, ['image/png'])
+  assert.ok(hooked.includes('xlink:href="blob:gd/1"'))
+  assert.equal(imageEncodes.calls - before, 1)
+  // exports always carry the picture itself
+  assert.ok(designToSvg(d, d.artboards[0].id, { fonts, assets, mode: 'export', imageUrl: () => 'blob:no' }).includes('data:image/png;base64,'))
+})

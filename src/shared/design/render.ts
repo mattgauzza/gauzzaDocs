@@ -32,6 +32,17 @@ export interface RenderOptions {
   size?: { width: number; height: number }
   /** Set to what the drawing holds, for the limits cleaning it allows (exportLimits). */
   counts?: DrawCounts
+  /**
+   * Put before every id the drawing writes (and so every url(#...) it points with), so two drawings in one page (two
+   * tabs holding copies of one design) never take each other's gradients, clips, filters or arrowheads. Letters,
+   * digits, _ and - only. Exports and `gdocs look` leave it out, so their output stays the same for the same design.
+   */
+  idPrefix?: string
+  /**
+   * Raster mode: the URL an image asset's bytes are drawn from (the editor's canvas gives blob: URLs, so a picture isn't
+   * written into every drawing as base64). Without it, a data: URL, encoded once per asset and kept.
+   */
+  imageUrl?: (bytes: Uint8Array, mime: string) => string
 }
 
 /**
@@ -107,6 +118,8 @@ interface Ctx {
   escLens: { d: WeakMap<object, number>; glyphs: WeakMap<object, number> }
   /** what each glyph's outline has come to so far (see outlineEstimate) */
   glyphCosts: GlyphCosts
+  /** put before every id written (RenderOptions.idPrefix) */
+  idPrefix: string
 }
 
 /** Thrown while a layer is built once what it adds passes the budget: the layer is left out without finishing. */
@@ -162,8 +175,11 @@ function nextId(ctx: Ctx, prefix: string, key: string): string {
   const k = `${prefix}-${key}`
   const count = (ctx.ids.get(k) ?? 0) + 1
   ctx.ids.set(k, count)
-  return `${k}-${count}`
+  return `${ctx.idPrefix}${k}-${count}`
 }
+
+/** An id prefix as written: letters, digits, _ and - only. */
+const idPrefixOf = (opts: RenderOptions): string => (typeof opts.idPrefix === 'string' ? opts.idPrefix.replace(/[^A-Za-z0-9_-]/g, '_') : '')
 
 /**
  * Takes `size` characters from the drawing's budget. When they don't fit, false; and the budget counts as reached
@@ -330,7 +346,11 @@ function failSig(src: Layer, scope: Scope): string | null {
 
 const boxAttrs = (b: Box): string => `x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}"`
 
+/** How many times bytes were encoded as base64 for a drawing: tests check a picture is encoded once, not per drawing. */
+export const imageEncodes = { calls: 0 }
+
 function base64(bytes: Uint8Array): string {
+  imageEncodes.calls++
   const B = (globalThis as any).Buffer
   if (B) return B.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
   let s = ''
@@ -338,9 +358,39 @@ function base64(bytes: Uint8Array): string {
   return btoa(s)
 }
 
+/**
+ * Each asset's data: URL by its bytes (and type), made once and kept while the bytes are: the editor draws every
+ * artboard after each change and the dragged one every frame, and a photo takes long to encode. Assets never change
+ * (they're named by their hash), so the same bytes always give the same URL.
+ */
+const dataUrls = new WeakMap<Uint8Array, Map<string, string>>()
+function dataUrl(bytes: Uint8Array, mime: string): string {
+  let byMime = dataUrls.get(bytes)
+  if (!byMime) dataUrls.set(bytes, (byMime = new Map()))
+  let url = byMime.get(mime)
+  if (url === undefined) byMime.set(mime, (url = `data:${mime};base64,${base64(bytes)}`))
+  return url
+}
+/** An svg layer's markup as bytes, by the layer that holds it, so a drawing doesn't encode it again. */
+const svgBytes = new WeakMap<object, { svg: string; bytes: Uint8Array }>()
+function svgBytesOf(l: Layer & { type: 'svg' }): Uint8Array {
+  const svg = typeof l.svg === 'string' ? l.svg : ''
+  const holder = holderOf(l, 'svg')
+  const known = holder ? svgBytes.get(holder) : undefined
+  if (known && known.svg === svg) return known.bytes
+  const bytes = new TextEncoder().encode(svg)
+  if (holder) svgBytes.set(holder, { svg, bytes })
+  return bytes
+}
+
 /** An embedded image. xlink:href, which SVG 1.1 importers (Illustrator) need and HTML inlining maps too. */
-const imageTag = (b: Box, fit: string, mime: string, bytes: Uint8Array): string =>
-  `<image ${boxAttrs(b)} preserveAspectRatio="${fit}" xlink:href="data:${mime};base64,${base64(bytes)}"/>`
+function imageTag(ctx: Ctx, b: Box, fit: string, mime: string, bytes: Uint8Array): string {
+  // (an svg layer's markup isn't an asset the caller holds, so it stays a data: URL, made once per layer)
+  const hook = ctx.opts.mode === 'raster' && mime !== 'image/svg+xml' ? ctx.opts.imageUrl : undefined
+  // a data: URL holds only base64 and the type, which need no escaping (escaping megabytes would cost every drawing)
+  const url = hook ? esc(hook(bytes, mime)) : dataUrl(bytes, mime)
+  return `<image ${boxAttrs(b)} preserveAspectRatio="${fit}" xlink:href="${url}"/>`
+}
 
 /** #rgb, #rrggbb or #rrggbbaa as a 6 digit color plus an opacity (SVG 1.1 has no 8 digit colors). Anything else is black. */
 function color(c: unknown): { hex: string; alpha: number } {
@@ -512,9 +562,9 @@ const offstage = (l: Layer, s: number | undefined): boolean =>
   ((typeof l.timing.start === 'number' && s < l.timing.start) || (typeof l.timing.end === 'number' && s >= l.timing.end))
 
 /** The opening attributes every layer group carries: id, name and Inkscape label (the name cut at 1,000 characters). */
-const layerAttrs = (key: string, name: unknown): string => {
+const layerAttrs = (ctx: Ctx, key: string, name: unknown): string => {
   const shown = esc(typeof name === 'string' ? name.slice(0, MAX_NAME_OUTPUT) : '')
-  return `id="l-${key}" data-name="${shown}" inkscape:label="${shown}"`
+  return `id="${ctx.idPrefix}l-${key}" data-name="${shown}" inkscape:label="${shown}"`
 }
 
 /**
@@ -552,7 +602,7 @@ function renderLayer(ctx: Ctx, src: Layer, scope: Scope): string {
     if (hidden && ctx.opts.mode === 'raster') return ''
     const key = safeId(scope.prefix + l.id)
     if (key.length > MAX_KEY) throw new Error('an id too long to draw with')
-    let a = layerAttrs(key, l.name)
+    let a = layerAttrs(ctx, key, l.name)
     if (scope.top) a += ' inkscape:groupmode="layer"'
     if (hidden) a += ' display="none"'
     const opacity = Math.min(1, Math.max(0, fin(l.opacity, 1)))
@@ -597,7 +647,7 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
       // by the order svg layers are drawn: the number ends at the dash, so no two prefixes can run into each other
       // (as layer ids a and a-b would), duplicate layer ids don't matter, and no id the renderer makes starts with s.
       if (ctx.opts.mode === 'export') return exportSvgLayer(ctx, l)
-      return imageTag(boxOf(l), 'none', 'image/svg+xml', new TextEncoder().encode(typeof l.svg === 'string' ? l.svg : ''))
+      return imageTag(ctx, boxOf(l), 'none', 'image/svg+xml', svgBytesOf(l))
     case 'group':
       return groupSvg(ctx, l, key, scope)
     case 'instance':
@@ -613,7 +663,7 @@ function content(ctx: Ctx, l: Layer, key: string, scope: Scope, o: Override | un
  * one that can't be converted draws nothing and is listed.
  */
 function exportSvgLayer(ctx: Ctx, l: Layer & { type: 'svg' }): string {
-  const out = inlineSvg(typeof l.svg === 'string' ? l.svg : '', boxOf(l), `s${++ctx.svgs}-`, ctx.svgCache, holderOf(l, 'svg') ?? undefined)
+  const out = inlineSvg(typeof l.svg === 'string' ? l.svg : '', boxOf(l), `${ctx.idPrefix}s${++ctx.svgs}-`, ctx.svgCache, holderOf(l, 'svg') ?? undefined)
   if (!out) return leftOut(ctx, l, SVG_NOT_CONVERTED)
   if (ctx.opts.counts) ctx.fragmentElements += elementCount(out)
   return out
@@ -700,7 +750,7 @@ function imageEl(ctx: Ctx, asset: unknown, fit: string | undefined, b: Box): str
   const ext = (/\.([a-z0-9]+)$/i.exec(asset)?.[1] ?? '').toLowerCase()
   const mime = has(MIME, ext) ? MIME[ext] : undefined
   if (!(bytes instanceof Uint8Array) || !mime) return ''
-  return imageTag(b, fit === 'contain' ? 'xMidYMid meet' : fit === 'cover' ? 'xMidYMid slice' : 'none', mime, bytes)
+  return imageTag(ctx, b, fit === 'contain' ? 'xMidYMid meet' : fit === 'cover' ? 'xMidYMid slice' : 'none', mime, bytes)
 }
 
 /**
@@ -720,7 +770,7 @@ function groupSvg(ctx: Ctx, g: Layer & { type: 'group' }, key: string, scope: Sc
     const least = clipLeast(ctx, mask, typeof maskOverride?.text === 'string' ? maskOverride.text : undefined)
     if (!spend(ctx, least)) throw new OverBudget('The clip mask does not fit.')
     ctx.room = MAX_RENDER_OUTPUT - ctx.used + least
-    const holder = `<g ${layerAttrs(maskKey, mask.name)}><clipPath id="${id}">${clipShape(ctx, mask, maskKey, scope)}</clipPath></g>`
+    const holder = `<g ${layerAttrs(ctx, maskKey, mask.name)}><clipPath id="${id}">${clipShape(ctx, mask, maskKey, scope)}</clipPath></g>`
     if (holder.length < least) ctx.used -= least - holder.length
     else if (!spend(ctx, holder.length - least)) throw new OverBudget('The clip mask does not fit.')
     ctx.paintings++ // the clip path is painted once, for the group that uses it
@@ -827,7 +877,7 @@ function newCtx(design: Design, opts: RenderOptions): Ctx {
   return {
     design, opts, defs: [], ids: new Map(), paints: new Map(), paintLog: [], svgs: 0, fragmentElements: 0, paintings: 0, used: 0, full: false, instances: 0,
     svgCache: inlineCaches(), listed: new Set(), compEnds: new Map(), room: MAX_RENDER_OUTPUT, failed: new Map(),
-    escLens: { d: new WeakMap(), glyphs: new WeakMap() }, glyphCosts: new WeakMap()
+    escLens: { d: new WeakMap(), glyphs: new WeakMap() }, glyphCosts: new WeakMap(), idPrefix: idPrefixOf(opts)
   }
 }
 
