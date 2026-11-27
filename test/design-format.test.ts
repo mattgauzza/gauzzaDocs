@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { test } from 'node:test'
 import JSZip from 'jszip'
-import { assetName, designZipBytes, readDesignZip } from '../src/core/formats/design'
+import { assetName, designZipBytes, readDesignThumbnail, readDesignZip, scanZipEntries, zipLoads } from '../src/core/formats/design'
 import { fontsFor } from '../src/shared/design/fonts'
 import { newDesign, newId, resolveLayer, walk } from '../src/shared/design/model'
 import { type Downgrade, designToSvg } from '../src/shared/design/render'
@@ -97,6 +97,52 @@ test('hostile zips: too many entries', async () => {
   const bytes = await z.generateAsync({ type: 'nodebuffer' })
   await assert.rejects(readDesignZip(bytes), /too many entries/)
 })
+
+/** The zip with its end of central directory record's two entry counts set to `n`. */
+function withDeclaredCount(bytes: Uint8Array, n: number): Buffer {
+  const buf = Buffer.from(bytes)
+  const at = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]))
+  assert.ok(at > 0)
+  buf.writeUInt16LE(n, at + 8)
+  buf.writeUInt16LE(n, at + 10)
+  return buf
+}
+
+test('hostile zips: 10,001 entries are refused from the central directory, before JSZip builds any', async () => {
+  const z = new JSZip()
+  z.file('design.json', JSON.stringify(newDesign('x')))
+  for (let i = 0; i < 10_000; i++) z.file(`j${i}`, '')
+  const bytes = new Uint8Array(await z.generateAsync({ type: 'nodebuffer' }))
+  const before = zipLoads.calls
+  await assert.rejects(readDesignZip(bytes), { message: 'This design has too many entries (more than 10,000).' })
+  assert.equal(await readDesignThumbnail(bytes), null)
+  assert.equal(zipLoads.calls, before, 'JSZip never saw it')
+  // a record that understates the count is caught by the walk, which stops at 10,001
+  await assert.rejects(readDesignZip(withDeclaredCount(bytes, 5)), { message: 'This design has too many entries (more than 10,000).' })
+  assert.equal(zipLoads.calls, before)
+})
+
+test('hostile zips: a record whose entry count disagrees with the directory is refused as damaged', async () => {
+  const bytes = await zipOf({ 'design.json': JSON.stringify(newDesign('x')), 'a.txt': 'a', 'b.txt': 'b' })
+  const before = zipLoads.calls
+  const damaged = { message: "This design file is damaged: it can't be read as a zip file." }
+  await assert.rejects(readDesignZip(withDeclaredCount(bytes, 2)), damaged)
+  await assert.rejects(readDesignZip(withDeclaredCount(bytes, 4)), damaged)
+  await assert.rejects(readDesignZip(withDeclaredCount(bytes, 60_000)), { message: 'This design has too many entries (more than 10,000).' })
+  assert.equal(zipLoads.calls, before, 'JSZip never saw them')
+  // the honest file still reads (cut short, it never reads past its end)
+  assert.equal((await readDesignZip(bytes)).design.artboards.length, 1)
+  for (const cut of [1, 10, 30]) assert.doesNotThrow(() => scanZipEntriesSafe(bytes.subarray(0, bytes.length - cut)))
+})
+
+/** scanZipEntries on a cut file: it may refuse it, but only with an Error of its own (never a RangeError from reading past the end). */
+function scanZipEntriesSafe(bytes: Uint8Array): void {
+  try {
+    scanZipEntries(bytes)
+  } catch (e) {
+    if (e instanceof RangeError) throw e
+  }
+}
 
 test('hostile zips: a declared size over 1 GB is refused before inflating', async () => {
   const buf = Buffer.from(await zipOf({ 'design.json': JSON.stringify(newDesign('x')) }))

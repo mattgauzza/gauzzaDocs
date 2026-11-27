@@ -6,7 +6,12 @@ import {
 } from '../../shared/design/validate'
 
 type JSZipT = InstanceType<typeof import('jszip')>
-const loadZip = async (bytes: Uint8Array): Promise<JSZipT> => (await import('jszip')).default.loadAsync(bytes)
+/** How many times a zip was handed to JSZip: tests check that a hostile one is refused before it is. */
+export const zipLoads = { calls: 0 }
+const loadZip = async (bytes: Uint8Array): Promise<JSZipT> => {
+  zipLoads.calls++
+  return (await import('jszip')).default.loadAsync(bytes)
+}
 const newZip = async (): Promise<JSZipT> => new (await import('jszip')).default()
 
 // the zip's limits live with the rest in validate.ts, so the ops and saving check exactly what reading checks
@@ -22,16 +27,74 @@ export function assetName(bytes: Uint8Array, ext: string): string {
   return `assets/${createHash('sha256').update(bytes).digest('hex')}.${clean}`
 }
 
+const NOT_A_ZIP = "This design file is damaged: it can't be read as a zip file."
+const EOCD = 0x06054b50
+const EOCD64 = 0x06064b50
+const EOCD64_LOCATOR = 0x07064b50
+const CENTRAL = 0x02014b50
+
 /**
- * Loads a zip and refuses it from the central directory alone, before anything is inflated. A file that isn't a zip
- * (or is cut short) is refused in plain words, not the zip library's.
+ * Counts a zip's entries from its central directory before JSZip sees it, so a zip holding a million entries is
+ * refused without building any of them. Reads the end of central directory record (and the zip64 one when the record
+ * points to it), then walks the directory's headers one by one, never past the record's end or the buffer's. Past
+ * 10,000 entries (declared or walked) it's refused as too many; a record that disagrees with the walk, or that points
+ * outside the file, is refused as damaged. A file with no record at all is left for JSZip to refuse.
+ */
+export function scanZipEntries(bytes: Uint8Array): void {
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const len = bytes.byteLength
+  let eocd = -1
+  // the record is 22 bytes plus a comment of at most 65,535
+  for (let i = len - 22; i >= 0 && i >= len - 22 - 0xffff; i--) {
+    if (v.getUint32(i, true) === EOCD) {
+      eocd = i
+      break
+    }
+  }
+  if (eocd < 0) return
+  let declared = v.getUint16(eocd + 10, true)
+  let size = v.getUint32(eocd + 12, true)
+  let offset = v.getUint32(eocd + 16, true)
+  let end = eocd
+  if (declared === 0xffff || size === 0xffffffff || offset === 0xffffffff) {
+    // zip64: the locator sits just before the record and points to the zip64 record
+    const loc = eocd - 20
+    if (loc < 0 || v.getUint32(loc, true) !== EOCD64_LOCATOR) throw new Error(NOT_A_ZIP)
+    const at = Number(v.getBigUint64(loc + 8, true))
+    if (!(at >= 0 && at + 56 <= loc) || v.getUint32(at, true) !== EOCD64) throw new Error(NOT_A_ZIP)
+    const many = v.getBigUint64(at + 32, true)
+    if (many > BigInt(MAX_ENTRIES)) throw new Error(TOO_MANY_ENTRIES)
+    declared = Number(many)
+    size = Number(v.getBigUint64(at + 40, true))
+    offset = Number(v.getBigUint64(at + 48, true))
+    end = at
+  }
+  if (declared > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
+  // where the directory starts: where the record says, or (bytes added before the zip) right before the record
+  let pos = offset
+  if (!(pos + 4 <= end && v.getUint32(pos, true) === CENTRAL) && end - size >= 0 && end - size + 4 <= end && v.getUint32(end - size, true) === CENTRAL) {
+    pos = end - size
+  }
+  let walked = 0
+  while (pos + 46 <= end && v.getUint32(pos, true) === CENTRAL) {
+    if (++walked > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
+    pos += 46 + v.getUint16(pos + 28, true) + v.getUint16(pos + 30, true) + v.getUint16(pos + 32, true)
+  }
+  if (walked !== declared || pos > end) throw new Error(NOT_A_ZIP)
+}
+
+/**
+ * Loads a zip and refuses it from the central directory alone, before anything is inflated: its entries are counted
+ * first (scanZipEntries), before JSZip builds any. A file that isn't a zip (or is cut short) is refused in plain words,
+ * not the zip library's.
  */
 async function openChecked(bytes: Uint8Array): Promise<JSZipT> {
+  scanZipEntries(bytes)
   let zip: JSZipT
   try {
     zip = await loadZip(bytes)
   } catch {
-    throw new Error("This design file is damaged: it can't be read as a zip file.")
+    throw new Error(NOT_A_ZIP)
   }
   const entries = Object.values(zip.files)
   if (entries.length > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
