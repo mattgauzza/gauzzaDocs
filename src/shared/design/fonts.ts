@@ -134,7 +134,26 @@ function textRefs(design: Design): FontRef[] {
   return out
 }
 
-const keyOf = (r: FontRef) => r.asset ? `asset:${r.asset}` : `${r.family.toLowerCase()}|${r.weight}|${r.style}|${r.postscript || ''}`
+/** A face by family, weight, style and PostScript name, whether or not it's packed: one face is packed once. */
+export const faceKey = (r: FontRef): string => `${String(r.family ?? '').toLowerCase()}|${r.weight}|${r.style}|${r.postscript || ''}`
+const keyOf = (r: FontRef) => (r.asset ? `asset:${r.asset}` : faceKey(r))
+
+/** The file extension a font's bytes are stored under when packed: ttc, otf or ttf. */
+export function fontExt(bytes: Uint8Array): string {
+  const tag = bytes.length >= 4 ? String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) : ''
+  return tag === 'ttcf' ? 'ttc' : tag === 'OTTO' ? 'otf' : 'ttf'
+}
+
+/** The face `ref` asks for in a font file's bytes (parsed with fontkit), or null when there is none or it can't be read. */
+export async function parseFace(bytes: Uint8Array, ref: FontRef): Promise<any | null> {
+  const fk = await fontkit()
+  try {
+    if (collectionTooBig(bytes)) return null
+    return pickFace(fk.create(bytes), ref)
+  } catch {
+    return null
+  }
+}
 
 /**
  * True when `after` names a font `before` didn't (a new text family, an svg import), so a FontSource built for `before`
@@ -193,10 +212,13 @@ export async function fontsFor(
       }
       if (bytes) font = parse(bytes, ref)
     }
-    loaded.set(key, font ? { font, family: ref.family, ...(packed ? { packedFamily: packed } : {}) } : { ...fallback, missing: true })
+    const entry: LoadedFont = font ? { font, family: ref.family, ...(packed ? { packedFamily: packed } : {}) } : { ...fallback, missing: true }
+    loaded.set(key, entry)
+    // a packed face also serves the same face named without its asset (a run an op just set, before it's packed)
+    if (packed && (!loaded.has(faceKey(ref)) || loaded.get(faceKey(ref))!.missing)) loaded.set(faceKey(ref), entry)
   }
   return {
     fallback,
-    get: ref => loaded.get(keyOf(ref)) ?? { ...fallback, missing: true }
+    get: ref => loaded.get(keyOf(ref)) ?? loaded.get(faceKey(ref)) ?? { ...fallback, missing: true }
   }
 }

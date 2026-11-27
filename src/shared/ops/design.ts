@@ -5,7 +5,8 @@ import { parsePath, pathBounds } from '../design/path'
 import { type Downgrade, designToSvg } from '../design/render'
 import { cleanSvg, exportLimits } from '../design/svgClean'
 import { importSvg, layerAsSvg } from '../design/svgImport'
-import { cleanText, num as fmt, textReport } from '../design/text'
+import { keepFonts, textFlags } from '../design/keepFonts'
+import { cleanText, num as fmt } from '../design/text'
 import type { Artboard, BlendMode, Component, Design, DesignFile, Diagram, ElkGraph, Layer, Override, Paint, TextRun } from '../design/types'
 import {
   LIMIT, MAX_LAYERS, MAX_SVG_MARKUP, type Past, SVG_LAYERS_FULL, layerCount, limitsOf, pastLimit, pastZipLimit, svgMarkupIn, svgMarkupOf
@@ -70,6 +71,8 @@ export async function applyDesignOp(
   const result = await runOp(draft, op)
   const summary = describe(draft.changes)
   if (!draft.changes.length) return { result, summary }
+  // the fonts the op's text brought in travel with the design (packed, or as outlines): part of this one step
+  await keepFonts(draft, file, services)
   // never make a design reading would refuse or repair: past any of its limits, the file couldn't be opened once saved
   // (or wouldn't come back as it was), and that includes the zip's own limits
   const thumbnail = file.thumbnail?.byteLength
@@ -370,7 +373,7 @@ function layerLine(d: Draft, l: Layer): string {
     line += `  "${all.length > 60 ? all.slice(0, 57) + '...' : all}"`
     const fonts = d.services.fonts
     if (fonts) {
-      const report = textReport(l, fonts)
+      const report = textFlags(l, fonts, d.services.fontsPartial === true)
       if (report.missingFont) flags.push('missing font')
       if (report.overflow) flags.push('overflow')
     } else if (l.missingFont) flags.push('missing font')

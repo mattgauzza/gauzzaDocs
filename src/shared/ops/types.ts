@@ -1,5 +1,5 @@
 import type { FontSource } from '../design/fonts'
-import type { ElkGraph } from '../design/types'
+import type { ElkGraph, FontRef } from '../design/types'
 import type { AgentOp, FilePayload } from '../types'
 
 /** Result of applying an op to a file's content: what to tell the caller, and the new content if it changed. */
@@ -13,6 +13,18 @@ export interface OpResult {
 export interface OpServices {
   fonts?: FontSource
   layout?: (graph: ElkGraph) => Promise<ElkGraph>
+  /**
+   * A font file's bytes as installed here (null when it isn't), so a design op packs the fonts its text brings in, or
+   * stores their outlines (design/keepFonts.ts). Without it nothing is packed.
+   */
+  fontBytes?: (ref: FontRef) => Promise<Uint8Array | null>
+  /** False to leave layers marked "font not installed" alone (asking for their fonts would cost a font scan). */
+  recheckMissing?: boolean
+  /**
+   * `fonts` holds only the design's packed fonts and the fallback (the installed ones weren't looked at), so a font that
+   * isn't packed is reported missing only when the layer says so, and text drawn from stored outlines is measured by them.
+   */
+  fontsPartial?: boolean
 }
 export type OpHandler<P extends FilePayload = FilePayload> = (
   payload: P, op: AgentOp, ctx: { path: string; services?: OpServices }

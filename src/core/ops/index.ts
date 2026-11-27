@@ -60,7 +60,7 @@ async function readStamped(file: string): Promise<{ bytes: Uint8Array; size: num
 /** What the design ops get on disk: fonts measured with the installed faces (or the fallback) and ELK for diagrams. */
 async function servicesFor(payload: FilePayload & { kind: 'design' }): Promise<OpServices> {
   const { design, assets } = payload.file
-  return { fonts: await fontsFor(design, assets, fontFaceBytes, await fallbackFontBytes()), layout: layoutDiagram }
+  return { fonts: await fontsFor(design, assets, fontFaceBytes, await fallbackFontBytes()), fontBytes: fontFaceBytes, layout: layoutDiagram }
 }
 
 /**
@@ -81,16 +81,32 @@ async function watchedFonts(payload: FilePayload & { kind: 'design' }, touched: 
 
 /**
  * Works an op out on a design on disk. The installed fonts cost a scan of every font file the first time (seconds), and
- * only an op that measures or draws text needs them: `read` and `info` get no fonts (read's flags come from the file),
- * and any other op is first worked out with the fallback font watched. If it used a font, or failed after using one,
- * it's worked out again with the installed fonts, and once more when that brings in a font the file didn't use, so its
- * text is measured in it.
+ * only an op that measures or draws text needs them: `info` gets no fonts, `read` gets the design's packed fonts and
+ * the fallback only (fontsPartial: its flags come from those, the layers' stored outlines and their missingFont marks),
+ * and any other op is first worked out with the fallback font watched. If it used a font, or asked for one to pack
+ * (keepFonts), or failed after using one, it's worked out again with the installed fonts, and once more when that
+ * brings in a font the file didn't use (a font it packed, say), so its text is measured in it.
  */
 async function applyOffline(payload: FilePayload & { kind: 'design' }, op: AgentOp, p: string): Promise<OpResult> {
-  if (op.op === 'read' || op.op === 'info') return designOps(payload, op, { path: p, services: { layout: layoutDiagram } })
+  if (op.op === 'info') return designOps(payload, op, { path: p, services: { layout: layoutDiagram } })
+  if (op.op === 'read') {
+    const { design, assets } = payload.file
+    const fonts = await fontsFor(design, assets, async () => null, await fallbackFontBytes())
+    return designOps(payload, op, { path: p, services: { fonts, fontsPartial: true, layout: layoutDiagram } })
+  }
   let used = false
+  const watched: OpServices = {
+    fonts: await watchedFonts(payload, () => (used = true)),
+    // asking for a font to pack needs the installed fonts: the op is worked out again with them
+    fontBytes: async () => {
+      used = true
+      return null
+    },
+    recheckMissing: false,
+    layout: layoutDiagram
+  }
   try {
-    const r = await designOps(payload, op, { path: p, services: { fonts: await watchedFonts(payload, () => (used = true)), layout: layoutDiagram } })
+    const r = await designOps(payload, op, { path: p, services: watched })
     if (!used) return r
   } catch (e) {
     if (!used) throw e

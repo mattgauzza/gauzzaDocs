@@ -248,7 +248,8 @@ export default function DesignEditor(props: EditorProps) {
         fonts = await loadFonts(f)
         built = f.design
       }
-      const services = (): OpServices => ({ fonts, layout: api.designLayout })
+      // fetchFace: the installed font files ops pack into the design (or outline), fetched once per face
+      const services = (): OpServices => ({ fonts, layout: api.designLayout, fontBytes: fetchFace })
       if (newFonts(built, before.design)) await load(before)
       let r = await applyDesignOp(before, op, services())
       if (r.file && newFonts(built, r.file.design)) {
