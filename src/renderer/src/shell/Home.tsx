@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { type Kind, baseName, kindOf } from '../../../shared/kinds'
+import { isScratchFile } from '../../../shared/scratchFiles'
 import type { RecentFile, Settings } from '../../../shared/types'
 import { type Project, api, shortDir, when } from '../lib'
 import { ContextMenu, FolderBrowser, ProjectRail } from './Projects'
@@ -96,8 +97,8 @@ function RecentView(props: {
     return recent.filter(r => (filter === 'all' || r.kind === filter) && (!needle || r.path.toLowerCase().includes(needle)))
   }, [recent, filter, q])
   const inFolder = folder
-    // a design's lock file is there only while it's being written
-    .filter(f => !f.dir && !/\.gdesign\.lock$/i.test(f.name) && !recent.some(r => r.path.toLowerCase() === f.path.toLowerCase()))
+    // a design's lock and an export's temp file are there only while they're being written
+    .filter(f => !f.dir && !isScratchFile(f.name) && !recent.some(r => r.path.toLowerCase() === f.path.toLowerCase()))
     .filter(f => (filter === 'all' || kindOf(f.path) === filter) && (!q || f.name.toLowerCase().includes(q.toLowerCase())))
     .sort((a, b) => b.mtime - a.mtime)
 

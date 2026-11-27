@@ -350,6 +350,8 @@ test('describeOps reads design ops in plain words', () => {
   assert.equal(describeOps(['add'], 'design'), 'Added layers')
   assert.equal(describeOps(['add', 'set', 'move', 'add'], 'design'), 'Added layers, changed layers and moved layers')
   assert.equal(describeOps(['set'], 'sheet'), 'Changed cells', 'other kinds keep their words')
+  assert.equal(describeOps(['diagram'], 'design'), 'Drew a diagram')
+  assert.equal(describeOps(['tidy'], 'design'), 'Tidied a diagram')
 })
 
 test('a color style fills a rect, and changing the style later changes the rect', async () => {

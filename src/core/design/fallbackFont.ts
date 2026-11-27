@@ -23,8 +23,8 @@ function here(): string[] {
 /** Where the fallback font is: resources/fonts in the app (or the repo), else the copy pdf.js ships. */
 export function fallbackFontPath(): string {
   const roots: string[] = []
+  // only where this code is (never the working folder, which a CLI run can be anywhere)
   for (const d of here()) roots.push(path.resolve(d, '..'), path.resolve(d, '..', '..'), path.resolve(d, '..', '..', '..'))
-  roots.push(process.cwd())
   const resources = (process as { resourcesPath?: string }).resourcesPath
   if (resources) roots.push(path.join(resources, 'app'))
   const tries = [

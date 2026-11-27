@@ -152,6 +152,19 @@ test('a stale lock in a folder that refuses changes fails fast with the folder m
   )
 })
 
+test('lock, stale, probe and export temp files are never listed', async () => {
+  const { isScratchFile } = await import('../src/shared/scratchFiles')
+  const { listFolder, searchFolder } = await import('../src/core/projects')
+  const dir = fs.mkdtempSync(path.join(work, 'list-'))
+  const scratch = ['Post.gdesign.lock', 'Post.gdesign.lock.1234.0a1b2c3d.stale', 'Post.gdesign.lock.88.ffeeddcc.probe', '.Post Card.svg.4321.deadbeef.tmp']
+  const real = ['Post.gdesign', 'Post Card.svg', 'notes.lock', 'post.tmp']
+  for (const n of [...scratch, ...real]) fs.writeFileSync(path.join(dir, n), '')
+  for (const n of scratch) assert.equal(isScratchFile(n), true, n)
+  for (const n of real) assert.equal(isScratchFile(n), false, n)
+  assert.deepEqual((await listFolder(dir)).map(e => e.name).sort(), [...real].sort())
+  assert.deepEqual((await searchFolder(dir, 'post')).results.map(e => e.name).sort(), ['Post Card.svg', 'Post.gdesign', 'post.tmp'])
+})
+
 test('the messages follow the copy rules', () => {
   for (const m of [NO_WRITE, stuckLock('C:/x/a.gdesign.lock')]) {
     assert.match(m, /^[\x20-\x7e]+$/)

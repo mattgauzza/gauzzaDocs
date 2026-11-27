@@ -72,6 +72,8 @@ const BY_KIND: Record<string, Record<string, Phrase>> = {
     artboard: 'Changed artboards',
     style: 'Changed styles',
     svg: 'Imported SVG',
+    diagram: 'Drew a diagram',
+    tidy: 'Tidied a diagram',
     apply: 'Changed the design',
   },
 }

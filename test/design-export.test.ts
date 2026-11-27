@@ -506,12 +506,27 @@ test('designImage: svg comes back as export writes it, cleaned, with its notes, 
   )
   const out = folder()
   const deps = await inMemory(file)
-  const img = await designImage({ format: 'svg', artboard: 'Back' }, deps)
+  // every way a file gets written, counted while designImage runs (and shown to count by an export after it)
+  const writes: string[] = []
+  const real = { writeFile: fs.promises.writeFile, rename: fs.promises.rename, mkdir: fs.promises.mkdir, writeFileSync: fs.writeFileSync }
+  fs.promises.writeFile = ((p: unknown, ...rest: unknown[]) => (writes.push(String(p)), (real.writeFile as (...a: unknown[]) => unknown)(p, ...rest))) as typeof fs.promises.writeFile
+  fs.promises.rename = ((a: unknown, ...rest: unknown[]) => (writes.push(String(a)), (real.rename as (...x: unknown[]) => unknown)(a, ...rest))) as typeof fs.promises.rename
+  fs.promises.mkdir = ((p: unknown, ...rest: unknown[]) => (writes.push(String(p)), (real.mkdir as (...a: unknown[]) => unknown)(p, ...rest))) as typeof fs.promises.mkdir
+  fs.writeFileSync = ((p: unknown, ...rest: unknown[]) => (writes.push(String(p)), (real.writeFileSync as (...a: unknown[]) => unknown)(p, ...rest))) as typeof fs.writeFileSync
+  let img: Awaited<ReturnType<typeof designImage>>
+  let r: Awaited<ReturnType<typeof exportDesign>>
+  try {
+    img = await designImage({ format: 'svg', artboard: 'Back' }, deps)
+    assert.deepEqual(writes, [], 'nothing written')
+    // the same bytes an export of that artboard writes (and the spy sees an export write)
+    r = await exportDesign(path.join(out, 'Card.gdesign'), { format: 'svg', artboard: 'Back' }, await inMemory(file))
+    assert.ok(writes.length > 0, 'the spy sees writes')
+  } finally {
+    Object.assign(fs.promises, { writeFile: real.writeFile, rename: real.rename, mkdir: real.mkdir })
+    fs.writeFileSync = real.writeFileSync
+  }
   assert.deepEqual(img.artboard, { id: file.design.artboards[1].id, name: 'Back' })
   assert.deepEqual([img.width, img.height], [400, 300])
-  assert.deepEqual(fs.readdirSync(out), [], 'nothing written')
-  // the same bytes an export of that artboard writes
-  const r = await exportDesign(path.join(out, 'Card.gdesign'), { format: 'svg', artboard: 'Back' }, await inMemory(file))
   assert.equal(img.data, fs.readFileSync(r.files[0], 'utf8'))
   // the first artboard by default, with the notes an export gives for it
   const first = await designImage({ format: 'svg' }, deps)
