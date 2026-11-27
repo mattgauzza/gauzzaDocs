@@ -519,6 +519,36 @@ const api: Record<string, (...a: any[]) => unknown> = {
   /** One artboard drawn for a document, as an export draws it, written nowhere (designImage in core/design/export.ts). */
   designImage: (file: string, artboard: string | undefined, format: 'svg' | 'png') =>
     designImage({ format, artboard }, { run: op => readDesign(file, op), rasterize: drawDesign }),
+  /**
+   * File > Download for a design: every artboard as SVG or PNG, drawn by the export op (in the open editor, unsaved
+   * changes and all) and written by exportDesign. One artboard asks where to save the file; several ask for a folder,
+   * and each is saved there as `<design> <artboard>.<ext>`. Null when the person cancels.
+   */
+  designDownload: async (file: string, format: 'svg' | 'png') => {
+    if (format !== 'svg' && format !== 'png') throw new Error('The format must be svg or png.')
+    const run = (op: AgentOp) => readDesign(file, op)
+    const { artboards } = (await run({ op: 'export', format, plan: true })) as { artboards: unknown[] }
+    let out: string
+    if (artboards.length === 1) {
+      const r = await dialog.showSaveDialog(win!, {
+        defaultPath: path.join(path.dirname(file), `${stem(file)}.${format}`),
+        filters: [{ name: format.toUpperCase(), extensions: [format] }]
+      })
+      if (r.canceled || !r.filePath) return null
+      out = r.filePath
+    } else {
+      const r = await dialog.showOpenDialog(win!, {
+        title: `Choose a folder for the ${artboards.length} artboards`,
+        buttonLabel: 'Save here',
+        defaultPath: path.dirname(file),
+        properties: ['openDirectory', 'createDirectory']
+      })
+      if (r.canceled || !r.filePaths[0]) return null
+      out = r.filePaths[0] + path.sep
+    }
+    const r = await exportDesign(file, { format, out }, { run, rasterize: drawDesign })
+    return { files: r.files, downgrades: r.downgrades, leftOut: r.leftOut.length }
+  },
   /** ctx: who changed it since the last save ({ authors, summary }); the person when the window does not say. */
   save: (file: string, payload: FilePayload, ctx?: WriteContext) => work<number>('saveFile', [file, payload, ctx ?? person()]),
   /** preset: a new design's size (a PRESETS name or <w>x<h>). */

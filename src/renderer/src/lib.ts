@@ -137,6 +137,9 @@ export const api = {
   /** A design's artboards, from its open tab when it's open (Insert > Design). */
   designArtboards: (path: string) => window.gd.call<DesignArtboard[]>('designArtboards', path),
   /** One artboard (the first when left out) drawn for a document as an export draws it: SVG text or PNG bytes at 2x. */
+  /** File > Download for a design: saves every artboard as SVG or PNG where the person picks (null when they cancel). */
+  designDownload: (path: string, format: 'svg' | 'png') =>
+    window.gd.call<{ files: string[]; downgrades: string[]; leftOut: number } | null>('designDownload', path, format),
   designImage: (path: string, artboard: string | undefined, format: 'svg' | 'png') =>
     window.gd.call<DesignImage>('designImage', path, artboard, format),
   updateReady: () => window.gd.call<string>('updateReady'),

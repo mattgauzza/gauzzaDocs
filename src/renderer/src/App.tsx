@@ -869,11 +869,25 @@ export default function App() {
     }
   }
   const exportAs = async (t: Tab, format: string) => {
+    if (t.kind === 'design') return downloadDesign(t, format as 'svg' | 'png')
     const hh = handles.current.get(t.id)
     if (!hh) return
     const payload = await (hh.peekPayload ?? hh.getPayload)()
     const out = await api.exportFile(t.path, payload, format, format === 'pdf' ? await hh.getPrintHtml?.() : undefined)
     if (out) say(`Saved ${baseName(out)}`)
+  }
+
+  /** A design's artboards as SVG or PNG files, with what the format can't hold and any layers left out. */
+  const downloadDesign = async (t: Tab, format: 'svg' | 'png') => {
+    try {
+      const r = await api.designDownload(t.path, format)
+      if (!r) return
+      const parts = [r.files.length === 1 ? `Saved ${baseName(r.files[0])}.` : `Saved ${r.files.length} files.`]
+      if (r.leftOut) parts.push(`${r.leftOut} ${r.leftOut === 1 ? 'layer was' : 'layers were'} left out.`)
+      say([...parts, ...r.downgrades].join(' '))
+    } catch (e) {
+      say((e as Error)?.message || String(e))
+    }
   }
 
   // ---------- keyboard ----------
@@ -927,7 +941,7 @@ export default function App() {
       pdf: [],
       text: [],
       slides: [['PowerPoint (.pptx)', 'pptx'], ['PDF (.pdf)', 'pdf'], ['Markdown outline (.md)', 'md']], // slides
-      design: [] // SVG, PNG and PDF exports come with design export
+      design: [['SVG (.svg)', 'svg'], ['PNG (.png)', 'png']]
     }
     const sep: MenuItem = { label: '', sep: true }
     const file: MenuItem[] = [
