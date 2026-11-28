@@ -16,7 +16,7 @@ const FILES_DIR = path.join(HISTORY_DIR, 'files')
 export const DEFAULT_EXCLUDE: string[] = DEFAULT_EXCLUDE_LIST
 const EXCLUDED_DIRS = new Set(['.ssh', '.aws', '.gnupg', '.azure'])
 /** Already compressed formats are stored as they are. */
-const STORED_AS_IS = new Set(['docx', 'xlsx', 'pptx', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'zip'])
+const STORED_AS_IS = new Set(['docx', 'xlsx', 'pptx', 'gdesign', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'zip'])
 
 const LOCK_RETRY_MS = 50
 const LOCK_WAIT_MS = 10_000

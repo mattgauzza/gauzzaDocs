@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { runOffline } from '../core/ops'
-import { readServer } from '../core/paths'
+import { readServer, samePath } from '../core/paths'
 import { describeOps } from '../shared/history/describe'
 import { kindOf } from '../shared/kinds'
 import type { AgentOp } from '../shared/types'
@@ -31,6 +31,29 @@ export const appRunning = async () => (await call('ping')) !== null
 
 export interface RunOpts { live?: boolean; offline?: boolean; agent?: string; focus?: boolean }
 
+export const OPEN_IN_APP = 'This design is open in gauzzaDocs. Edit it there, or close it first.'
+
+// RENDER_NEEDS_APP: what drawing a design to pixels (PNG export, gdocs look, thumbnails) says when the app isn't running
+export { RENDER_NEEDS_APP } from '../core/design/export'
+
+/**
+ * A design open in the app takes every op in its editor: one made on disk would land under the editor's undo history,
+ * and the app would never reload it. With the app not running, editing on disk is fine.
+ */
+export async function refuseOpenDesign(p: string): Promise<void> {
+  if (kindOf(p) !== 'design') return
+  let open: boolean
+  try {
+    open = !!((await call('isOpen', { path: p })) as { open?: boolean } | null)?.open
+  } catch (e) {
+    // an app from before isOpen: its tab list says the same
+    if (!/^Unknown method/.test((e as Error).message)) throw e
+    const tabs = (await call('list')) as { path: string }[] | null
+    open = !!tabs?.some(t => samePath(t.path, p))
+  }
+  if (open) throw new Error(OPEN_IN_APP)
+}
+
 /**
  * Runs an op on a file: in the app when it is running and the file is open there (or --live asks to open it),
  * otherwise directly on disk. Returns the op's result and whether it ran live.
@@ -38,7 +61,8 @@ export interface RunOpts { live?: boolean; offline?: boolean; agent?: string; fo
 export async function runOp(file: string, op: AgentOp, opts: RunOpts = {}): Promise<{ result: unknown; live: boolean }> {
   const p = path.resolve(file)
   if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
-  if (!opts.offline) {
+  if (opts.offline) await refuseOpenDesign(p)
+  else {
     const r = (await call('op', {
       path: p,
       op,
@@ -60,6 +84,8 @@ export interface Ctx {
   run: (file: string, op: AgentOp, cmdOpts?: Record<string, unknown>) => Promise<unknown>
   /** Reads a value that may be "-" (standard input) or "@file" (contents of a file). */
   input: (v: string | undefined) => string
+  /** Who is running the command, for the app: --agent, else GDOCS_AGENT, else "Agent". */
+  agent: () => string
 }
 
 /** Options every editing command takes. */

@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
-import { createFile, loadFile } from '../core/files'
+import { DEFAULT_DESIGN_PRESET, createFile, loadFile } from '../core/files'
+import { PRESETS, newDesign } from '../shared/design/model'
 import { HOME, freeName, getRecent, getSettings, readServer } from '../core/paths'
 import { DOC_ID, docId } from '../shared/docId'
 import { resolveDocId } from './docIds'
@@ -14,7 +15,7 @@ import * as plugins from '../core/plugins'
 import { checkPlugin, scaffold } from '../../scripts/plugin-check.mjs'
 import { type Kind, kindOf, languageOf } from '../shared/kinds'
 import type { AgentOp } from '../shared/types'
-import { type Ctx, call, liveOptions, runOp } from './common'
+import { type Ctx, RENDER_NEEDS_APP, call, liveOptions, runOp } from './common'
 import { registerCommentCommands } from './comments'
 import { registerSubscribeCommands } from './subscribe'
 import { registerProjectCommands } from './projects'
@@ -22,6 +23,7 @@ import { registerDocCommands } from './doc'
 import { registerPdfCommands } from './pdf'
 import { registerSheetCommands } from './sheet'
 import { registerSlidesCommands } from './slides' // slides
+import { registerDesignCommands } from './design'
 import { registerHistoryCommands } from './history'
 import { flushHistory, listHistoryPaths } from '../core/history'
 
@@ -29,7 +31,7 @@ const program = new Command()
 program
   .name('gdocs')
   .description(
-    'gauzzaDocs: read and edit documents, spreadsheets, presentations, PDFs and text files, live in the app or on disk.\n\n' +
+    'gauzzaDocs: read and edit documents, spreadsheets, presentations, designs, PDFs and text files, live in the app or on disk.\n\n' +
       'When the app is running and a file is open in it, edits go into the open editor and appear as you watch\n' +
       '(undoable, saved by the app). Otherwise the file on disk is edited directly. --live opens the file first.\n' +
       'Before editing, run `gdocs instructions <file>`: it prints standing instructions (global and per file).\n' +
@@ -56,6 +58,7 @@ const ctx: Ctx = {
   json,
   out,
   input,
+  agent: () => program.opts().agent || process.env.GDOCS_AGENT || 'Agent',
   run: async (file, op, o = {}) => {
     const r = await runOp(file, op, { live: !!o.live, offline: !!o.offline, focus: o.focus !== false, agent: program.opts().agent })
     if (!json() && process.stderr.isTTY) process.stderr.write(r.live ? '(live in gauzzaDocs)\n' : '')
@@ -93,17 +96,21 @@ program
 
 program
   .command('new <kind> [name]')
-  .description('create a new file: doc | sheet | slides | text (in the docs folder, or --dir). Opens it if the app is running')
+  .description('create a new file: doc | sheet | slides | design | text (in the docs folder, or --dir). Opens it if the app is running')
   .option('--ext <ext>', 'file extension, e.g. md, docx, csv, py')
   .option('--dir <dir>', 'folder to create it in (default: the app\'s docs folder)')
+  .option('--size <size>', `a design's size: ${Object.keys(PRESETS).join(', ')} or <w>x<h> (default ${DEFAULT_DESIGN_PRESET})`)
   .option('--no-open', 'do not open it in the app')
   .action(async (kind: Kind, name: string | undefined, o) => {
-    if (!['doc', 'sheet', 'slides', 'text'].includes(kind)) throw new Error('kind must be doc, sheet, slides or text')
+    if (!['doc', 'sheet', 'slides', 'design', 'text'].includes(kind)) throw new Error('kind must be doc, sheet, slides, design or text')
+    if (o.size !== undefined && kind !== 'design') throw new Error('Only a design takes --size')
+    if (kind === 'design' && o.ext && o.ext.replace(/^\./, '').toLowerCase() !== 'gdesign') throw new Error('A design is always a .gdesign file')
     const s = getSettings()
-    const ext = o.ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
-    const stemName = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
+    const ext = o.ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx', design: 'gdesign' }[kind]
+    const stemName = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation', design: 'Untitled design' }[kind]
+    if (kind === 'design') newDesign(o.size || DEFAULT_DESIGN_PRESET) // an unknown size fails here, before any file is named
     const file = freeName(path.resolve(o.dir || s.docsDir), stemName, ext)
-    await createFile(file, asAgent())
+    await createFile(file, asAgent(), kind === 'design' ? o.size : undefined)
     if (o.open) await call('open', { path: file }).catch(() => null)
     out({ path: file }, () => file)
   })
@@ -117,11 +124,13 @@ program
 program
   .command('look <file>')
   .alias('see')
-  .description('see the file as the app shows it: saves screenshots (one per slide, or per screen of a doc, sheet, PDF or code) as PNGs for you to open')
-  .option('--from <n>', 'first slide or screen to show', '1')
+  .description(
+    'see the file as the app shows it: saves screenshots (one per slide or design artboard, or per screen of a doc, sheet, PDF or code) as PNGs for you to open'
+  )
+  .option('--from <n>', 'first slide, artboard or screen to show', '1')
   .option('--count <n>', 'how many to show', '3')
-  .option('--all', 'every slide or screen (up to 30)')
-  .option('--width <px>', 'window width (default 1200, slides 1280)')
+  .option('--all', 'every slide, artboard or screen (up to 30)')
+  .option('--width <px>', 'window width (default 1200, slides 1280; designs show each artboard at up to 1600 px)')
   .option('--height <px>', 'window height (default 1400, slides 720)')
   .option('--theme <theme>', 'light or dark (default: the app theme)')
   .option('--out <dir>', 'folder for the images (default: a gauzzadocs-look folder in temp)')
@@ -140,7 +149,10 @@ program
       out: o.out,
       agent: { name: program.opts().agent || process.env.GDOCS_AGENT || 'Agent' }
     })) as { unit: string; total: number; images: { n: number; file: string; width: number; height: number }[]; notes?: string[] } | null
-    if (!r) throw new Error('gdocs look needs gauzzaDocs running, since it pictures the file the way the app shows it. Start the app and try again.')
+    if (!r) {
+      if (kindOf(p) === 'design') throw new Error(RENDER_NEEDS_APP)
+      throw new Error('gdocs look needs gauzzaDocs running, since it pictures the file the way the app shows it. Start the app and try again.')
+    }
     out(r, () => {
       const last = r.images.at(-1)?.n || 0
       const more = last < r.total ? `\n${r.total - last} more: gdocs look ${file} --from ${last + 1}` : ''
@@ -163,7 +175,7 @@ program
 liveOptions(
   program
     .command('read <file>')
-    .description('print a file\'s content: docs as markdown (or --format html|text), sheets as CSV, slides as Markdown, PDFs as text')
+    .description('print a file\'s content: docs as markdown (or --format html|text), sheets as CSV, slides as Markdown, PDFs as text, designs as layer lines')
     .option('--format <format>', 'md | html | text (docs); csv | json | formulas (sheets); text | json (pdf)')
     .option('--lines <range>', 'text files: only these lines, e.g. 10-40')
     .option('--range <range>', 'sheets: only this range, e.g. A1:D20')
@@ -175,6 +187,7 @@ liveOptions(
     const op: AgentOp = { op: 'read' }
     if (o.format) op.format = o.format
     else if (kind === 'sheet') op.format = 'csv'
+    else if (kind === 'design') op.format = 'text' // the lines gdocs design read prints
     if (o.lines) op.lines = o.lines
     if (o.range) op.range = o.range
     if (o.sheet) op.sheet = o.sheet
@@ -469,6 +482,7 @@ registerDocCommands(program, ctx)
 registerSheetCommands(program, ctx)
 registerPdfCommands(program, ctx, agentName)
 registerSlidesCommands(program, ctx) // slides
+registerDesignCommands(program, ctx)
 registerHistoryCommands(program, ctx, agentName)
 
 // Always node-style argv: installed copies run this under the app's Electron runtime (ELECTRON_RUN_AS_NODE),

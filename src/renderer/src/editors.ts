@@ -9,5 +9,6 @@ export const EDITORS: Record<Kind, React.ComponentType<EditorProps>> = {
   sheet: lazy(() => import('./sheet/SheetEditor')),
   pdf: lazy(() => import('./pdf/PdfEditor')),
   text: lazy(() => import('./text/TextEditor')),
-  slides: lazy(() => import('./slides/SlidesEditor'))
+  slides: lazy(() => import('./slides/SlidesEditor')),
+  design: lazy(() => import('./design/DesignEditor'))
 }

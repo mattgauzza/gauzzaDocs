@@ -74,14 +74,14 @@ export function detectAgents(opts: { checkPath?: boolean } = {}): AgentTarget[] 
 export function skillText(version: string) {
   return `---
 name: ${SKILL_NAME}
-description: Use when reading, writing or editing the person's documents, spreadsheets, presentations, PDFs, Markdown or text files with gauzzaDocs (the gdocs command), when they say a file is open in gauzzaDocs, ask you to work on a doc with them, or mention comments in a doc. Edits land live in the open editor while they watch, and their comments and edits stream back to you.
+description: Use when reading, writing or editing the person's documents, spreadsheets, presentations, designs (.gdesign), diagrams, PDFs, Markdown or text files with gauzzaDocs (the gdocs command), when they say a file is open in gauzzaDocs, ask you to work on a doc with them, or mention comments in a doc. Edits land live in the open editor while they watch, and their comments and edits stream back to you.
 ---
 <!-- ${MARKER} ${version}. Reinstalled by the app on update; edit a copy under a different name to customise. -->
 
 # gauzzaDocs
 
 gauzzaDocs is the person's local editor for documents (.docx .md .html), spreadsheets (.xlsx .csv .tsv), presentations
-(.pptx), PDFs and any text or code file. The \`gdocs\` command (also \`gauzzadocs\`, if \`gdocs\` is taken on this machine) reads and edits
+(.pptx), designs and diagrams (.gdesign), PDFs and any text or code file. The \`gdocs\` command (also \`gauzzadocs\`, if \`gdocs\` is taken on this machine) reads and edits
 them. When the app is running and the file is open, your edits go into the open editor: the person watches them
 happen and can undo them. Otherwise the file on disk is edited.
 
@@ -90,7 +90,8 @@ happen and can undo them. Otherwise the file on disk is edited.
 1. \`gdocs instructions <file>\` prints standing instructions from the person (for every file and for this file).
    Follow them. They may tell you to look up their writing voice before you write in their name.
 2. \`gdocs status\` shows whether the app is running and which files are open. Each file has a short ID (doc:k3x9q2) you can use instead of its path in any command.
-3. Read with \`gdocs read <file>\`: documents and presentations come back as Markdown, spreadsheets as CSV, PDFs as text.
+3. Read with \`gdocs read <file>\`: documents and presentations come back as Markdown, spreadsheets as CSV, PDFs as text
+   and designs as one line per layer.
    \`--json\` on any command gives machine-readable output; errors exit non-zero with {"error": "..."}.
 
 ## Editing
@@ -140,10 +141,85 @@ so pictures, shapes and positions the person set by hand stay put. Files made in
 SmartArt or animations open with those parts simplified; the first save keeps the untouched original beside it as
 <name>.original.pptx.
 
+## Designs (.gdesign)
+
+A design is vector art in layers on one or more artboards: a social post, a logo, a diagram for a document.
+\`gdocs new design post --size instagram --dir .\` makes post.gdesign in this folder (without --dir it goes in the
+docs folder; it prints the path). Sizes: instagram, portrait, story, linkedin, x, youtube, logo (transparent), letter
+(a page, for diagrams in documents) or <w>x<h>. Commands that change layers print their ids. Name a layer with
+--layer and its id, a Group/Child path or its name (when no other layer has it). --artboard picks another artboard.
+
+Build in layers with names. Name every layer you add, so you and the person can find it again, then read the layers
+back to check sizes and places:
+
+\`\`\`
+gdocs design add post.gdesign --type rect --name Background --w 1080 --h 1080 --fill "#0b1f3a"
+gdocs design add post.gdesign --type text --name Headline --text "Launch day" --x 80 --y 120 --size 96 --fill "#ffffff"
+gdocs design add post.gdesign --type text --name Subhead --text "Out now" --x 80 --y 260 --size 48 --fill "#ffffff"
+gdocs design set post.gdesign --layer Headline --y 140
+gdocs design read post.gdesign
+\`\`\`
+
+Place pictures from files with --image (PNG, JPEG, GIF or WebP; up to 50 megapixels). It comes in at its own size
+unless you give --w or --h: \`gdocs design add post.gdesign --type image --name Photo --image photo.jpg --w 1080\`.
+
+Group related layers, so they move and line up together:
+
+\`\`\`
+gdocs design group post.gdesign --layers Headline,Subhead --name Title
+gdocs design align post.gdesign --layers Title --edge center --to-artboard
+\`\`\`
+
+Use styles for brand colors. Add each color once and paint with style:<name>, so changing the style recolors every
+layer that uses it:
+
+\`\`\`
+gdocs design style post.gdesign --color Brand=#1a73e8
+gdocs design set post.gdesign --layer Background --fill style:Brand
+\`\`\`
+
+Send batches with apply. Several changes in one JSON array land as one step the person can undo, and nothing changes
+if one fails. \`gdocs ops\` lists every op:
+
+\`\`\`
+echo '[{"op":"add","type":"rect","props":{"name":"Card","x":80,"y":600,"w":920,"h":320,"fill":"#ffffff"}},
+  {"op":"move","layer":"Title","to":"front"}]' | gdocs design apply post.gdesign -
+\`\`\`
+
+Draw diagrams with diagram, not by hand. Give the nodes, boxes and links one per line; it sizes the boxes, lays them
+out and routes the links. Run it again with the same name to change the diagram. After the person moves nodes by hand,
+\`diagram tidy\` lays the rest out around them:
+
+\`\`\`
+gdocs new design "Signup flow" --size letter --dir .
+gdocs design diagram "Signup flow.gdesign" --name Signup - <<'EOF'
+direction down
+node form: Sign up form
+node check: Check email
+node done: Welcome
+form -> check
+check -> done: verified
+EOF
+gdocs design diagram tidy "Signup flow.gdesign" --name Signup
+\`\`\`
+
+Import logos with svg instead of redrawing them. It cleans the SVG first (scripts, outside links) and says what it
+removed:
+
+\`\`\`
+gdocs design svg post.gdesign --name Logo @logo.svg --x 900 --y 40
+\`\`\`
+
+Check the result with gdocs look: \`gdocs look post.gdesign\` shows the artboards the way the app draws them. Open the
+images and fix text that runs out of its box, layers that overlap by mistake and anything past the edge, then look
+again. It needs the app running. \`gdocs design export post.gdesign\` saves each artboard as SVG beside the design
+(\`--artboard <name>\` for one, \`--out <folder>\` to put them somewhere else). With \`--format png --scale 2\` it saves
+PNGs instead, which also needs the app running.
+
 ## Seeing the document
 
-\`gdocs look <file>\` saves screenshots of the file the way the app shows it and prints their paths: one per slide,
-or one per screen of a document, sheet, PDF or code file. Open them with your image tool (Read in Claude Code,
+\`gdocs look <file>\` saves screenshots of the file the way the app shows it and prints their paths: one per slide or
+design artboard, or one per screen of a document, sheet, PDF or code file. Open them with your image tool (Read in Claude Code,
 view_image in Codex) to check how it reads and looks: headings, spacing, tables, slide layout, anything cut off or
 crowded. Do it after big or visual changes and before you tell the person a document is done, not after every small
 edit. \`--from 4 --count 2\` picks screens, \`--all\` takes up to 30. It needs the app running, and for an open file

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import type { CommentAnchor } from '../shared/types'
 import { HOME, norm, samePath } from './paths'
 
 /**
@@ -17,7 +18,7 @@ export interface Reply {
 }
 export interface Thread extends Reply {
   quote?: string // the text the comment is about, when something was selected
-  anchor?: { line?: number; cell?: string; page?: number } // where, when the editor knows
+  anchor?: CommentAnchor // where, when the editor knows (a design's artboard and layer, say)
   resolved?: boolean
   replies: Reply[]
 }

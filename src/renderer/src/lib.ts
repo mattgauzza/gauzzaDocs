@@ -1,12 +1,13 @@
-import type { Author, HistoryVersion, InstalledPlugin, OpenFile, RecentFile, Settings, FilePayload } from '../../shared/types'
+import type { Author, CommentAnchor, HistoryVersion, InstalledPlugin, OpenFile, RecentFile, Settings, FilePayload } from '../../shared/types'
 import type { Kind } from '../../shared/kinds'
 import type { Hunk } from '../../shared/diff'
+import type { ElkGraph, FontRef } from '../../shared/design/types'
 
 /** Mirrors src/core/comments.ts (kept here so the window does not import Node code). */
 export interface Reply { id: string; author: string; by: 'user' | 'agent'; text: string; created: number }
 export interface Thread extends Reply {
   quote?: string
-  anchor?: { line?: number; cell?: string; page?: number }
+  anchor?: CommentAnchor
   resolved?: boolean
   replies: Reply[]
 }
@@ -44,13 +45,25 @@ export type HistoryDiff = { hunks: Hunk[] } | { tooLarge: true } | { tooMany: tr
 export interface HistoryStats { bytes: number; capBytes: number; overCapBytes?: number; paused?: string; dir?: string }
 /** Who changed a file since its last save, and what the agents did (a save's version authors and summary). */
 export interface SaveContext { authors: Author[]; summary?: string }
+/** A design's artboard, as the design op `read` lists it. */
+export interface DesignArtboard { id: string; name: string; width: number; height: number }
+/** Mirrors core/design/export.ts DesignImage: one artboard drawn for a document, written nowhere. */
+export interface DesignImage {
+  data: string | Uint8Array
+  artboard: { id: string; name: string }
+  width: number
+  height: number
+  downgrades: string[]
+  leftOut: { artboard: string; layer: string; name: string; reason: string }[]
+}
 
 /** Typed wrappers over window.gd.call (main process API in src/main/index.ts). */
 export const api = {
   load: (path: string) => window.gd.call<OpenFile>('load', path),
   /** ctx: who changed it since the last save; main credits the person when it is left out. */
   save: (path: string, payload: FilePayload, ctx?: SaveContext) => window.gd.call<number>('save', path, payload, ctx),
-  newFile: (kind: Kind, ext?: string, dir?: string) => window.gd.call<string>('newFile', kind, ext, dir),
+  /** preset: a new design's size (a PRESETS name, shared/design/model.ts). */
+  newFile: (kind: Kind, ext?: string, dir?: string, preset?: string) => window.gd.call<string>('newFile', kind, ext, dir, preset),
   projectsList: () => window.gd.call<Project[]>('projectsList'),
   projectsAdd: (dir: string, name?: string) => window.gd.call<Project>('projectsAdd', dir, name),
   projectsRemove: (dir: string) => window.gd.call('projectsRemove', dir),
@@ -110,6 +123,25 @@ export const api = {
     window.gd.call<{ matches: { line: number; text: string }[]; truncated: boolean }>('largeFind', path, q, opts),
   largeForget: (path: string) => window.gd.call('largeForget', path),
   systemFont: (name: string) => window.gd.call<Uint8Array | null>('systemFont', name),
+  // ---------- designs (worker jobs: the window can't scan installed fonts or run ELK) ----------
+  /** The installed face closest to a design's font reference, or null when none of that family is installed. */
+  designFontBytes: (ref: FontRef) => window.gd.call<Uint8Array | null>('designFontBytes', ref),
+  /** The fallback font's bytes (Liberation Sans Regular). */
+  designFallbackFont: () => window.gd.call<Uint8Array>('designFallbackFont'),
+  /** A diagram's graph laid out by ELK, for the design ops' `services.layout`. */
+  designLayout: (graph: ElkGraph) => window.gd.call<ElkGraph>('designLayout', graph),
+  /** Every installed font face by family, weight, style and PostScript name (the font picker). */
+  fontFaces: () => window.gd.call<FontRef[]>('fontFaces'),
+  /** A design's thumbnail as a PNG data URL for its Home card, or null (none, or stale) to show the kind's icon. */
+  designThumbnail: (path: string) => window.gd.call<string | null>('designThumbnail', path),
+  /** A design's artboards, from its open tab when it's open (Insert > Design). */
+  designArtboards: (path: string) => window.gd.call<DesignArtboard[]>('designArtboards', path),
+  /** One artboard (the first when left out) drawn for a document as an export draws it: SVG text or PNG bytes at 2x. */
+  /** File > Download for a design: saves every artboard as SVG or PNG where the person picks (null when they cancel). */
+  designDownload: (path: string, format: 'svg' | 'png') =>
+    window.gd.call<{ files: string[]; downgrades: string[]; leftOut: number } | null>('designDownload', path, format),
+  designImage: (path: string, artboard: string | undefined, format: 'svg' | 'png') =>
+    window.gd.call<DesignImage>('designImage', path, artboard, format),
   updateReady: () => window.gd.call<string>('updateReady'),
   installUpdate: () => window.gd.call('installUpdate'),
   openDefaultApps: () => window.gd.call('openDefaultApps'),

@@ -1,6 +1,8 @@
 import { parentPort } from 'node:worker_threads'
-import { createFile, loadFile, saveFile } from '../core/files'
-import { systemFontBytes } from '../core/systemFonts'
+import { createFile, designThumbnail, loadFile, saveFile } from '../core/files'
+import { fontFaceBytes, listFontFaces, systemFontBytes } from '../core/systemFonts'
+import { fallbackFontBytes } from '../core/design/fallbackFont'
+import { layoutDiagram } from '../core/design/layout'
 import { findInFile, forgetIndex, indexFile, readLines } from '../core/large'
 import { runOffline } from '../core/ops'
 import * as plugins from '../core/plugins'
@@ -26,7 +28,17 @@ const fns: Record<string, Fn> = {
   // ctx: who made the change ({ authors, summary }), for the version this save keeps.
   saveFile: ([file, payload, ctx]) => saveFile(file, payload, ctx),
   systemFont: ([name]) => systemFontBytes(name),
-  createFile: ([file, ctx]) => createFile(file, ctx),
+  // Designs in the window: installed font faces by family, weight and style (the first call scans every font file, so
+  // only ever here), the fallback font, and diagram layout (ELK runs generated code the window's policy refuses).
+  designFontBytes: ([ref]) => fontFaceBytes(ref),
+  designFallbackFont: () => fallbackFontBytes(),
+  designLayout: ([graph]) => layoutDiagram(graph),
+  // A design's card on the Home screen: its thumbnail as a data URL, or null for the kind's icon.
+  designThumbnail: ([file]) => designThumbnail(file),
+  // The font picker: every face by family, weight, style and PostScript name (where its file is stays here).
+  fontFaces: async () => (await listFontFaces()).map(({ family, weight, style, postscript }) => ({ family, weight, style, postscript })),
+  // preset: a new design's size (a PRESETS name or <w>x<h>); other kinds ignore it
+  createFile: ([file, ctx, preset]) => createFile(file, ctx, preset),
   setDocInstructions: ([file, text, ctx]) => setDocInstructions(file, text, ctx),
   runOffline: ([file, op, ctx]) => runOffline(file, op, ctx),
   largeIndex: async ([file], progress) => {

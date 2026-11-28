@@ -8,8 +8,9 @@ import type { FilePayload } from '../shared/types'
 
 /**
  * `gdocs look`: lets an agent see a file the way the app shows it. A hidden offscreen window runs the same editors
- * (renderer #look, see renderer/src/look/Look.tsx), gets the content, and is captured one slide or screen at a time
- * into PNGs the agent opens with its image tool. The window is reused for a minute and a half, then closed.
+ * (renderer #look, see renderer/src/look/Look.tsx), gets the content, and is captured one slide, design artboard or
+ * screen at a time into PNGs the agent opens with its image tool. PNG export draws designs in the same window. The
+ * window is reused for a minute and a half, then closed.
  */
 export type Ask = (wc: WebContents, channel: string, payload: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>
 
@@ -25,11 +26,13 @@ export interface LookRequest {
   out?: string
 }
 export interface LookImage { n: number; file: string; width: number; height: number }
-export interface LookResult { path: string; unit: 'slide' | 'screen'; total: number; images: LookImage[]; notes: string[] }
+export interface LookResult { path: string; unit: 'slide' | 'screen' | 'artboard'; total: number; images: LookImage[]; notes: string[] }
 
 interface Rect { x: number; y: number; width: number; height: number }
 
 export const LOOK_MAX = 30
+/** The long side a design's artboard is shown at, at most (a smaller one is shown at its own size). */
+const ARTBOARD_SIDE = 1600
 const IDLE_MS = 90_000
 const DIR = path.join(os.tmpdir(), 'gauzzadocs-look')
 
@@ -53,16 +56,17 @@ export function closeLook() {
   w = null
 }
 
-async function windowFor(width: number, height: number, preload: string, load: (w: BrowserWindow) => Promise<void>) {
+/** The hidden window, made (or resized) to `size`; with no size, as it is (made at the default look size). */
+async function windowFor(size: { width: number; height: number } | null, preload: string, load: (w: BrowserWindow) => Promise<void>) {
   clearTimeout(idle)
   if (w && !w.isDestroyed()) {
-    w.setContentSize(width, height)
+    if (size) w.setContentSize(size.width, size.height)
     return w
   }
   w = new BrowserWindow({
     show: false,
-    width,
-    height,
+    width: size?.width ?? 1200,
+    height: size?.height ?? 1400,
     useContentSize: true,
     webPreferences: { preload, sandbox: false, offscreen: true, spellcheck: false, backgroundThrottling: false }
   })
@@ -81,17 +85,17 @@ async function windowFor(width: number, height: number, preload: string, load: (
 
 async function shoot(req: LookRequest, ask: Ask, preload: string, load: (w: BrowserWindow) => Promise<void>): Promise<LookResult> {
   const slides = req.kind === 'slides'
-  // Slides are 13.333 x 7.5 in, which is 1280 x 720 at 96 dpi. Other files get a tall, page-like window.
-  const width = clamp(req.width ?? (slides ? 1280 : 1200), 480, 2400)
-  const height = clamp(req.height ?? (slides ? 720 : 1400), 360, 3000)
-  const win = await windowFor(width, height, preload, load)
+  // Slides are 13.333 x 7.5 in, which is 1280 x 720 at 96 dpi. A design shows each artboard at its own size up to
+  // ARTBOARD_SIDE on its long side, so the window holds the largest. Other files get a tall, page-like window.
+  const design = req.kind === 'design'
+  const width = design ? ARTBOARD_SIDE : clamp(req.width ?? (slides ? 1280 : 1200), 480, 2400)
+  const height = design ? ARTBOARD_SIDE : clamp(req.height ?? (slides ? 720 : 1400), 360, 3000)
+  const win = await windowFor({ width, height }, preload, load)
   const wc = win.webContents
   try {
-    const prep = (await ask(wc, 'look-prepare', { path: req.path, kind: req.kind, payload: req.payload, theme: req.theme }, 45_000)) as {
-      unit: 'slide' | 'screen'
-      total: number
-      notes?: string[]
-    }
+    const prep = (await ask(
+      wc, 'look-prepare', { path: req.path, kind: req.kind, payload: req.payload, theme: req.theme, side: ARTBOARD_SIDE }, 45_000
+    )) as { unit: LookResult['unit']; total: number; notes?: string[] }
     const total = Math.max(1, prep.total)
     const from = clamp(req.from ?? 1, 1, total)
     const count = clamp(req.count ?? 3, 1, LOOK_MAX)
@@ -120,4 +124,29 @@ async function shoot(req: LookRequest, ask: Ask, preload: string, load: (w: Brow
   } finally {
     idle = setTimeout(closeLook, IDLE_MS)
   }
+}
+
+/**
+ * Draws SVG (a design in raster mode) to PNG bytes at a size in the hidden window, over its 'design-raster' channel
+ * (renderer/src/design/raster.ts), for PNG export. It shares the window and its queue with looks.
+ */
+export function rasterize(
+  svg: string, width: number, height: number, ask: Ask, preload: string, load: (w: BrowserWindow) => Promise<void>
+): Promise<Uint8Array> {
+  const run = queue.then(async () => {
+    let win: BrowserWindow
+    try {
+      win = await windowFor(null, preload, load)
+    } catch (e) {
+      throw new Error(`gauzzaDocs couldn't open a window to draw in: ${(e as Error)?.message || e}`)
+    }
+    try {
+      const bytes = (await ask(win.webContents, 'design-raster', { svg, width, height }, 120_000)) as Uint8Array
+      return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes as ArrayLike<number>)
+    } finally {
+      idle = setTimeout(closeLook, IDLE_MS)
+    }
+  })
+  queue = run.catch(() => undefined)
+  return run
 }

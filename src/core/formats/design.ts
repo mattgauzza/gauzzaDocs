@@ -1,0 +1,328 @@
+// Reading and writing .gdesign files: a zip holding only design.json, assets/<sha256>.<ext> and thumbnail.png.
+import { createHash } from 'node:crypto'
+import type { Design, DesignFile, Layer } from '../../shared/design/types'
+import {
+  MAX_DESIGN_JSON, MAX_ENTRIES, MAX_UNCOMPRESSED, TOO_LARGE_UNCOMPRESSED, TOO_MANY_ENTRIES, assetRefs, pastLimit, pastZipLimit, validateDesign
+} from '../../shared/design/validate'
+
+type JSZipT = InstanceType<typeof import('jszip')>
+/** How many times a zip was handed to JSZip: tests check that a hostile one is refused before it is. */
+export const zipLoads = { calls: 0 }
+const loadZip = async (bytes: Uint8Array): Promise<JSZipT> => {
+  zipLoads.calls++
+  return (await import('jszip')).default.loadAsync(bytes)
+}
+const newZip = async (): Promise<JSZipT> => new (await import('jszip')).default()
+
+// the zip's limits live with the rest in validate.ts, so the ops and saving check exactly what reading checks
+export { MAX_ENTRIES, MAX_UNCOMPRESSED }
+const ASSET_RE = /^assets\/[0-9a-f]{64}\.[a-z0-9]+$/
+const DESIGN ='design.json'
+const THUMB = 'thumbnail.png'
+
+/** `assets/<sha256>.<ext>`, the name an asset is stored under. */
+export function assetName(bytes: Uint8Array, ext: string): string {
+  const clean = ext.replace(/^\./, '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (!clean) throw new Error('An asset needs a file extension')
+  return `assets/${createHash('sha256').update(bytes).digest('hex')}.${clean}`
+}
+
+const NOT_A_ZIP = "This design file is damaged: it can't be read as a zip file."
+const EOCD = 0x06054b50
+const EOCD64 = 0x06064b50
+const EOCD64_LOCATOR = 0x07064b50
+const CENTRAL = 0x02014b50
+
+/**
+ * Counts a zip's entries from its central directory before JSZip sees it, so a zip holding a million entries is
+ * refused without building any of them. Reads the end of central directory record (and the zip64 one when the record
+ * points to it), then walks the directory's headers one by one, never past the record's end or the buffer's. Past
+ * 10,000 entries (declared or walked) it's refused as too many; a record that disagrees with the walk, or that points
+ * outside the file, is refused as damaged. A file with no record at all is left for JSZip to refuse.
+ */
+export function scanZipEntries(bytes: Uint8Array): void {
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const len = bytes.byteLength
+  let eocd = -1
+  // the record is 22 bytes plus a comment of at most 65,535
+  for (let i = len - 22; i >= 0 && i >= len - 22 - 0xffff; i--) {
+    if (v.getUint32(i, true) === EOCD) {
+      eocd = i
+      break
+    }
+  }
+  if (eocd < 0) return
+  let declared = v.getUint16(eocd + 10, true)
+  let size = v.getUint32(eocd + 12, true)
+  let offset = v.getUint32(eocd + 16, true)
+  let end = eocd
+  if (declared === 0xffff || size === 0xffffffff || offset === 0xffffffff) {
+    // zip64: the locator sits just before the record and points to the zip64 record
+    const loc = eocd - 20
+    if (loc < 0 || v.getUint32(loc, true) !== EOCD64_LOCATOR) throw new Error(NOT_A_ZIP)
+    const at = Number(v.getBigUint64(loc + 8, true))
+    if (!(at >= 0 && at + 56 <= loc) || v.getUint32(at, true) !== EOCD64) throw new Error(NOT_A_ZIP)
+    const many = v.getBigUint64(at + 32, true)
+    if (many > BigInt(MAX_ENTRIES)) throw new Error(TOO_MANY_ENTRIES)
+    declared = Number(many)
+    size = Number(v.getBigUint64(at + 40, true))
+    offset = Number(v.getBigUint64(at + 48, true))
+    end = at
+  }
+  if (declared > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
+  // where the directory starts: where the record says, or (bytes added before the zip) right before the record
+  let pos = offset
+  if (!(pos + 4 <= end && v.getUint32(pos, true) === CENTRAL) && end - size >= 0 && end - size + 4 <= end && v.getUint32(end - size, true) === CENTRAL) {
+    pos = end - size
+  }
+  let walked = 0
+  while (pos + 46 <= end && v.getUint32(pos, true) === CENTRAL) {
+    if (++walked > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
+    pos += 46 + v.getUint16(pos + 28, true) + v.getUint16(pos + 30, true) + v.getUint16(pos + 32, true)
+  }
+  if (walked !== declared || pos > end) throw new Error(NOT_A_ZIP)
+}
+
+/**
+ * Loads a zip and refuses it from the central directory alone, before anything is inflated: its entries are counted
+ * first (scanZipEntries), before JSZip builds any. A file that isn't a zip (or is cut short) is refused in plain words,
+ * not the zip library's.
+ */
+async function openChecked(bytes: Uint8Array): Promise<JSZipT> {
+  scanZipEntries(bytes)
+  let zip: JSZipT
+  try {
+    zip = await loadZip(bytes)
+  } catch {
+    throw new Error(NOT_A_ZIP)
+  }
+  const entries = Object.values(zip.files)
+  if (entries.length > MAX_ENTRIES) throw new Error(TOO_MANY_ENTRIES)
+  let total = 0
+  for (const e of entries) {
+    if (e.dir) continue
+    const size = (e as unknown as { _data?: { uncompressedSize?: unknown } })._data?.uncompressedSize
+    if (typeof size !== 'number' || Number.isNaN(size)) throw new Error("This design file can't be read.")
+    // JSZip reads the 32-bit field as a signed number, so a huge declared size shows up negative.
+    total += size < 0 ? size + 2 ** 32 : size
+    if (total > MAX_UNCOMPRESSED) throw new Error(TOO_LARGE_UNCOMPRESSED)
+  }
+  return zip
+}
+
+/** Why a save was refused, in plain words. */
+export const TOO_LARGE_TO_SAVE = 'This design is too large to save (its design.json would be over 64 MB).'
+export const SVG_TOO_LARGE_TO_SAVE = 'This design is too large to save (its SVG layers come to over 16 MB).'
+export const TOO_DEEP_TO_SAVE = 'This design is too deeply nested to save.'
+export const LOOPS_TO_SAVE = "This design can't be saved: part of it contains itself."
+export const ODD_VALUE_TO_SAVE = "This design can't be saved: it holds a value a design file can't store."
+/** A design past a limit reading enforces (`reason` is reading's own words for it, from LIMIT). */
+export const unreadableToSave = (reason: string): string => `This design can't be saved, since it couldn't be opened again: ${reason}.`
+
+/** What made writing design.json fail, as one of the messages above (anything else as it was). */
+function saveFailure(e: unknown): Error {
+  if (e instanceof RangeError) return new Error(/call stack/i.test(e.message) ? TOO_DEEP_TO_SAVE : TOO_LARGE_TO_SAVE)
+  if (e instanceof TypeError) return new Error(/circular/i.test(e.message) ? LOOPS_TO_SAVE : ODD_VALUE_TO_SAVE)
+  return e instanceof Error ? e : new Error(ODD_VALUE_TO_SAVE)
+}
+
+/**
+ * design.json for a design, or a plain error saying why it can't be saved: past a limit reading enforces (pastLimit,
+ * the same check every op makes: reading would refuse it, or drop SVG layers past 16 MB), an asset pointer outside
+ * assets/, values nested too deep to write, or a design.json over 64 MB (reading would refuse it). Nothing is written
+ * that can't be read.
+ */
+function designJson(design: Design): string {
+  // first, and walked without recursion, so groups nested past the limit (or holding themselves) are named as such
+  const past = pastLimit(design)
+  if (past) throw new Error(past.svg ? SVG_TOO_LARGE_TO_SAVE : past.message ?? unreadableToSave(past.reason))
+  try {
+    checkAssetRefs(design)
+  } catch (e) {
+    throw e instanceof RangeError ? saveFailure(e) : e
+  }
+  let json: string
+  try {
+    json = JSON.stringify(design)
+  } catch (e) {
+    throw saveFailure(e)
+  }
+  if (json.length > MAX_DESIGN_JSON || Buffer.byteLength(json, 'utf8') > MAX_DESIGN_JSON) throw new Error(TOO_LARGE_TO_SAVE)
+  return json
+}
+const MAX_THUMBNAIL = 16 * 1024 * 1024
+
+/** Bytes still allowed across everything inflated in one read or write. */
+interface Budget { left: number }
+
+/**
+ * Inflates one entry as a stream and counts the real bytes, so a deflate bomb that declares small sizes is
+ * stopped as soon as it passes `limit` or the shared budget, instead of filling memory first.
+ */
+interface Stream {
+  on(ev: 'data', fn: (c: Uint8Array) => void): Stream
+  on(ev: 'error', fn: (e: Error) => void): Stream
+  on(ev: 'end', fn: () => void): Stream
+  pause(): Stream
+  resume(): Stream
+}
+type Entry = JSZipT['files'][string]
+
+function readEntry(entry: Entry, label: string, limit: number, budget: Budget): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = []
+    let size = 0
+    let done = false
+    const stream = (entry as unknown as { internalStream(t: 'uint8array'): Stream }).internalStream('uint8array')
+    const fail = (err: Error): void => {
+      if (done) return
+      done = true
+      stream.pause()
+      chunks.length = 0
+      reject(err)
+    }
+    stream
+      .on('data', (chunk: Uint8Array) => {
+        if (done) return
+        size += chunk.length
+        budget.left -= chunk.length
+        if (budget.left < 0) return fail(new Error(TOO_LARGE_UNCOMPRESSED))
+        if (size > limit) return fail(new Error(`This design is too large to open (${label} is over ${Math.round(limit / 1048576)} MB)`))
+        chunks.push(chunk)
+      })
+      .on('error', (e: Error) => fail(e))
+      .on('end', () => {
+        if (done) return
+        done = true
+        const out = new Uint8Array(size)
+        let at = 0
+        for (const c of chunks) {
+          out.set(c, at)
+          at += c.length
+        }
+        resolve(out)
+      })
+      .resume()
+  })
+}
+
+/** Every asset path a layer refers to, paired with the layer's id. */
+function layerAssets(l: Layer): string[] {
+  const out: string[] = []
+  if (l.type === 'image' || l.type === 'paint') out.push(l.asset)
+  if (l.type === 'text') for (const r of l.runs) if (r.font.asset !== undefined) out.push(r.font.asset)
+  if (l.type === 'instance') for (const o of Object.values(l.overrides)) if (o.asset !== undefined) out.push(o.asset)
+  return out
+}
+
+function eachLayer(design: Design, fn: (l: Layer) => void): void {
+  const go = (list: Layer[]): void => {
+    for (const l of list) {
+      fn(l)
+      if (l.type === 'group') go(l.children)
+    }
+  }
+  for (const a of design.artboards) go(a.layers)
+  for (const c of design.components) go([c.root])
+}
+
+function checkAssetRefs(design: Design): void {
+  eachLayer(design, l => {
+    for (const a of layerAssets(l)) {
+      if (typeof a !== 'string' || !ASSET_RE.test(a)) throw new Error(`Layer ${l.id} points outside assets/`)
+    }
+  })
+  for (const s of design.styles.text) {
+    const a = s.run.font.asset
+    if (a !== undefined && !ASSET_RE.test(a)) throw new Error(`Style ${s.name} points outside assets/`)
+  }
+}
+
+/**
+ * Reads a .gdesign. design.json goes through validateDesign before anything else sees it, so the design that comes
+ * back holds only what the schema allows (see validate.ts); `notes` lists, in plain words, what was repaired or
+ * dropped on the way (absent when nothing was). A file that can't be repaired throws "This design file is damaged:
+ * <reason>.".
+ */
+export async function readDesignZip(bytes: Uint8Array): Promise<DesignFile & { notes?: string[] }> {
+  const zip = await openChecked(bytes)
+  const entry = zip.files[DESIGN]
+  if (!entry || entry.dir) throw new Error('This is not a design file: design.json is missing')
+  const budget: Budget = { left: MAX_UNCOMPRESSED }
+  const json = await readEntry(entry, 'design.json', MAX_DESIGN_JSON, budget)
+  let raw: unknown
+  try {
+    raw = JSON.parse(Buffer.from(json).toString('utf8'))
+  } catch {
+    throw new Error('This design file is damaged: design.json is not valid JSON')
+  }
+  const notes: string[] = []
+  const design = validateDesign(raw, notes, json.length)
+  checkAssetRefs(design)
+  const assets: Record<string, Uint8Array> = {}
+  for (const name of Object.keys(zip.files)) {
+    if (!ASSET_RE.test(name) || zip.files[name].dir) continue
+    assets[name] = await readEntry(zip.files[name], name, MAX_UNCOMPRESSED, budget)
+  }
+  const t = zip.files[THUMB]
+  const thumbnail = t && !t.dir ? await readEntry(t, THUMB, MAX_THUMBNAIL, budget) : undefined
+  const file: DesignFile & { notes?: string[] } = thumbnail ? { design, assets, thumbnail } : { design, assets }
+  if (notes.length) file.notes = notes
+  return file
+}
+
+/**
+ * The thumbnail a design file holds, for its card on the Home screen. Null when it holds none, when its design.json
+ * says the thumbnail is stale (saved without the app since it was drawn), or when the file can't be read. Only
+ * design.json and thumbnail.png are inflated.
+ */
+export async function readDesignThumbnail(bytes: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    const zip = await openChecked(bytes)
+    const d = zip.files[DESIGN]
+    const t = zip.files[THUMB]
+    if (!d || d.dir || !t || t.dir) return null
+    const budget: Budget = { left: MAX_UNCOMPRESSED }
+    const raw: unknown = JSON.parse(Buffer.from(await readEntry(d, DESIGN, MAX_DESIGN_JSON, budget)).toString('utf8'))
+    if (!raw || typeof raw !== 'object' || (raw as { thumbnailStale?: unknown }).thumbnailStale === true) return null
+    return await readEntry(t, THUMB, MAX_THUMBNAIL, budget)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Writes the file. Assets the design refers to but `f.assets` lacks are copied from `base` (the file as it is on disk),
+ * and assets nothing refers to are dropped, so autosave only has to send design.json and new assets. A design that
+ * couldn't be opened again exactly as it is (past any limit reading enforces, including the zip's own: 10,000 entries
+ * and 1 GB uncompressed) is refused rather than written, and every refusal says what caused it.
+ */
+export async function designZipBytes(f: DesignFile, base?: Uint8Array): Promise<Uint8Array> {
+  const json = designJson(f.design)
+  const refs = assetRefs(f.design)
+  const baseZip = base ? await openChecked(base) : null
+  const budget: Budget = { left: MAX_UNCOMPRESSED }
+  const assets: Record<string, Uint8Array> = {}
+  for (const name of refs) {
+    let data: Uint8Array | undefined = Object.prototype.hasOwnProperty.call(f.assets, name) ? f.assets[name] : undefined
+    if (!data) {
+      const e = baseZip?.files[name]
+      if (e && !e.dir) data = await readEntry(e, name, MAX_UNCOMPRESSED, budget)
+    }
+    if (!data) throw new Error(`Asset ${name} is missing.`)
+    assets[name] = data
+  }
+  let thumb = f.thumbnail
+  if (!thumb && baseZip) {
+    const t = baseZip.files[THUMB]
+    if (t && !t.dir) thumb = await readEntry(t, THUMB, MAX_THUMBNAIL, budget)
+  }
+  // the zip as it would be written, checked as reading checks it before anything is written
+  const past = pastZipLimit(f.design, { assets, thumbnail: thumb?.byteLength }, { json: Buffer.byteLength(json, 'utf8') })
+  if (past) throw new Error(past.message ?? past.reason)
+  const zip = await newZip()
+  zip.file(DESIGN, json, { compression: 'DEFLATE' })
+  for (const name of refs) zip.file(name, assets[name], { compression: 'STORE' })
+  if (thumb) zip.file(THUMB, thumb, { compression: 'DEFLATE' })
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}

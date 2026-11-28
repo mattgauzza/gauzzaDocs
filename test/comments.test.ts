@@ -29,6 +29,20 @@ test('comment threads: add, reply, resolve, reopen on reply, rename, delete', as
   assert.throws(() => c.add(moved, { text: '  ', author: 'x', by: 'user' }))
 })
 
+test("a design comment keeps its anchor, and gdocs comments prints the layer and artboard ids", async () => {
+  const c = await import('../src/core/comments')
+  const { showThread } = await import('../src/cli/comments')
+  const file = path.join(home, 'Poster.gdesign')
+  c.add(file, { text: 'Make the sun smaller', quote: 'Sun', anchor: { artboard: 'ab12cd34', layer: 'ly56ef78' }, author: 'Matt', by: 'user' })
+  const [t] = c.list(file)
+  // what --json prints: the stored thread, anchor included
+  assert.deepEqual(JSON.parse(JSON.stringify(t)).anchor, { artboard: 'ab12cd34', layer: 'ly56ef78' })
+  assert.equal(showThread(t).split('\n')[0], `[${t.id}] Matt on "Sun" (layer ly56ef78 on artboard ab12cd34)`)
+  // comments on other files print as before
+  const plain = c.add(path.join(home, 'Notes.md'), { text: 'Typo', quote: 'teh', author: 'Matt', by: 'user' })
+  assert.equal(showThread(plain).split('\n')[0], `[${plain.id}] Matt on "teh"`)
+})
+
 test('edit diffs: changed lines only, capped', () => {
   assert.deepEqual(diffLines('a\nb\nc', 'a\nB\nc'), { line: 2, removed: ['b'], added: ['B'] })
   assert.deepEqual(diffLines('a\nc', 'a\nb\nc'), { line: 2, removed: [], added: ['b'] })

@@ -7,7 +7,7 @@ import type { HistoryEventType, WriteContext } from '../core/history'
 import {
   HOME, PLUGINS_DIR, addRecent, freeName, getRecent, getSettings, removeRecent, renameRecent, samePath, setSettings
 } from '../core/paths'
-import { wrapHtml } from '../shared/convert'
+import { withPrintPolicy, wrapHtml } from '../shared/convert'
 import { describeOps } from '../shared/history/describe'
 import { type Kind, OPEN_FILTERS, extOf, kindOf, stem } from '../shared/kinds'
 import type { AgentInfo, AgentOp, FilePayload, OpenFile } from '../shared/types'
@@ -20,9 +20,11 @@ import { onWorkerEvent, stopWorker, warmUp, work } from './work'
 import { stopWatching, watchFolders } from './folders'
 import { closeSettings, defaultsPageUrl, defaultsStatus, registerWithWindows } from './winAssoc'
 import { installUpdate, updateReady, watchForUpdates } from './updates'
-import { LOOK_MAX, closeLook, look } from './look'
+import { LOOK_MAX, closeLook, look, rasterize } from './look'
+import { designImage, exportDesign } from '../core/design/export'
 import { personName } from '../core/person'
 import { mentionsName } from '../shared/mentions'
+import { isReadOp } from '../shared/ops/readOps'
 
 app.setAppUserModelId('app.gauzzadocs.desktop')
 protocol.registerSchemesAsPrivileged([
@@ -88,14 +90,33 @@ async function openInWindow(file: string, opts: { focus?: boolean } = {}) {
   return p
 }
 
-/** `ctx` says who created it: its first version is theirs. */
-async function newFilePath(kind: Kind, ext: string | undefined, name: string | undefined, dir: string | undefined, ctx: WriteContext) {
+/** `ctx` says who created it: its first version is theirs. `preset` is a new design's size (a PRESETS name or <w>x<h>). */
+async function newFilePath(kind: Kind, ext: string | undefined, name: string | undefined, dir: string | undefined, ctx: WriteContext, preset?: string) {
   const s = getSettings()
-  const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx' }[kind]
-  const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation' }[kind]
+  const e = ext || { doc: s.newDocFormat, sheet: 'xlsx', text: 'txt', pdf: 'pdf', slides: 'pptx', design: 'gdesign' }[kind]
+  const base = name || { doc: 'Untitled document', sheet: 'Untitled spreadsheet', text: 'Untitled', pdf: 'Untitled', slides: 'Untitled presentation', design: 'Untitled design' }[kind]
   const file = freeName(dir || s.docsDir, base, e)
-  await work('createFile', [file, ctx])
+  await work('createFile', [file, ctx, preset])
   return file
+}
+
+// ---------- the hidden window `gdocs look` and PNG export draw in (see look.ts) ----------
+const lookPreload = path.join(__dirname, '../preload/index.js')
+const loadLook = (w: BrowserWindow) =>
+  process.env.ELECTRON_RENDERER_URL ? w.loadURL(process.env.ELECTRON_RENDERER_URL + '#look') : w.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: 'look' })
+const drawDesign = (svg: string, width: number, height: number) => rasterize(svg, width, height, askWeb, lookPreload, loadLook)
+
+/**
+ * A design op that only looks (isReadOp), for the window itself (Insert > Design): in the design's tab when it's open,
+ * unsaved changes and all, else on disk, as an agent's op would run. It isn't logged, and the tab shows no one reading.
+ */
+async function readDesign(file: string, op: AgentOp): Promise<unknown> {
+  const p = path.resolve(file)
+  if (!isReadOp(op)) throw new Error(`"${op.op}" would change the design`)
+  if (kindOf(p) !== 'design') throw new Error(`${path.basename(p)} isn't a design.`)
+  if (!fs.existsSync(p)) throw new Error(`No such file: ${p}`)
+  if (isOpen(p)) return askWindow('agent', { path: p, op, agent: { name: userName() }, own: true })
+  return work('runOffline', [p, op])
 }
 
 // ---------- the CLI bridge ----------
@@ -110,10 +131,14 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'open':
       return { path: await openInWindow(file, { focus: params.focus !== false }) }
     case 'new': {
-      const created = await newFilePath(String(params.kind || 'doc') as Kind, params.ext as string, params.name as string, undefined, asAgent(agent))
+      const preset = typeof params.preset === 'string' ? params.preset : undefined
+      const created = await newFilePath(String(params.kind || 'doc') as Kind, params.ext as string, params.name as string, undefined, asAgent(agent), preset)
       if (params.open !== false) await openInWindow(created)
       return { path: created }
     }
+    // The CLI asks before an --offline op on a design: one open here takes every op in its editor.
+    case 'isOpen':
+      return { open: isOpen(file) }
     // ---------- comments: agents read and answer the person's comments ----------
     case 'comments':
       return comments.list(file, { all: !!params.all })
@@ -188,9 +213,26 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
           out: params.out as string | undefined
         },
         askWeb,
-        path.join(__dirname, '../preload/index.js'),
-        w => (process.env.ELECTRON_RENDERER_URL ? w.loadURL(process.env.ELECTRON_RENDERER_URL + '#look') : w.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: 'look' }))
+        lookPreload,
+        loadLook
       )
+    }
+    // PNG export of a design: drawn by the op (in the open editor, unsaved changes and all, else from disk), then to
+    // pixels in the hidden look window, and written here. The CLI runs SVG export itself.
+    case 'designExport': {
+      if (!fs.existsSync(file)) throw new Error(`No such file: ${file}`)
+      if (kindOf(file) !== 'design') throw new Error(`${path.basename(file)} isn't a design.`)
+      const opts = {
+        format: String(params.format ?? 'png') as 'svg' | 'png',
+        artboard: params.artboard as string | undefined,
+        scale: params.scale as string | undefined,
+        width: params.width as string | undefined,
+        out: params.out as string | undefined
+      }
+      return exportDesign(file, opts, {
+        run: async op => ((await rpc('op', { ...params, op })) as { result: unknown }).result,
+        rasterize: drawDesign
+      })
     }
     case 'close':
       if (!isOpen(file)) return { ok: true, wasOpen: false }
@@ -198,7 +240,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'op': {
       const op = params.op as AgentOp
       if (!op?.op) throw new Error('missing op')
-      const edits = !READ_ONLY_OPS.has(op.op) && op.op !== 'save' && !op.dryRun // what goes in the work history
+      const edits = !isReadOp(op) && op.op !== 'save' && !op.dryRun // what goes in the work history
       // --live: open it, or bring its tab to the front, so the person can watch the edit happen.
       // (Just opened counts as open: the window's tab list can arrive a moment after the editor is ready.)
       let opened = false
@@ -215,7 +257,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       // The version this edit keeps is credited to the agent.
       const offline = await work('runOffline', [file, op, { ...asAgent(agent), summary: describeOps([op.op], kindOf(file)) }])
       // Other agents hear about edits made on disk too (live edits are diffed by the window instead).
-      if (!READ_ONLY_OPS.has(op.op)) bridge?.emit({ type: 'edit', by: 'agent', author: agent.name, path: file, summary: `${op.op} (on disk)` })
+      if (!isReadOp(op)) bridge?.emit({ type: 'edit', by: 'agent', author: agent.name, path: file, summary: `${op.op} (on disk)` })
       if (edits) logHistory(file, 'agent-op', agent.name, op.op)
       return { result: offline, live: false }
     }
@@ -237,9 +279,6 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       throw new Error(`Unknown method "${method}"`)
   }
 }
-
-/** Ops that only look, so they're not news to other agents. */
-const READ_ONLY_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets', 'charts', 'rules', 'merges', 'comments'])
 
 // ---------- subscribed agents ----------
 let runner: AgentRunner | null = null
@@ -418,11 +457,23 @@ let forceQuit = false
 /** Renders HTML to PDF bytes in a hidden window (Export → PDF for documents, sheets and printing). */
 async function htmlToPdf(html: string, title: string): Promise<Uint8Array> {
   const w = new BrowserWindow({ show: false, webPreferences: { javascript: false, offscreen: true } })
+  // the page may load only what a data: URL page could (PRINT_POLICY), however it's loaded
+  const page = withPrintPolicy(html.startsWith('<!doctype') ? html : wrapHtml(html, title))
+  const url = 'data:text/html;charset=utf-8,' + encodeURIComponent(page)
+  // Chromium won't load a URL over 2 MB (a design with a picture, a document with big images): such a page is read
+  // from a file only this user can read, in a folder of its own in temp
+  let dir: string | null = null
   try {
-    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html.startsWith('<!doctype') ? html : wrapHtml(html, title)))
+    if (url.length > 2_000_000) {
+      dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gauzzadocs-print-'))
+      const file = path.join(dir, 'page.html')
+      await fs.promises.writeFile(file, page, { mode: 0o600, flag: 'wx' })
+      await w.loadFile(file)
+    } else await w.loadURL(url)
     return await w.webContents.printToPDF({ pageSize: 'Letter', printBackground: true, preferCSSPageSize: true }) // slides: @page sets 16:9
   } finally {
     w.destroy()
+    if (dir) await fs.promises.rm(dir, { recursive: true, force: true })
   }
 }
 
@@ -451,9 +502,57 @@ const api: Record<string, (...a: any[]) => unknown> = {
   largeForget: (file: string) => work('largeForget', [file]),
   /** An installed font's file for a PDF font name (PDF text edits keep the PDF's own font when it's installed). */
   systemFont: (name: string) => work('systemFont', [name]),
+  // ---------- designs: fonts and diagram layout come from the worker (the window can't scan fonts or run ELK) ----------
+  /** The installed face closest to a design's font reference ({ family, weight, style, postscript? }), or null. */
+  designFontBytes: (ref: unknown) => work('designFontBytes', [ref]),
+  /** Liberation Sans Regular, what a design's text falls back to. */
+  designFallbackFont: () => work('designFallbackFont'),
+  /** A diagram's graph laid out by ELK. */
+  designLayout: (graph: unknown) => work('designLayout', [graph]),
+  /** Every installed font face ({ family, weight, style, postscript }), for a design's font picker. */
+  fontFaces: () => work('fontFaces'),
+  /** A design's thumbnail as a PNG data URL for its Home card, or null (none, or stale) for the kind's icon. */
+  designThumbnail: (file: string) => work('designThumbnail', [file]),
+  // ---------- a design into a document (Insert > Design): read-only ops, live when the design is open ----------
+  /** A design's artboards, [{ id, name, width, height }]. */
+  designArtboards: async (file: string) => ((await readDesign(file, { op: 'read' })) as { artboards: unknown[] }).artboards,
+  /** One artboard drawn for a document, as an export draws it, written nowhere (designImage in core/design/export.ts). */
+  designImage: (file: string, artboard: string | undefined, format: 'svg' | 'png') =>
+    designImage({ format, artboard }, { run: op => readDesign(file, op), rasterize: drawDesign }),
+  /**
+   * File > Download for a design: every artboard as SVG or PNG, drawn by the export op (in the open editor, unsaved
+   * changes and all) and written by exportDesign. One artboard asks where to save the file; several ask for a folder,
+   * and each is saved there as `<design> <artboard>.<ext>`. Null when the person cancels.
+   */
+  designDownload: async (file: string, format: 'svg' | 'png') => {
+    if (format !== 'svg' && format !== 'png') throw new Error('The format must be svg or png.')
+    const run = (op: AgentOp) => readDesign(file, op)
+    const { artboards } = (await run({ op: 'export', format, plan: true })) as { artboards: unknown[] }
+    let out: string
+    if (artboards.length === 1) {
+      const r = await dialog.showSaveDialog(win!, {
+        defaultPath: path.join(path.dirname(file), `${stem(file)}.${format}`),
+        filters: [{ name: format.toUpperCase(), extensions: [format] }]
+      })
+      if (r.canceled || !r.filePath) return null
+      out = r.filePath
+    } else {
+      const r = await dialog.showOpenDialog(win!, {
+        title: `Choose a folder for the ${artboards.length} artboards`,
+        buttonLabel: 'Save here',
+        defaultPath: path.dirname(file),
+        properties: ['openDirectory', 'createDirectory']
+      })
+      if (r.canceled || !r.filePaths[0]) return null
+      out = r.filePaths[0] + path.sep
+    }
+    const r = await exportDesign(file, { format, out }, { run, rasterize: drawDesign })
+    return { files: r.files, downgrades: r.downgrades, leftOut: r.leftOut.length }
+  },
   /** ctx: who changed it since the last save ({ authors, summary }); the person when the window does not say. */
   save: (file: string, payload: FilePayload, ctx?: WriteContext) => work<number>('saveFile', [file, payload, ctx ?? person()]),
-  newFile: (kind: Kind, ext?: string, dir?: string) => newFilePath(kind, ext, undefined, dir, person()),
+  /** preset: a new design's size (a PRESETS name or <w>x<h>). */
+  newFile: (kind: Kind, ext?: string, dir?: string, preset?: string) => newFilePath(kind, ext, undefined, dir, person(), preset),
   /** The person's name: comments and versions credit it, and agents @mention it to ask them something. */
   userName: () => userName(),
   // ---------- version history (worker jobs; see historyJobs.ts) ----------
@@ -523,7 +622,7 @@ const api: Record<string, (...a: any[]) => unknown> = {
   saveAsDialog: async (file: string) => {
     const ext = extOf(file)
     const kind = kindOf(file)
-    const choices: Record<Kind, string[]> = { doc: ['html', 'md', 'docx'], sheet: ['xlsx', 'csv', 'tsv'], pdf: ['pdf'], text: [ext || 'txt'], slides: ['pptx'] }
+    const choices: Record<Kind, string[]> = { doc: ['html', 'md', 'docx'], sheet: ['xlsx', 'csv', 'tsv'], pdf: ['pdf'], text: [ext || 'txt'], slides: ['pptx'], design: ['gdesign'] }
     const r = await dialog.showSaveDialog(win!, {
       defaultPath: file,
       filters: [...new Set([ext, ...choices[kind]])].filter(Boolean).map(e => ({ name: e.toUpperCase(), extensions: [e] }))

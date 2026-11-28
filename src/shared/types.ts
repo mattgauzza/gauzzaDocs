@@ -1,3 +1,4 @@
+import type { DesignFile } from './design/types'
 import type { Kind } from './kinds'
 
 // ---------- spreadsheet model (shared by the sheet editor, the formula engine, file IO and the CLI) ----------
@@ -92,6 +93,9 @@ export type FilePayload =
   // ---- slides (begin) ----
   | { kind: 'slides'; deck: Deck; lossy?: boolean; lossyReasons?: string[] }
   // ---- slides (end) ----
+  // A layered design (.gdesign). With `partial`, file.assets holds only the assets added since the last save: the rest
+  // are copied from the file on disk. `notes` says what opening the file repaired or dropped (validateDesign).
+  | { kind: 'design'; file: DesignFile; partial?: boolean; notes?: string[] }
 
 // ---------- presentations (.pptx), edited by renderer/src/slides; model helpers in shared/slides ----------
 
@@ -176,6 +180,20 @@ export interface AgentOp {
 export interface AgentInfo {
   name: string
   color?: string
+}
+
+/**
+ * Where a comment points, when the editor knows: a line, a cell, a page, or a design's artboard and layer (x and y,
+ * a point on the artboard). Comments in core/comments.ts and the window's mirror in renderer/lib.ts both use this.
+ */
+export interface CommentAnchor {
+  line?: number
+  cell?: string
+  page?: number
+  artboard?: string
+  layer?: string
+  x?: number
+  y?: number
 }
 
 export interface RecentFile {

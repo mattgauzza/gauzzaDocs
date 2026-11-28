@@ -1,4 +1,4 @@
-import type { AgentInfo, AgentOp, FilePayload, Settings } from '../../shared/types'
+import type { AgentInfo, AgentOp, CommentAnchor, FilePayload, Settings } from '../../shared/types'
 
 /**
  * Contract between the app shell (tabs, title bar, menus, autosave, agent routing, plugins) and the four editors
@@ -24,18 +24,30 @@ export interface EditorHandle {
   /** The same content without the side effects of saving (a PDF folds its pending edits into the page on save). */
   peekPayload?(): FilePayload | Promise<FilePayload>
   /**
+   * A payload getPayload returned is now on disk (called after the save succeeded). A design's save sends only the
+   * assets the file doesn't hold yet, so it needs to know which saves landed.
+   */
+  saved?(payload: FilePayload): void
+  /**
    * An agent op on the live editor (routed here from the CLI when the file is open). Implement 'read', 'write',
    * 'info' and the kind's ops (src/shared/ops.md). Edits must go through the editor so they are undoable and visible,
    * and must call props.onChange(). Throw an Error with a helpful message for bad input. The shell handles 'save'.
    */
   agent(op: AgentOp, agent: AgentInfo): Promise<unknown>
-  /** HTML for Print and Export → PDF (doc and sheet). */
-  getPrintHtml?(): string
+  /** HTML for Print and export to PDF (doc and sheet). A design's waits for its fonts, and throws when it can't print. */
+  getPrintHtml?(): string | Promise<string>
   /** Plain-text access, used by plugin formatters, previews and commands. */
   getText?(): string
   setText?(text: string): void // one undoable change
   getSelection?(): string
   replaceSelection?(text: string): void
+  /**
+   * Where a new comment points and the words its quote shows, when the editor's selection isn't text (a design's
+   * selected layer and its name). null when nothing is selected: the comment is on the whole file.
+   */
+  commentAnchor?(): { anchor: CommentAnchor; quote: string } | null
+  /** Shows what a comment points at: clicking a design comment selects its layer. */
+  showAnchor?(anchor: CommentAnchor): void
   /** Language id for plugins (text editor: from the extension; doc: 'html'; sheet: 'csv'). */
   language?: string
   /** Shared commands: 'undo' | 'redo' | 'find' | 'replace' | 'selectAll' | 'cut' | 'copy' | 'paste'. */

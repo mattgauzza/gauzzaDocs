@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { type Kind, baseName, kindOf } from '../../../shared/kinds'
+import { isScratchFile } from '../../../shared/scratchFiles'
 import type { RecentFile, Settings } from '../../../shared/types'
 import { type Project, api, shortDir, when } from '../lib'
-import { FolderBrowser, ProjectRail } from './Projects'
+import { ContextMenu, FolderBrowser, ProjectRail } from './Projects'
 import { Icon, KindIcon } from './icons'
+import { designSizeItems } from '../design/presets'
 
 /**
  * The start page, like Drive: a rail on the left with Recent and the person's projects (folders), and the main area
@@ -13,7 +15,8 @@ export function Home(props: {
   settings: Settings
   home: string
   onOpen(path: string): void
-  onNew(kind: Kind, ext?: string, dir?: string): void
+  /** preset: a new design's size (a PRESETS name). */
+  onNew(kind: Kind, ext?: string, dir?: string, preset?: string): void
   onOpenDialog(): void
   refreshKey: number
   say(msg: string): void
@@ -70,7 +73,7 @@ function RecentView(props: {
   settings: Settings
   home: string
   onOpen(path: string): void
-  onNew(kind: Kind, ext?: string): void
+  onNew(kind: Kind, ext?: string, dir?: string, preset?: string): void
   onOpenDialog(): void
   refreshKey: number
   view: 'list' | 'grid'
@@ -82,6 +85,7 @@ function RecentView(props: {
   const [filter, setFilter] = useState<'all' | Kind>('all')
   const [q, setQ] = useState('')
   const [folder, setFolder] = useState<{ name: string; path: string; dir: boolean; mtime: number }[]>([])
+  const [sizes, setSizes] = useState<{ x: number; y: number } | null>(null) // the size picker a new design starts with
 
   useEffect(() => {
     api.recent().then(setRecent)
@@ -93,7 +97,8 @@ function RecentView(props: {
     return recent.filter(r => (filter === 'all' || r.kind === filter) && (!needle || r.path.toLowerCase().includes(needle)))
   }, [recent, filter, q])
   const inFolder = folder
-    .filter(f => !f.dir && !recent.some(r => r.path.toLowerCase() === f.path.toLowerCase()))
+    // a design's lock and an export's temp file are there only while they're being written
+    .filter(f => !f.dir && !isScratchFile(f.name) && !recent.some(r => r.path.toLowerCase() === f.path.toLowerCase()))
     .filter(f => (filter === 'all' || kindOf(f.path) === filter) && (!q || f.name.toLowerCase().includes(q.toLowerCase())))
     .sort((a, b) => b.mtime - a.mtime)
 
@@ -101,6 +106,7 @@ function RecentView(props: {
     { kind: 'doc', label: 'Blank document', art: <div className="tpl-art doc"><span className="plus"><Icon name="plus" size={56} /></span></div> },
     { kind: 'sheet', label: 'Blank spreadsheet', art: <div className="tpl-art sheet"><span className="plus"><Icon name="plus" size={56} /></span></div> },
     { kind: 'slides', label: 'Blank presentation', art: <div className="tpl-art slides"><span className="plus" style={{ color: '#f4b400' }}><Icon name="plus" size={56} /></span></div> },
+    { kind: 'design', label: 'Blank design', art: <div className="tpl-art design"><span className="plus" style={{ color: '#7b5cf0' }}><Icon name="plus" size={56} /></span></div> },
     { kind: 'doc', ext: 'md', label: 'Markdown doc', art: <div className="tpl-art md"><b>M↓</b></div> },
     { kind: 'doc', ext: 'docx', label: 'Word document', art: <div className="tpl-art docx"><b>W</b></div> },
     { kind: 'text', label: 'Text or code', art: <div className="tpl-art code"><b>{'{ }'}</b></div> }
@@ -118,7 +124,16 @@ function RecentView(props: {
           </div>
           <div className="templates">
             {templates.map(t => (
-              <button key={t.label} className="tpl" onClick={() => props.onNew(t.kind, t.ext)}>
+              <button
+                key={t.label}
+                className="tpl"
+                onClick={e => {
+                  if (t.kind !== 'design') return props.onNew(t.kind, t.ext)
+                  // a design starts at a size: pick one under the tile
+                  const r = e.currentTarget.getBoundingClientRect()
+                  setSizes({ x: r.left, y: r.bottom + 4 })
+                }}
+              >
                 {t.art}
                 <span>{t.label}</span>
               </button>
@@ -130,13 +145,14 @@ function RecentView(props: {
           </div>
         </div>
       </section>
+      {sizes && <ContextMenu at={sizes} items={designSizeItems(preset => props.onNew('design', undefined, undefined, preset))} onClose={() => setSizes(null)} />}
 
       <section className="home-inner home-files">
         <div className="home-files-head">
           <div className="chips">
-            {(['all', 'doc', 'sheet', 'slides', 'pdf', 'text'] as const).map(k => (
+            {(['all', 'doc', 'sheet', 'slides', 'design', 'pdf', 'text'] as const).map(k => (
               <button key={k} className={`chip${filter === k ? ' on' : ''}`} onClick={() => setFilter(k)}>
-                {{ all: 'All', doc: 'Documents', sheet: 'Spreadsheets', slides: 'Presentations', pdf: 'PDFs', text: 'Text & code' }[k]}
+                {{ all: 'All', doc: 'Documents', sheet: 'Spreadsheets', slides: 'Presentations', design: 'Designs', pdf: 'PDFs', text: 'Text & code' }[k]}
               </button>
             ))}
           </div>
@@ -166,6 +182,21 @@ function RecentView(props: {
   )
 }
 
+/** A design's card art: the thumbnail its file holds, or the kind's icon when it has none or it's stale. */
+function DesignArt(props: { path: string; time: number }) {
+  const [src, setSrc] = useState<string | null>(null)
+  useEffect(() => {
+    let gone = false
+    api.designThumbnail(props.path).then(
+      url => !gone && setSrc(url),
+      () => !gone && setSrc(null)
+    )
+    return () => void (gone = true)
+  }, [props.path, props.time])
+  if (!src) return <KindIcon kind="design" size={48} />
+  return <img className="file-card-thumb" src={src} alt="" draggable={false} onError={() => setSrc(null)} />
+}
+
 function FileList(props: {
   view: 'list' | 'grid'
   items: { path: string; kind: Kind; time: number }[]
@@ -180,7 +211,7 @@ function FileList(props: {
       <div className="file-grid">
         {props.items.map(it => (
           <button key={it.path} className="file-card" onClick={() => props.onOpen(it.path)} title={it.path}>
-            <div className={`file-card-art ${it.kind}`}><KindIcon kind={it.kind} size={48} /></div>
+            <div className={`file-card-art ${it.kind}`}>{it.kind === 'design' ? <DesignArt path={it.path} time={it.time} /> : <KindIcon kind={it.kind} size={48} />}</div>
             <div className="file-card-meta">
               <KindIcon kind={it.kind} size={18} />
               <span className="grow ellipsis">{baseName(it.path)}</span>

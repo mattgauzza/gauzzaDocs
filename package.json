@@ -1,6 +1,6 @@
 {
   "name": "gauzzadocs",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "description": "A fast, Google Docs-style local editor for docs, sheets, PDFs and any text file, with a live CLI for agents",
   "main": "out/main/index.js",
@@ -31,6 +31,7 @@
       "out/**",
       "dist/cli.mjs",
       "resources/icon.png",
+      "resources/fonts/**",
       "plugins/**",
       "src/shared/ops.md",
       "package.json"
@@ -159,6 +160,15 @@
           "description": "PowerPoint presentation",
           "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
           "role": "Editor"
+        },
+        {
+          "ext": [
+            "gdesign"
+          ],
+          "name": "gauzzaDocs design",
+          "description": "gauzzaDocs design",
+          "mimeType": "application/x-gauzzadocs-design",
+          "role": "Editor"
         }
       ]
     },
@@ -264,6 +274,15 @@
           "description": "PowerPoint presentation",
           "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
           "role": "Editor"
+        },
+        {
+          "ext": [
+            "gdesign"
+          ],
+          "name": "gauzzaDocs design",
+          "description": "gauzzaDocs design",
+          "mimeType": "application/x-gauzzadocs-design",
+          "role": "Editor"
         }
       ]
     }
@@ -275,7 +294,9 @@
     "commander": "^15.1.0",
     "diff": "^9.0.0",
     "electron-updater": "^6.8.11",
+    "elkjs": "^0.10.2",
     "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
     "mammoth": "^1.13.0",
     "marked": "^18.3.0",
     "pdf-lib": "^1.17.1",

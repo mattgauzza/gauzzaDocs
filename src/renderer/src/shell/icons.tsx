@@ -39,7 +39,7 @@ export function Icon({ name, size = 20, className }: { name: keyof typeof P | st
   )
 }
 
-const KIND_COLOR: Record<Kind, string> = { doc: 'var(--doc)', sheet: 'var(--sheet)', pdf: 'var(--pdf)', text: 'var(--code)', slides: '#f4b400' }
+const KIND_COLOR: Record<Kind, string> = { doc: 'var(--doc)', sheet: 'var(--sheet)', pdf: 'var(--pdf)', text: 'var(--code)', slides: '#f4b400', design: '#7b5cf0' }
 
 /** The file-type badge: a page with a folded corner and a glyph, in the kind's color (like Drive). */
 export function KindIcon({ kind, size = 24 }: { kind: Kind; size?: number }) {
@@ -48,7 +48,14 @@ export function KindIcon({ kind, size = 24 }: { kind: Kind; size?: number }) {
     sheet: <path d="M7 11h10v7H7zm1.2 1.2v1.7h3.2v-1.7zm4.4 0v1.7h3.2v-1.7zm-4.4 2.9v1.7h3.2v-1.7zm4.4 0v1.7h3.2v-1.7z" fill="#fff" fillRule="evenodd" />,
     pdf: <text x="12" y="17.6" textAnchor="middle" fontSize="6.2" fontWeight="700" fill="#fff" fontFamily="Arial">PDF</text>,
     text: <path d="m9.6 16.6-2.4-2.4 2.4-2.4.9.9-1.5 1.5 1.5 1.5zm4.8 0-.9-.9 1.5-1.5-1.5-1.5.9-.9 2.4 2.4z" fill="#fff" />,
-    slides: <path d="M7 11h10v7H7zm1.3 1.3v4.4h7.4v-4.4z" fill="#fff" fillRule="evenodd" />
+    slides: <path d="M7 11h10v7H7zm1.3 1.3v4.4h7.4v-4.4z" fill="#fff" fillRule="evenodd" />,
+    // two layered squares, the back one faded
+    design: (
+      <g fill="#fff">
+        <path d="M7.5 10h6v6h-6z" opacity=".55" />
+        <path d="M10.5 12.5h6v6h-6z" />
+      </g>
+    )
   }
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden style={{ flex: 'none' }}>

@@ -7,7 +7,7 @@ import { docId } from '../../../shared/docId'
 
 const FORMAT: Record<string, string> = {
   html: 'HTML document', htm: 'HTML document', md: 'Markdown', markdown: 'Markdown', docx: 'Word document',
-  xlsx: 'Excel workbook', csv: 'CSV', tsv: 'TSV', pdf: 'PDF', pptx: 'PowerPoint presentation'
+  xlsx: 'Excel workbook', csv: 'CSV', tsv: 'TSV', pdf: 'PDF', pptx: 'PowerPoint presentation', gdesign: 'Design'
 }
 
 export const fileSize = (n: number) =>
@@ -56,7 +56,7 @@ export function StatusBar(props: {
     { text: docId(props.path), title: 'Document ID: agents can use it instead of the path (gdocs listen ' + docId(props.path) + '). Click to copy.', run: () => void navigator.clipboard.writeText(docId(props.path)) },
     { text: FORMAT[ext] || (languageOf(props.path) === 'text' ? 'Plain text' : ext.toUpperCase() || 'Text') },
     ...(props.payload?.kind === 'text' ? [{ text: props.payload.eol === '\r\n' ? 'CRLF' : 'LF', title: 'Line endings (kept as they were)' }] : []),
-    ...(['pdf', 'xlsx', 'docx', 'pptx'].includes(ext) ? [] : [{ text: 'UTF-8' }]),
+    ...(['pdf', 'xlsx', 'docx', 'pptx', 'gdesign'].includes(ext) ? [] : [{ text: 'UTF-8' }]),
     ...(stat ? [{ text: fileSize(stat.size), title: `On disk${stat.created ? `\nCreated ${new Date(stat.created).toLocaleString()}` : ''}`, run: () => api.reveal(props.path) }] : []),
     large
       ? { text: 'Read-only view', title: 'Too large to load; read from disk a screen at a time. gdocs can still edit it.' }

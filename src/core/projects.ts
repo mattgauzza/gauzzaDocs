@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { isScratchFile } from '../shared/scratchFiles'
 import { HOME, norm, samePath } from './paths'
 
 /**
@@ -115,7 +116,7 @@ export interface Entry {
 
 /** Folders skipped by search and hidden from listings: build output, dependencies and dot folders. */
 export const IGNORED = new Set(['node_modules', '.git', 'out', 'dist', 'release', '__pycache__', '.venv', 'venv'])
-const hidden = (name: string) => name.startsWith('.') || name === 'desktop.ini' || name === 'Thumbs.db'
+const hidden = (name: string) => name.startsWith('.') || name === 'desktop.ini' || name === 'Thumbs.db' || isScratchFile(name)
 
 /** One level of a folder: folders first, then files, each A to Z. Stats only this level. */
 export async function listFolder(dir: string): Promise<Entry[]> {

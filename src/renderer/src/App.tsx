@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type Kind, baseName, extOf, kindOf, lossy, stem } from '../../shared/kinds'
-import type { AgentInfo, AgentOp, Author, FilePayload, HistoryVersion, Settings } from '../../shared/types'
+import type { AgentInfo, AgentOp, Author, CommentAnchor, FilePayload, HistoryVersion, Settings } from '../../shared/types'
 import type { EditorHandle, EditorProps, MenuItem, MenuName } from './editor'
 import { type Listener, api, dirOf } from './lib'
 import { DONATE, EMPIRICAL_VOICE, REPO, SUBMIT_PLUGIN } from '../../shared/links'
@@ -12,6 +12,7 @@ import { Connections } from './shell/Connections'
 import { needsYouIn, trackFiles, useNeedsYou, useNeedsYouVersion } from './shell/needsYou'
 import { EditorSkeleton } from './shell/Skeleton'
 import { agentColor } from '../../shared/agentColors'
+import { isReadOp } from '../../shared/ops/readOps'
 import { ToolbarOverflow } from './shell/ToolbarOverflow'
 import { usePanelSize } from './shell/resize'
 import { Onboarding } from './shell/Onboarding'
@@ -25,6 +26,8 @@ import LargeViewer from './shell/LargeViewer'
 import { Participants } from './shell/Participants'
 import { SelectionBubble } from './shell/SelectionBubble'
 import { Icon, KindIcon, Logo } from './shell/icons'
+import { designSizeItems } from './design/presets'
+import { savePayload } from './shell/savePayload'
 import { MenuBar, MenuList } from './shell/Menus'
 import { type EditorAccess, type LoadedPlugins, fits, loadPlugins } from './shell/plugins'
 
@@ -49,8 +52,6 @@ const HOME = -1
 /** Save only on Ctrl+S? Word files say so per file (only when they hold things the editor would drop); PDFs always. */
 const isLossy = (t: { path: string; payload: FilePayload | null }) =>
   (t.payload?.kind === 'doc' || t.payload?.kind === 'slides') && t.payload.lossy !== undefined ? t.payload.lossy : lossy(t.path)
-/** Ops that only look: shown as "reading" rather than "editing". */
-const READ_OPS = new Set(['read', 'info', 'find', 'outline', 'get', 'sheets'])
 /** Tabs kept loaded besides the active one (most recently used). The rest sleep once saved, to keep memory low. */
 const WARM = 2
 const SLEEP_AFTER_MS = 45_000
@@ -138,6 +139,7 @@ export default function App() {
   const [commentsOpen, setCommentsOpen] = useState(false)
   const [commentCount, setCommentCount] = useState(0)
   const [draftQuote, setDraftQuote] = useState('')
+  const [draftAnchor, setDraftAnchor] = useState<CommentAnchor | undefined>()
   const [focusDraft, setFocusDraft] = useState(0)
   // Threads where an agent @mentioned the person and is waiting on them, for every open tab.
   useNeedsYouVersion()
@@ -162,7 +164,11 @@ export default function App() {
   const listensTo = (file: string) => listenersRef.current.filter(l => !l.path || l.path.toLowerCase() === file.toLowerCase())
   const addComment = () => {
     const t = tabsRef.current.find(x => x.id === activeRef.current)
-    const sel = t ? handles.current.get(t.id)?.getSelection?.() || '' : ''
+    const h = t ? handles.current.get(t.id) : undefined
+    // a design comments on its selected layer (quoted by name); text editors quote the selected text
+    const at = h?.commentAnchor?.() ?? null
+    const sel = at ? at.quote : h?.getSelection?.() || ''
+    setDraftAnchor(at?.anchor)
     setDraftQuote(sel.trim())
     setDraftText('')
     setCommentsOpen(true)
@@ -360,9 +366,10 @@ export default function App() {
   }, [])
   const open = (path: string) => openFile(path).catch(e => say((e as Error).message))
   const openDialog = async () => (await api.openDialog()).forEach(open)
-  const newFile = async (kind: Kind, ext?: string, dir?: string) => {
+  /** preset: a new design's size (a PRESETS name). */
+  const newFile = async (kind: Kind, ext?: string, dir?: string, preset?: string) => {
     try {
-      await open(await api.newFile(kind, ext, dir))
+      await open(await api.newFile(kind, ext, dir, preset))
     } catch (e) {
       say((e as Error).message)
     }
@@ -429,8 +436,9 @@ export default function App() {
     const flight = new Promise<void>(r => (done = r))
     inFlight.current.set(id, flight)
     try {
-      const payload = await h.getPayload()
-      const mtime = await api.save(t.path, payload, ctxOf(t, taken))
+      // a design's partial save that fails is made again in full (see savePayload)
+      const { payload, mtime } = await savePayload(h, p => api.save(t.path, p, ctxOf(t, taken)))
+      h.saved?.(payload)
       patch(id, { saving: false, dirty: (changeSeq.current.get(id) || 0) !== seq, mtime, saved: Date.now(), external: false })
       window.gd.changed(t.path, { type: 'saved' })
     } catch (e) {
@@ -456,6 +464,11 @@ export default function App() {
       if (t.kind === 'text') return hh.getText?.() ?? null
       if (t.kind === 'doc' || t.kind === 'sheet' || t.kind === 'slides') {
         const r = (await hh.agent({ op: 'read', format: t.kind === 'sheet' ? 'csv' : 'md' }, { name: 'gauzzaDocs' })) as { content?: string }
+        return typeof r?.content === 'string' ? r.content : null
+      }
+      if (t.kind === 'design') {
+        // one line per layer on every artboard, the same text version history compares
+        const r = (await hh.agent({ op: 'read', format: 'text', allArtboards: true }, { name: 'gauzzaDocs' })) as { content?: string }
         return typeof r?.content === 'string' ? r.content : null
       }
     } catch { /* not ready */ }
@@ -515,7 +528,9 @@ export default function App() {
     const to = await api.saveAsDialog(t.path)
     if (!to) return
     const h = handles.current.get(t.id)!
-    const payload = await h.getPayload()
+    let payload = await h.getPayload()
+    // A design's save sends only its new assets, the rest coming from its own file: a new file needs all of them.
+    if (payload.kind === 'design' && payload.partial && h.peekPayload) payload = await h.peekPayload()
     if (kindOf(to) !== t.kind) return say('Pick a format of the same kind (use File → Download to convert)')
     await api.save(to, payload, ctxOf(t, tabAuthors.current.get(t.id))) // the tab's authors, when it was changed since its last save
     // Reopen as the new file so its editor follows the new format (e.g. .md vs .html).
@@ -694,19 +709,23 @@ export default function App() {
       }
       return { ok: await close(t.id) }
     })
-    const offAgent = window.gd.serve('agent', async (req: { path: string; op: AgentOp; agent: AgentInfo }) => {
+    // own: the app reading a design for itself (Insert > Design), which no agent does, so no one shows as reading
+    const offAgent = window.gd.serve('agent', async (req: { path: string; op: AgentOp; agent: AgentInfo; own?: boolean }) => {
       const t = tabFor(req.path)
       if (!t) throw new Error('That file is no longer open')
       lastUsed.current.set(t.id, Date.now())
       await wake(t.id)
       await readyOrFail(t.id)
       const h = handles.current.get(t.id)!
-      const reading = READ_OPS.has(req.op.op)
-      // Each agent highlights in its own color: set it on this file's editor so other tabs keep theirs.
-      const color = req.agent.color || agentColor(req.agent.name)
-      document.querySelector<HTMLElement>(`.editor-host[data-tab="${t.id}"]`)?.style.setProperty('--agent', color)
-      patch(t.id, { agent: { ...req.agent, color, reading, until: Date.now() + 8000 } })
-      window.setTimeout(() => force(n => n + 1), 8100)
+      // ops that only look show as "reading" and never count as the agent's edits
+      const reading = isReadOp(req.op)
+      if (!req.own || !reading) {
+        // Each agent highlights in its own color: set it on this file's editor so other tabs keep theirs.
+        const color = req.agent.color || agentColor(req.agent.name)
+        document.querySelector<HTMLElement>(`.editor-host[data-tab="${t.id}"]`)?.style.setProperty('--agent', color)
+        patch(t.id, { agent: { ...req.agent, color, reading, until: Date.now() + 8000 } })
+        window.setTimeout(() => force(n => n + 1), 8100)
+      }
       if (req.op.op === 'save') {
         await save(t.id, { explicit: true })
         return { ok: true, path: t.path }
@@ -841,16 +860,34 @@ export default function App() {
   const print = async (t: Tab) => {
     const hh = handles.current.get(t.id)
     if (t.kind === 'pdf') return api.reveal(t.path)
-    const html = hh?.getPrintHtml?.() ?? `<pre style="font: 10pt Consolas, monospace; white-space: pre-wrap">${(hh?.getText?.() || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</pre>`
-    say('Preparing to print…')
-    await api.print(html, stem(t.path))
+    try {
+      const html = (await hh?.getPrintHtml?.()) ?? `<pre style="font: 10pt Consolas, monospace; white-space: pre-wrap">${(hh?.getText?.() || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)}</pre>`
+      say('Preparing to print...')
+      await api.print(html, stem(t.path))
+    } catch (e) {
+      say(`Could not print ${baseName(t.path)}: ${errorText(e)}`)
+    }
   }
   const exportAs = async (t: Tab, format: string) => {
+    if (t.kind === 'design') return downloadDesign(t, format as 'svg' | 'png')
     const hh = handles.current.get(t.id)
     if (!hh) return
     const payload = await (hh.peekPayload ?? hh.getPayload)()
-    const out = await api.exportFile(t.path, payload, format, hh.getPrintHtml?.())
+    const out = await api.exportFile(t.path, payload, format, format === 'pdf' ? await hh.getPrintHtml?.() : undefined)
     if (out) say(`Saved ${baseName(out)}`)
+  }
+
+  /** A design's artboards as SVG or PNG files, with what the format can't hold and any layers left out. */
+  const downloadDesign = async (t: Tab, format: 'svg' | 'png') => {
+    try {
+      const r = await api.designDownload(t.path, format)
+      if (!r) return
+      const parts = [r.files.length === 1 ? `Saved ${baseName(r.files[0])}.` : `Saved ${r.files.length} files.`]
+      if (r.leftOut) parts.push(`${r.leftOut} ${r.leftOut === 1 ? 'layer was' : 'layers were'} left out.`)
+      say([...parts, ...r.downgrades].join(' '))
+    } catch (e) {
+      say((e as Error)?.message || String(e))
+    }
   }
 
   // ---------- keyboard ----------
@@ -903,7 +940,8 @@ export default function App() {
       sheet: [['Excel (.xlsx)', 'xlsx'], ['Comma separated (.csv)', 'csv'], ['Tab separated (.tsv)', 'tsv'], ['PDF (.pdf)', 'pdf']],
       pdf: [],
       text: [],
-      slides: [['PowerPoint (.pptx)', 'pptx'], ['PDF (.pdf)', 'pdf'], ['Markdown outline (.md)', 'md']] // slides
+      slides: [['PowerPoint (.pptx)', 'pptx'], ['PDF (.pdf)', 'pdf'], ['Markdown outline (.md)', 'md']], // slides
+      design: [['SVG (.svg)', 'svg'], ['PNG (.png)', 'png']]
     }
     const sep: MenuItem = { label: '', sep: true }
     const file: MenuItem[] = [
@@ -911,6 +949,7 @@ export default function App() {
         { label: 'Document', run: () => newFile('doc') },
         { label: 'Spreadsheet', run: () => newFile('sheet') },
         { label: 'Presentation', run: () => newFile('slides') }, // slides
+        { label: 'Design', submenu: designSizeItems(preset => newFile('design', undefined, undefined, preset)) },
         { label: 'Markdown document', run: () => newFile('doc', 'md') },
         { label: 'Word document', run: () => newFile('doc', 'docx') },
         { label: 'Text file', run: () => newFile('text') }
@@ -1153,8 +1192,9 @@ export default function App() {
           })}
         </div>
         {cur && commentsOpen && active !== HOME && (
-          <CommentsPanel key={cur.path} path={cur.path} listeners={listeners} draftQuote={draftQuote} draftText={draftText} focusDraft={focusDraft}
-            focusThread={focusedThread} onClose={() => setCommentsOpen(false)} onCount={setCommentCount} />
+          <CommentsPanel key={cur.path} path={cur.path} listeners={listeners} draftQuote={draftQuote} draftAnchor={draftAnchor} draftText={draftText} focusDraft={focusDraft}
+            focusThread={focusedThread} onClose={() => setCommentsOpen(false)} onCount={setCommentCount}
+            onPick={t => t.anchor && handles.current.get(cur.id)?.showAnchor?.(t.anchor)} />
         )}
         {cur && historyOpen && active !== HOME && (
           <HistoryPanel key={cur.path} path={cur.path} dirty={cur.dirty} refreshKey={cur.mtime} onClose={() => setHistoryOpen(false)}
